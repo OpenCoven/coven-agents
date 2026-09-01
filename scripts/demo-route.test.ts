@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
+import { dirname, extname, relative, resolve } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
+const repositoryRoot = fileURLToPath(new URL("../", import.meta.url));
 const rootPageUrl = new URL("../app/page.tsx", import.meta.url);
 const chatRootPageUrl = new URL("../app/(chat)/page.tsx", import.meta.url);
 const nestedDemoPageUrl = new URL("../app/demo/page.tsx", import.meta.url);
@@ -26,6 +29,72 @@ const chatPageUrl = new URL(
 
 function read(url: URL) {
   return readFileSync(url, "utf8");
+}
+
+function importedSpecifiers(source: string): string[] {
+  return [
+    ...source.matchAll(
+      /(?:import|export)\s+(?:[\s\S]*?\s+from\s+)?["']([^"']+)["']/gu
+    ),
+  ]
+    .map((match) => match[1] ?? "")
+    .filter(Boolean);
+}
+
+function resolveLocalImport(
+  importer: string,
+  specifier: string
+): string | null {
+  const base = specifier.startsWith("@/")
+    ? resolve(repositoryRoot, specifier.slice(2))
+    : specifier.startsWith(".")
+      ? resolve(dirname(importer), specifier)
+      : null;
+  if (!base) {
+    return null;
+  }
+
+  const candidates = extname(base)
+    ? [base]
+    : [
+        `${base}.ts`,
+        `${base}.tsx`,
+        `${base}.json`,
+        resolve(base, "index.ts"),
+        resolve(base, "index.tsx"),
+      ];
+  return candidates.find((candidate) => existsSync(candidate)) ?? null;
+}
+
+function transitiveDemoGraph(entrypoint: URL) {
+  const pending = [fileURLToPath(entrypoint)];
+  const visited = new Set<string>();
+  const external = new Set<string>();
+
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (!current || visited.has(current)) {
+      continue;
+    }
+    visited.add(current);
+    if (current.endsWith(".json")) {
+      continue;
+    }
+
+    for (const specifier of importedSpecifiers(readFileSync(current, "utf8"))) {
+      const resolved = resolveLocalImport(current, specifier);
+      if (resolved) {
+        pending.push(resolved);
+      } else if (!(specifier.startsWith(".") || specifier.startsWith("@/"))) {
+        external.add(specifier);
+      }
+    }
+  }
+
+  return {
+    external: [...external].sort(),
+    local: [...visited].map((path) => relative(repositoryRoot, path)).sort(),
+  };
 }
 
 test("root ownership sits outside the chat layout and has no nested demo page", () => {
@@ -140,5 +209,48 @@ test("the demo route tree has no live service or network dependency", () => {
     for (const pattern of forbidden) {
       assert.doesNotMatch(source, pattern);
     }
+  }
+});
+
+test("the complete demo import graph cannot reach subscriber or provider authority", () => {
+  const graph = transitiveDemoGraph(rootPageUrl);
+  const forbiddenLocalRoots = [
+    "app/api/",
+    "lib/agents/",
+    "lib/auth/",
+    "lib/billing/",
+    "lib/credentials/",
+    "lib/db/",
+    "lib/runner/",
+    "lib/session.ts",
+    "lib/subscription",
+  ];
+  const forbiddenPackages = [
+    "@daytona/sdk",
+    "drizzle-orm",
+    "next-auth",
+    "postgres",
+    "redis",
+    "stripe",
+  ];
+
+  assert.ok(graph.local.includes("lib/demo/load.ts"));
+  for (const path of graph.local) {
+    assert.equal(
+      forbiddenLocalRoots.some(
+        (root) => path === root || path.startsWith(root)
+      ),
+      false,
+      `demo import graph reached ${path}`
+    );
+  }
+  for (const specifier of graph.external) {
+    assert.equal(
+      forbiddenPackages.some(
+        (root) => specifier === root || specifier.startsWith(`${root}/`)
+      ),
+      false,
+      `demo import graph reached ${specifier}`
+    );
   }
 });

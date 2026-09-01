@@ -16,9 +16,14 @@ import {
   DaytonaServiceUnavailableError,
   DaytonaTimeoutError,
   DaytonaUnprocessableEntityError,
+  type Resources,
   type Sandbox,
   SandboxState,
 } from "@daytona/sdk";
+import {
+  observeRunnerResourceOperation,
+  type RunnerResourceOperationObserver,
+} from "../resource-observability";
 import type { RunnerStore } from "../store";
 import type {
   RunnerAgentRecord,
@@ -26,17 +31,22 @@ import type {
   RunnerOperator,
   RunnerPrincipal,
 } from "../types";
-import { daytonaDomainAllowList, daytonaSnapshotConfiguration } from "./config";
+import {
+  type DaytonaSandboxResourcePolicy,
+  daytonaDomainAllowList,
+  daytonaSandboxResourcePolicy,
+  daytonaSnapshotConfiguration,
+} from "./config";
 import {
   daytonaProbeSessionName,
   daytonaSandboxLabels,
   daytonaSandboxName,
 } from "./names";
 
-const DEFAULT_AUTO_ARCHIVE_MINUTES = 10_080;
-const DEFAULT_AUTO_STOP_MINUTES = 15;
 const SANDBOX_OPERATION_TIMEOUT_SECONDS = 60;
 const SANDBOX_TRANSITION_POLL_INTERVAL_MS = 1000;
+export const DAYTONA_CODE_TOOLBOX_LANGUAGE_LABEL = "code-toolbox-language";
+export const DAYTONA_SANDBOX_LANGUAGE = "python";
 export const SANDBOX_PROVISIONING_TIMEOUT_MS = 5 * 60 * 1000;
 export const SANDBOX_WARM_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -47,20 +57,30 @@ export type DaytonaProviderErrorKind =
 
 export type DaytonaSandboxCreateErrorKind = "ambiguous" | "definite_rejection";
 
+/**
+ * Daytona 0.207's snapshot-create declaration omits `resources`, but its
+ * runtime intentionally forwards the field. Keep the narrow SDK mismatch
+ * explicit: this is still assignable to the declared snapshot parameters.
+ */
+export type DaytonaSandboxCreateParameters = CreateSandboxFromSnapshotParams &
+  Readonly<{
+    resources: Readonly<Required<Pick<Resources, "cpu" | "disk" | "memory">>>;
+  }>;
+
 export type DaytonaSandboxService = Readonly<{
   create: (
-    parameters: CreateSandboxFromSnapshotParams,
+    parameters: DaytonaSandboxCreateParameters,
     options?: Readonly<{ timeout?: number }>
   ) => Promise<Sandbox>;
   get: (sandboxIdOrName: string) => Promise<Sandbox>;
 }>;
 
-export type DaytonaSandboxConfiguration = Readonly<{
-  autoArchiveInterval: number;
-  autoStopInterval: number;
-  domainAllowList?: string;
-  snapshotName: string;
-}>;
+export type DaytonaSandboxConfiguration = DaytonaSandboxResourcePolicy &
+  Readonly<{
+    domainAllowList?: string;
+    snapshotName: string;
+    target: "eu" | "us";
+  }>;
 
 export type DaytonaSandboxLifecycleDependencies = Readonly<{
   deadline?: number;
@@ -73,6 +93,7 @@ export type DaytonaSandboxLifecycleDependencies = Readonly<{
 export type DaytonaSandboxDependencies = Readonly<{
   daytona: DaytonaSandboxService;
   lifecycle?: DaytonaSandboxLifecycleDependencies;
+  observe?: RunnerResourceOperationObserver;
   store: RunnerStore;
 }>;
 
@@ -102,39 +123,16 @@ export class DaytonaSandboxLifecycleError extends Error {
   }
 }
 
-function nonNegativeMinutes(
-  environment: NodeJS.ProcessEnv,
-  name: "DAYTONA_AUTO_ARCHIVE_MINUTES" | "DAYTONA_AUTO_STOP_MINUTES",
-  defaultValue: number
-): number {
-  const value = environment[name]?.trim() ?? String(defaultValue);
-  if (!/^\d+$/u.test(value)) {
-    throw new Error(`${name} must be a non-negative safe integer.`);
-  }
-  const minutes = Number(value);
-  if (!Number.isSafeInteger(minutes) || minutes < 0) {
-    throw new Error(`${name} must be a non-negative safe integer.`);
-  }
-  return minutes;
-}
-
 export function daytonaSandboxConfiguration(
   environment: NodeJS.ProcessEnv = process.env
 ): DaytonaSandboxConfiguration {
   const domainAllowList = daytonaDomainAllowList(environment);
+  const snapshotConfiguration = daytonaSnapshotConfiguration(environment);
   return {
-    autoArchiveInterval: nonNegativeMinutes(
-      environment,
-      "DAYTONA_AUTO_ARCHIVE_MINUTES",
-      DEFAULT_AUTO_ARCHIVE_MINUTES
-    ),
-    autoStopInterval: nonNegativeMinutes(
-      environment,
-      "DAYTONA_AUTO_STOP_MINUTES",
-      DEFAULT_AUTO_STOP_MINUTES
-    ),
+    ...daytonaSandboxResourcePolicy(environment),
     ...(domainAllowList ? { domainAllowList } : {}),
-    snapshotName: daytonaSnapshotConfiguration(environment).snapshotName,
+    snapshotName: snapshotConfiguration.snapshotName,
+    target: snapshotConfiguration.target,
   };
 }
 
@@ -213,18 +211,23 @@ function isProbeCleanupPending(
 function sandboxCreateParameters(
   agent: RunnerAgentRecord,
   configuration: DaytonaSandboxConfiguration
-): CreateSandboxFromSnapshotParams {
+): DaytonaSandboxCreateParameters {
   return {
     autoArchiveInterval: configuration.autoArchiveInterval,
-    autoDeleteInterval: -1,
+    autoDeleteInterval: configuration.autoDeleteInterval,
+    autoPauseInterval: 0,
     autoStopInterval: configuration.autoStopInterval,
     ...(configuration.domainAllowList
       ? { domainAllowList: configuration.domainAllowList }
       : {}),
     ephemeral: false,
     labels: daytonaSandboxLabels(agent.tenant, agent.id),
+    language: DAYTONA_SANDBOX_LANGUAGE,
     name: daytonaSandboxName(agent.tenant, agent.id),
+    public: false,
+    resources: configuration.resources,
     snapshot: configuration.snapshotName,
+    ttlMinutes: configuration.ttlMinutes,
   };
 }
 
@@ -671,6 +674,10 @@ async function createSandbox(
         dependencies.lifecycle
       );
       created = true;
+      observeRunnerResourceOperation(dependencies.observe, {
+        operation: "create",
+        outcome: "created",
+      });
     } catch (createError) {
       if (
         createError instanceof DaytonaSandboxLifecycleError &&
@@ -682,9 +689,15 @@ async function createSandbox(
           createError
         );
       }
-      if (
-        classifyDaytonaSandboxCreateError(createError) === "definite_rejection"
-      ) {
+      const createOutcome = classifyDaytonaSandboxCreateError(createError);
+      observeRunnerResourceOperation(dependencies.observe, {
+        operation: "create",
+        outcome:
+          createOutcome === "definite_rejection"
+            ? "provider_rejected"
+            : "ambiguous",
+      });
+      if (createOutcome === "definite_rejection") {
         await failSandboxReservation(reserved.value, persistence);
         throw createError;
       }

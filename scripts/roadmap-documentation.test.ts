@@ -11,10 +11,10 @@ function read(path: string): string {
 test("the current-state snapshot covers merged product and planning surfaces", () => {
   const currentState = read("docs/roadmap/current-state.md");
 
-  assert.match(currentState, /Snapshot date: 2026-08-31/u);
+  assert.match(currentState, /Snapshot date: 2026-09-01/u);
   assert.match(
     currentState,
-    /Application baseline: `f0ffb3124ab6a39d776bd9f7b5e77fd652b4c27e`/u
+    /Application baseline: `690dcfe897127b638def9c03a9de83c17fc376a2`/u
   );
 
   for (const evidence of [
@@ -26,6 +26,10 @@ test("the current-state snapshot covers merged product and planning surfaces", (
     "components/billing/subscription-card.tsx",
     "Credential authorization",
     "lib/credentials/device-poll-commit.ts",
+    "Credential custody",
+    "lib/runner/daytona/process.ts",
+    "Guest replay",
+    "tests/e2e/demo-adversarial.test.ts",
     "Coordinated teams",
     "lib/teams/",
     "Deployment posture",
@@ -48,10 +52,10 @@ test("the current-state snapshot covers merged product and planning surfaces", (
 test("the verification matrix records the newly verified repository boundaries", () => {
   const matrix = read("docs/roadmap/verification-matrix.md");
 
-  assert.match(matrix, /as of 2026-08-31/u);
+  assert.match(matrix, /as of 2026-09-01/u);
   assert.match(
     matrix,
-    /application baseline `f0ffb3124ab6a39d776bd9f7b5e77fd652b4c27e`/u
+    /application baseline `690dcfe897127b638def9c03a9de83c17fc376a2`/u
   );
 
   for (const capability of [
@@ -60,6 +64,8 @@ test("the verification matrix records the newly verified repository boundaries",
     "Subscriber checkout surfaces",
     "Credential authorization lifecycle",
     "Coordinated team execution",
+    "Guest replay",
+    "Hermetic PostgreSQL browser certification",
     "Planning document registry",
     "Vercel Git deployment disablement",
   ]) {

@@ -6,30 +6,19 @@ import {
   isRunnableHarness,
   UNSUPPORTED_HARNESS_RUN_ERROR,
 } from "@opencoven/harness";
-import {
-  acquireRunnerCredential,
-  type RunnerCredentialAcquireInput,
-  type RunnerCredentialAcquireResult,
-  type RunnerCredentialDependencies,
+import type {
+  RunnerCredentialAcquireInput,
+  RunnerCredentialAcquireResult,
 } from "@/lib/credentials/runner-credential";
 import {
   type RunnerAttemptRedactionEnvelope,
   sealRunnerAttemptRedactionFromEnvironment,
 } from "./attempt-redaction";
-import { daytonaDispatchAuthorizers } from "./daytona/dispatch";
 import {
-  DaytonaProcessError,
-  type DaytonaProcessSandbox,
-  type DaytonaStartedProcess,
-  inspectRestrictedWorkspace,
-  type RestrictedWorkspaceInspection,
-  startDaytonaProcess,
-} from "./daytona/process";
-import {
-  type DaytonaSandboxConfiguration,
-  type DaytonaSandboxDependencies,
-  ensureDaytonaSandboxForDispatch,
-} from "./daytona/sandbox";
+  type RunnerExecutionAuthorizers,
+  type RunnerExecutor,
+  runnerDispatchAuthorizers,
+} from "./executor";
 import type { RunnerStore } from "./store";
 import {
   DEFAULT_RUNNER_ADMISSION_LIMITS,
@@ -157,6 +146,11 @@ export type RunnerDispatchResult =
       runId: string;
     };
 
+export type RunnerCredentialAuthority =
+  | "allowed"
+  | "authority_revoked"
+  | "unavailable";
+
 export type RunnerDispatchDependencies = Readonly<{
   acquireCredential: (
     input: RunnerCredentialAcquireInput
@@ -165,67 +159,23 @@ export type RunnerDispatchDependencies = Readonly<{
   credentialInput: (
     run: RunnerRunRecord,
     agent: RunnerAgentRecord
-  ) => RunnerCredentialAcquireInput;
+  ) => RunnerCredentialAcquireInput | Promise<RunnerCredentialAcquireInput>;
   dispatchLeaseMs?: number;
-  ensureSandbox: (
-    authority: RunnerDispatchAuthority
-  ) => Promise<{ agent: RunnerAgentRecord; sandbox: DaytonaProcessSandbox }>;
-  inspectRestrictedWorkspace?: (
-    sandbox: DaytonaProcessSandbox,
-    workspace: string
-  ) => Promise<RestrictedWorkspaceInspection>;
+  executor: RunnerExecutor;
   limits: RunnerAdmissionLimits;
   operator: RunnerOperator;
   randomToken?: () => string;
+  revalidateCredentialAuthority?: (
+    run: RunnerRunRecord
+  ) => Promise<RunnerCredentialAuthority>;
   sealAttemptRedaction?: (input: {
     attemptId: string;
     credential: string;
     runId: string;
     tenant: string;
   }) => Promise<RunnerAttemptRedactionEnvelope>;
-  startProcess?: (
-    input: Parameters<typeof startDaytonaProcess>[0]
-  ) => Promise<DaytonaStartedProcess>;
   store: DispatchStore;
 }>;
-
-export type DaytonaRunnerDispatchDependencies = Omit<
-  RunnerDispatchDependencies,
-  "acquireCredential" | "ensureSandbox" | "store"
-> &
-  Readonly<{
-    credentialDependencies: RunnerCredentialDependencies;
-    sandboxConfiguration: DaytonaSandboxConfiguration;
-    sandboxDependencies: Omit<DaytonaSandboxDependencies, "store">;
-    store: RunnerStore;
-  }>;
-
-/**
- * Production composition for the injectable dispatcher. The lower-level
- * service remains testable without a Daytona SDK or database, while this
- * adapter guarantees dispatch uses the run-fenced sandbox lifecycle.
- */
-export function daytonaRunnerDispatchDependencies(
-  dependencies: DaytonaRunnerDispatchDependencies
-): RunnerDispatchDependencies {
-  return {
-    ...dependencies,
-    acquireCredential: (input) =>
-      acquireRunnerCredential(input, dependencies.credentialDependencies),
-    ensureSandbox: async (authority) => {
-      const ensured = await ensureDaytonaSandboxForDispatch(
-        dependencies.operator,
-        authority,
-        dependencies.sandboxConfiguration,
-        { ...dependencies.sandboxDependencies, store: dependencies.store }
-      );
-      return {
-        agent: ensured.agent,
-        sandbox: ensured.sandbox as unknown as DaytonaProcessSandbox,
-      };
-    },
-  };
-}
 
 function configuredLimit(
   environment: RunnerAdmissionEnvironment,
@@ -462,6 +412,42 @@ async function releaseUnstarted(
   }
 }
 
+async function releasePreparedDispatch(
+  authorizers: RunnerExecutionAuthorizers,
+  attemptId: NonNullable<RunnerDispatchAuthority["attemptId"]>,
+  runId: string
+): Promise<RunnerDispatchAuthority | null> {
+  try {
+    return await authorizers.releasePreparation({ attemptId, runId });
+  } catch {
+    return null;
+  }
+}
+
+async function requeuePreparedDispatch(
+  dependencies: RunnerDispatchDependencies,
+  authorizers: RunnerExecutionAuthorizers,
+  attemptId: NonNullable<RunnerDispatchAuthority["attemptId"]>,
+  runId: string
+): Promise<boolean> {
+  const released = await releasePreparedDispatch(authorizers, attemptId, runId);
+  return released ? await releaseUnstarted(dependencies, released) : false;
+}
+
+async function revalidateCredentialAuthority(
+  dependencies: RunnerDispatchDependencies,
+  run: RunnerRunRecord
+): Promise<RunnerCredentialAuthority> {
+  if (!dependencies.revalidateCredentialAuthority) {
+    return "allowed";
+  }
+  try {
+    return await dependencies.revalidateCredentialAuthority(run);
+  } catch {
+    return "unavailable";
+  }
+}
+
 export async function terminalizeUnstartedDispatchFailure(
   dependencies: Readonly<{
     clock?: () => Date;
@@ -521,17 +507,35 @@ export async function terminalizeUnstartedDispatchFailure(
   }
 }
 
-function cleanupMayRemain(error: unknown): boolean {
-  return (
-    error instanceof DaytonaProcessError &&
-    (error.code === "durable_release_failed" ||
-      error.code === "sandbox_reset_required")
+async function terminalizePreparedDispatchFailure(
+  dependencies: RunnerDispatchDependencies,
+  authorizers: RunnerExecutionAuthorizers,
+  attemptId: NonNullable<RunnerDispatchAuthority["attemptId"]>,
+  run: RunnerRunRecord,
+  code: Parameters<typeof terminalizeUnstartedDispatchFailure>[3],
+  message: string,
+  retryable: boolean
+): Promise<boolean> {
+  const released = await releasePreparedDispatch(
+    authorizers,
+    attemptId,
+    run.id
   );
+  return released
+    ? await terminalizeUnstartedDispatchFailure(
+        dependencies,
+        released,
+        run,
+        code,
+        message,
+        retryable
+      )
+    : false;
 }
 
 /**
- * Starts one already-claimed run. It holds no plaintext credential outside
- * the `startProcess` call and never converts provider errors into output.
+ * Starts one already-claimed run. It holds no plaintext credential outside the
+ * executor start boundary and never converts provider errors into output.
  */
 export async function dispatchRunnerClaim(
   claimed: RunnerClaimedDispatch,
@@ -573,11 +577,39 @@ export async function dispatchRunnerClaim(
       : { kind: "retained", reason: "cleanup_pending", runId: run.id };
   }
 
-  let ensured: { agent: RunnerAgentRecord; sandbox: DaytonaProcessSandbox };
+  const callbacks = runnerDispatchAuthorizers(
+    dependencies.store,
+    dependencies.operator,
+    authority,
+    dependencies.executor.executionProvenance,
+    dependencies.executor.attemptIdForRun?.(run.id)
+  );
+  let preparedAttemptId: NonNullable<RunnerDispatchAuthority["attemptId"]>;
   try {
-    ensured = await dependencies.ensureSandbox(authority);
+    const prepared = await callbacks.authorizePreparation({ runId: run.id });
+    if (!prepared) {
+      return { kind: "retained", reason: "launch_fenced", runId: run.id };
+    }
+    preparedAttemptId = prepared;
   } catch {
-    return (await releaseUnstarted(dependencies, authority))
+    return { kind: "retained", reason: "launch_fenced", runId: run.id };
+  }
+
+  let ensured: Awaited<ReturnType<RunnerExecutor["ensureExecutionContext"]>>;
+  try {
+    ensured = await dependencies.executor.ensureExecutionContext(
+      callbacks.currentAuthority()
+    );
+  } catch (error) {
+    if (dependencies.executor.isCleanupPending(error)) {
+      return { kind: "retained", reason: "cleanup_pending", runId: run.id };
+    }
+    return (await requeuePreparedDispatch(
+      dependencies,
+      callbacks,
+      preparedAttemptId,
+      run.id
+    ))
       ? { kind: "retryable", reason: "sandbox_unavailable", runId: run.id }
       : { kind: "retained", reason: "cleanup_pending", runId: run.id };
   }
@@ -585,9 +617,10 @@ export async function dispatchRunnerClaim(
     run.executionPermission !== "unrestricted" &&
     ensured.agent.sandboxTrust === "unrestricted"
   ) {
-    return (await terminalizeUnstartedDispatchFailure(
+    return (await terminalizePreparedDispatchFailure(
       dependencies,
-      authority,
+      callbacks,
+      preparedAttemptId,
       run,
       "sandbox_trust_conflict",
       "Restricted runner execution requires a clean sandbox trust profile.",
@@ -600,23 +633,52 @@ export async function dispatchRunnerClaim(
     run.executionPermission !== "unrestricted" &&
     ensured.agent.warmStatus === "provisioning"
   ) {
-    return (await releaseUnstarted(dependencies, authority))
+    return (await requeuePreparedDispatch(
+      dependencies,
+      callbacks,
+      preparedAttemptId,
+      run.id
+    ))
       ? { kind: "retryable", reason: "sandbox_unavailable", runId: run.id }
       : { kind: "retained", reason: "cleanup_pending", runId: run.id };
   }
   if (run.executionPermission !== "unrestricted") {
-    const inspection = await (
-      dependencies.inspectRestrictedWorkspace ?? inspectRestrictedWorkspace
-    )(ensured.sandbox, run.agentWorkspace as string);
+    let inspection: Awaited<
+      ReturnType<RunnerExecutor["inspectWorkspaceSafety"]>
+    >;
+    try {
+      inspection = await dependencies.executor.inspectWorkspaceSafety(
+        ensured.context,
+        run.agentWorkspace as string
+      );
+    } catch (error) {
+      if (dependencies.executor.isCleanupPending(error)) {
+        return { kind: "retained", reason: "cleanup_pending", runId: run.id };
+      }
+      return (await requeuePreparedDispatch(
+        dependencies,
+        callbacks,
+        preparedAttemptId,
+        run.id
+      ))
+        ? { kind: "retryable", reason: "sandbox_unavailable", runId: run.id }
+        : { kind: "retained", reason: "cleanup_pending", runId: run.id };
+    }
     if (inspection.kind === "unavailable") {
-      return (await releaseUnstarted(dependencies, authority))
+      return (await requeuePreparedDispatch(
+        dependencies,
+        callbacks,
+        preparedAttemptId,
+        run.id
+      ))
         ? { kind: "retryable", reason: "sandbox_unavailable", runId: run.id }
         : { kind: "retained", reason: "cleanup_pending", runId: run.id };
     }
     if (inspection.kind === "unsafe") {
-      return (await terminalizeUnstartedDispatchFailure(
+      return (await terminalizePreparedDispatchFailure(
         dependencies,
-        authority,
+        callbacks,
+        preparedAttemptId,
         run,
         "workspace_configuration_unsafe",
         "Restricted runner execution cannot load repository hooks or settings.",
@@ -627,14 +689,55 @@ export async function dispatchRunnerClaim(
     }
   }
 
-  const credential = await dependencies.acquireCredential(
-    dependencies.credentialInput(run, ensured.agent)
+  const authorityBeforeCredential = await revalidateCredentialAuthority(
+    dependencies,
+    run
   );
+  if (authorityBeforeCredential === "authority_revoked") {
+    return (await terminalizePreparedDispatchFailure(
+      dependencies,
+      callbacks,
+      preparedAttemptId,
+      run,
+      "authority_revoked",
+      "Run authority is no longer valid.",
+      false
+    ))
+      ? { kind: "refused", reason: "authority", runId: run.id }
+      : { kind: "retained", reason: "cleanup_pending", runId: run.id };
+  }
+  if (authorityBeforeCredential === "unavailable") {
+    return (await requeuePreparedDispatch(
+      dependencies,
+      callbacks,
+      preparedAttemptId,
+      run.id
+    ))
+      ? { kind: "retryable", reason: "credential_unavailable", runId: run.id }
+      : { kind: "retained", reason: "cleanup_pending", runId: run.id };
+  }
+
+  let credential: RunnerCredentialAcquireResult;
+  try {
+    credential = await dependencies.acquireCredential(
+      await dependencies.credentialInput(run, ensured.agent)
+    );
+  } catch {
+    return (await requeuePreparedDispatch(
+      dependencies,
+      callbacks,
+      preparedAttemptId,
+      run.id
+    ))
+      ? { kind: "retryable", reason: "credential_unavailable", runId: run.id }
+      : { kind: "retained", reason: "cleanup_pending", runId: run.id };
+  }
   if (credential.kind !== "acquired") {
     if (credential.kind === "refused") {
-      return (await terminalizeUnstartedDispatchFailure(
+      return (await terminalizePreparedDispatchFailure(
         dependencies,
-        authority,
+        callbacks,
+        preparedAttemptId,
         run,
         "capacity_refused",
         "Run capacity was unavailable.",
@@ -651,9 +754,10 @@ export async function dispatchRunnerClaim(
       credential.kind === "already_consumed" ||
       credential.kind === "released"
     ) {
-      return (await terminalizeUnstartedDispatchFailure(
+      return (await terminalizePreparedDispatchFailure(
         dependencies,
-        authority,
+        callbacks,
+        preparedAttemptId,
         run,
         "credential_unavailable",
         "Runner credential capacity is no longer available.",
@@ -667,18 +771,25 @@ export async function dispatchRunnerClaim(
         : { kind: "retained", reason: "cleanup_pending", runId: run.id };
     }
     if (credential.kind === "reservation_pending") {
-      return (await releaseUnstarted(dependencies, authority))
+      return (await requeuePreparedDispatch(
+        dependencies,
+        callbacks,
+        preparedAttemptId,
+        run.id
+      ))
         ? { kind: "retryable", reason: "credential_unavailable", runId: run.id }
         : { kind: "retained", reason: "cleanup_pending", runId: run.id };
     }
     if (credential.kind === "unavailable") {
       if (credential.error.code === "cleanup_pending") {
+        await releasePreparedDispatch(callbacks, preparedAttemptId, run.id);
         return { kind: "retained", reason: "cleanup_pending", runId: run.id };
       }
       if (credential.error.code === "no_credential") {
-        return (await terminalizeUnstartedDispatchFailure(
+        return (await terminalizePreparedDispatchFailure(
           dependencies,
-          authority,
+          callbacks,
+          preparedAttemptId,
           run,
           "no_credential",
           "No credential is configured for this runner.",
@@ -688,9 +799,10 @@ export async function dispatchRunnerClaim(
           : { kind: "retained", reason: "cleanup_pending", runId: run.id };
       }
       if (credential.error.code !== "capacity_unavailable") {
-        return (await terminalizeUnstartedDispatchFailure(
+        return (await terminalizePreparedDispatchFailure(
           dependencies,
-          authority,
+          callbacks,
+          preparedAttemptId,
           run,
           "credential_unavailable",
           "Runner credential could not be acquired.",
@@ -699,7 +811,12 @@ export async function dispatchRunnerClaim(
           ? { kind: "refused", reason: "credential", runId: run.id }
           : { kind: "retained", reason: "cleanup_pending", runId: run.id };
       }
-      return (await releaseUnstarted(dependencies, authority))
+      return (await requeuePreparedDispatch(
+        dependencies,
+        callbacks,
+        preparedAttemptId,
+        run.id
+      ))
         ? {
             kind: "retryable",
             reason: "credential_unavailable",
@@ -707,7 +824,12 @@ export async function dispatchRunnerClaim(
           }
         : { kind: "retained", reason: "cleanup_pending", runId: run.id };
     }
-    return (await releaseUnstarted(dependencies, authority))
+    return (await requeuePreparedDispatch(
+      dependencies,
+      callbacks,
+      preparedAttemptId,
+      run.id
+    ))
       ? { kind: "retryable", reason: "credential_unavailable", runId: run.id }
       : { kind: "retained", reason: "cleanup_pending", runId: run.id };
   }
@@ -715,26 +837,63 @@ export async function dispatchRunnerClaim(
   try {
     await credential.acquisition.commit();
   } catch {
+    const released = await releasePreparedDispatch(
+      callbacks,
+      preparedAttemptId,
+      run.id
+    );
+    if (!released) {
+      return { kind: "retained", reason: "cleanup_pending", runId: run.id };
+    }
     try {
       await credential.acquisition.compensate();
     } catch {
       return { kind: "retained", reason: "cleanup_pending", runId: run.id };
     }
-    return (await releaseUnstarted(dependencies, authority))
+    return (await releaseUnstarted(dependencies, released))
       ? { kind: "retryable", reason: "credential_unavailable", runId: run.id }
       : { kind: "retained", reason: "cleanup_pending", runId: run.id };
   }
 
-  const callbacks = daytonaDispatchAuthorizers(
-    dependencies.store,
-    dependencies.operator,
-    authority
+  const authorityBeforeStart = await revalidateCredentialAuthority(
+    dependencies,
+    run
   );
-  let started: DaytonaStartedProcess;
+  if (authorityBeforeStart !== "allowed") {
+    try {
+      await credential.acquisition.compensate();
+    } catch {
+      return { kind: "retained", reason: "cleanup_pending", runId: run.id };
+    }
+    if (authorityBeforeStart === "authority_revoked") {
+      return (await terminalizePreparedDispatchFailure(
+        dependencies,
+        callbacks,
+        preparedAttemptId,
+        run,
+        "authority_revoked",
+        "Run authority is no longer valid.",
+        false
+      ))
+        ? { kind: "refused", reason: "authority", runId: run.id }
+        : { kind: "retained", reason: "cleanup_pending", runId: run.id };
+    }
+    return (await requeuePreparedDispatch(
+      dependencies,
+      callbacks,
+      preparedAttemptId,
+      run.id
+    ))
+      ? { kind: "retryable", reason: "credential_unavailable", runId: run.id }
+      : { kind: "retained", reason: "cleanup_pending", runId: run.id };
+  }
+
+  let started: Awaited<ReturnType<RunnerExecutor["start"]>>;
   try {
     started = await credential.acquisition.use((credentialAtBoundary) =>
-      (dependencies.startProcess ?? startDaytonaProcess)({
-        ...callbacks,
+      dependencies.executor.start({
+        authorizers: callbacks,
+        context: ensured.context,
         credential: credentialAtBoundary,
         deleteAttemptRedaction: async () =>
           (
@@ -772,13 +931,12 @@ export async function dispatchRunnerClaim(
         },
         runId: run.id,
         runtime: run.agentRuntime,
-        sandbox: ensured.sandbox,
         task: run.task,
         workspace: run.agentWorkspace ?? undefined,
       })
     );
   } catch (error) {
-    if (cleanupMayRemain(error)) {
+    if (dependencies.executor.isCleanupPending(error)) {
       return { kind: "retained", reason: "cleanup_pending", runId: run.id };
     }
     try {

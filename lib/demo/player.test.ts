@@ -3,9 +3,17 @@ import test from "node:test";
 import { DEMO_SPEED, MAX_GAP_MS, planPlayback } from "./player";
 
 const EVENT = { id: 1, status: "running", type: "status" } as const;
+const PROVENANCE = {
+  fixture: "demo-replay",
+  kind: "synthetic-demo",
+} as const;
 
 function entries(...offsets: number[]) {
-  return offsets.map((offsetMs) => ({ event: EVENT, offsetMs }));
+  return offsets.map((offsetMs) => ({
+    event: EVENT,
+    offsetMs,
+    provenance: PROVENANCE,
+  }));
 }
 
 test("delays are the gaps between offsets, not the offsets", () => {

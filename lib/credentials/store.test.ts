@@ -44,6 +44,26 @@ test("both conditions are required, not either", () => {
   assert.ok(!sql.includes(" or "), "an OR would match another tenant's row");
 });
 
+test("the runner plaintext snapshot locks exactly one scoped credential row", () => {
+  const source = readFileSync(
+    new URL("./store-core.ts", import.meta.url),
+    "utf8"
+  );
+  const readStart = source.indexOf(
+    "export async function readCredentialForTenantWithoutRefresh"
+  );
+  const readEnd = source.indexOf(
+    "\nasync function refreshStoredCredential",
+    readStart
+  );
+  const read = source.slice(readStart, readEnd);
+
+  assert.match(
+    read,
+    /\.where\(credentialWhere\(tenant, harnessId\)\)\s*\.for\("update"\)\s*\.limit\(1\)/u
+  );
+});
+
 test("credential storage writes the selected envelope versions and reads the row versions", () => {
   const source = readFileSync(new URL("./store.ts", import.meta.url), "utf8");
   const coreSource = readFileSync(

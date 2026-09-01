@@ -113,6 +113,19 @@ function service(overrides: Partial<RunnerService> = {}): RunnerService {
     }),
     getAgent: async () => ({ agent: definition(), kind: "found" }),
     getRun: async () => ({ kind: "found", run: run() }),
+    inventoryResources: async () => ({
+      ambiguous: 0,
+      appOwnedMappings: 0,
+      databaseCapped: false,
+      examined: 0,
+      kind: "available",
+      matched: 0,
+      providerCapped: false,
+      states: { active: 0, archived: 0, other: 0, stopped: 0 },
+      status: "complete",
+      unowned: 0,
+      version: 1,
+    }),
     listAgentRuns: async () => ({ kind: "found", runs: [run()] }),
     listAgents: async () => [definition()],
     listHarnesses: async () => [
@@ -301,6 +314,7 @@ async function executeFixture(): Promise<void> {
     prewarm,
     diagnostic,
     reconcile,
+    inventory,
   ] = await Promise.all([
     import("./health/route"),
     import("./harnesses/route"),
@@ -313,6 +327,7 @@ async function executeFixture(): Promise<void> {
     import("./tenant/prewarm/route"),
     import("./diagnostics/sandbox/route"),
     import("./internal/runner-reconcile/route"),
+    import("./internal/runner-resource-inventory/route"),
   ]);
 
   for (const route of [
@@ -327,6 +342,7 @@ async function executeFixture(): Promise<void> {
     prewarm,
     diagnostic,
     reconcile,
+    inventory,
   ]) {
     assertMetadata(route);
   }
@@ -341,6 +357,7 @@ async function executeFixture(): Promise<void> {
   assert.deepEqual(exportedVerbs(prewarm), ["POST"]);
   assert.deepEqual(exportedVerbs(diagnostic), ["POST"]);
   assert.deepEqual(exportedVerbs(reconcile), ["GET", "POST"]);
+  assert.deepEqual(exportedVerbs(inventory), ["GET", "POST"]);
 
   const context = { params: Promise.resolve({ id: AGENT_ID }) };
   const runContext = { params: Promise.resolve({ id: RUN_ID }) };
@@ -640,6 +657,26 @@ async function executeFixture(): Promise<void> {
       assert.equal(result.execution, "executed");
     })
   );
+
+  const inventoryResponse = await inventory.POST(
+    new Request("https://app.test/api/internal/runner-resource-inventory", {
+      method: "POST",
+    })
+  );
+  assert.equal(inventoryResponse.status, 200);
+  assert.equal(inventoryResponse.headers.get("cache-control"), "no-store");
+  assert.deepEqual(await inventoryResponse.json(), {
+    ambiguous: 0,
+    appOwnedMappings: 0,
+    databaseCapped: false,
+    examined: 0,
+    matched: 0,
+    providerCapped: false,
+    states: { active: 0, archived: 0, other: 0, stopped: 0 },
+    status: "complete",
+    unowned: 0,
+    version: 1,
+  });
 
   process.stdout.write(JSON.stringify({ ok: true }));
 }

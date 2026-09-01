@@ -40,6 +40,7 @@ test("Stripe invoice owner lookup falls back to the unique Customer reference", 
   const { params, sql } = ownerLockSql({
     billingReason: "subscription_cycle",
     customerId: "cus_webhook",
+    eventCreatedAt: new Date("2026-09-26T00:00:00.000Z"),
     eventId: "evt_invoice",
     eventType: "invoice_paid",
     periodEnd: new Date("2026-10-20T12:00:00.000Z"),
@@ -51,6 +52,20 @@ test("Stripe invoice owner lookup falls back to the unique Customer reference", 
   assert.match(sql, /for update/u);
   assert.match(sql, /limit \$2/u);
   assert.deepEqual(params, ["cus_webhook", 1]);
+});
+
+test("Stripe owner mutation keeps its event claim inside the same transaction", () => {
+  const source = readFileSync(new URL("./queries.ts", import.meta.url), "utf8");
+  const apply = source.slice(
+    source.indexOf("export async function applyStripeEventUpdate"),
+    source.indexOf("export const databaseCheckoutAttemptLeaseStore")
+  );
+
+  assert.match(apply, /return await db\.transaction\(async \(transaction\)/u);
+  assert.match(
+    apply,
+    /transaction\s*\.insert\(stripeEvent\)[\s\S]*?transaction\s*\.select\(\)[\s\S]*?\.for\("update"\)[\s\S]*?transaction\s*\.update\(user\)/u
+  );
 });
 
 test("checkout attempt provenance lookup is scoped by attempt, operation, and owner", () => {
@@ -79,6 +94,10 @@ test("checkout attempt provenance lookup is scoped by attempt, operation, and ow
 
 test("Stripe reconciliation schema and generated migration retain only bounded operational evidence", () => {
   const schema = readFileSync(new URL("./schema.ts", import.meta.url), "utf8");
+  const reconciliationSchema = schema.slice(
+    schema.indexOf("export const stripeReconciliation"),
+    schema.indexOf("export const subscriptionOverrideAudit")
+  );
   const migrationTag = "0021_lovely_loners";
   const migration = readFileSync(
     new URL(`./migrations/${migrationTag}.sql`, import.meta.url),
@@ -90,18 +109,18 @@ test("Stripe reconciliation schema and generated migration retain only bounded o
   );
 
   assert.match(
-    schema,
+    reconciliationSchema,
     /stripeReconciliation = pgTable\(\s*"StripeReconciliation"/
   );
   assert.match(
-    schema,
+    reconciliationSchema,
     /eventId: varchar\("eventId", \{ length: 64 \}\)[\s\S]*primaryKey\(\)[\s\S]*references\(\(\) => stripeEvent\.id, \{ onDelete: "restrict" \}\)/
   );
-  assert.match(schema, /StripeReconciliation_eventType_check/);
-  assert.match(schema, /StripeReconciliation_reason_check/);
-  assert.match(schema, /StripeReconciliation_status_check/);
+  assert.match(reconciliationSchema, /StripeReconciliation_eventType_check/);
+  assert.match(reconciliationSchema, /StripeReconciliation_reason_check/);
+  assert.match(reconciliationSchema, /StripeReconciliation_status_check/);
   assert.doesNotMatch(
-    schema,
+    reconciliationSchema,
     /StripeReconciliation[\s\S]{0,1600}(userId|customerId|subscriptionId|payload|secret|metadata):/
   );
 

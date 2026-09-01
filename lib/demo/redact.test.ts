@@ -10,6 +10,10 @@ const AGENT_ID = "53af1a29-4e98-43d6-ac5b-3b9dcba5e730";
 const OPERATION_ID = "f83bf3c5-5992-4c70-a006-f2d8f2520aeb";
 const RUN_ID = "3a3f2c72-9b1b-47f7-8c83-28d5f94bf4ce";
 const SECRET = "demo-secret-value";
+const PROVENANCE = {
+  fixture: "demo-replay",
+  kind: "synthetic-demo",
+} as const;
 
 function createTranscript(secret = ""): DemoTranscript {
   const suffix = secret ? ` ${secret}` : "";
@@ -23,6 +27,7 @@ function createTranscript(secret = ""): DemoTranscript {
           type: "accepted",
         },
         offsetMs: 0,
+        provenance: PROVENANCE,
       },
       {
         event: {
@@ -31,6 +36,7 @@ function createTranscript(secret = ""): DemoTranscript {
           type: "status",
         },
         offsetMs: 15,
+        provenance: PROVENANCE,
       },
       {
         event: {
@@ -39,6 +45,7 @@ function createTranscript(secret = ""): DemoTranscript {
           type: "output",
         },
         offsetMs: 30,
+        provenance: PROVENANCE,
       },
       {
         event: {
@@ -52,18 +59,20 @@ function createTranscript(secret = ""): DemoTranscript {
           type: "command",
         },
         offsetMs: 45,
+        provenance: PROVENANCE,
       },
       {
         event: {
           evidence: {
             byteLength: 42,
             operation: "modify",
-            path: `/workspace/${secret || "clean"}/event-file.ts`,
+            path: `workspace/${secret || "clean"}/event-file.ts`,
           },
           id: 5,
           type: "file",
         },
         offsetMs: 60,
+        provenance: PROVENANCE,
       },
       {
         event: {
@@ -85,7 +94,7 @@ function createTranscript(secret = ""): DemoTranscript {
               {
                 byteLength: 42,
                 operation: "modify",
-                path: `/workspace/${secret || "clean"}/snapshot-file.ts`,
+                path: `workspace/${secret || "clean"}/snapshot-file.ts`,
               },
             ],
             id: RUN_ID,
@@ -98,9 +107,11 @@ function createTranscript(secret = ""): DemoTranscript {
           type: "completed",
         },
         offsetMs: 75,
+        provenance: PROVENANCE,
       },
     ],
     name: "demo-replay",
+    provenance: PROVENANCE,
     recordedAt: "2026-08-24T19:03:51.798Z",
     result: {
       agentId: AGENT_ID,
@@ -108,6 +119,7 @@ function createTranscript(secret = ""): DemoTranscript {
         {
           command: `result command context${suffix}`,
           exitCode: 0,
+          provenance: PROVENANCE,
           stderr: `result stderr context${suffix}`,
           stdout: `result stdout context${suffix}`,
           timestamp: 1_724_526_230,
@@ -117,7 +129,8 @@ function createTranscript(secret = ""): DemoTranscript {
       fileOperations: [
         {
           operation: "modify",
-          path: `/workspace/${secret || "clean"}/result-file.ts`,
+          path: `workspace/${secret || "clean"}/result-file.ts`,
+          provenance: PROVENANCE,
           timestamp: 1_724_526_229,
         },
       ],
@@ -163,16 +176,13 @@ test("redacts credentials embedded in file paths", () => {
   const serialized = JSON.stringify(redacted);
 
   assert.equal(serialized.includes(`/workspace/${SECRET}/`), false);
+  assert.equal(serialized.includes("workspace/[REDACTED]/event-file.ts"), true);
   assert.equal(
-    serialized.includes("/workspace/[REDACTED]/event-file.ts"),
+    serialized.includes("workspace/[REDACTED]/snapshot-file.ts"),
     true
   );
   assert.equal(
-    serialized.includes("/workspace/[REDACTED]/snapshot-file.ts"),
-    true
-  );
-  assert.equal(
-    serialized.includes("/workspace/[REDACTED]/result-file.ts"),
+    serialized.includes("workspace/[REDACTED]/result-file.ts"),
     true
   );
 });

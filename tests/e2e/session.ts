@@ -1,36 +1,40 @@
 import { encode } from "next-auth/jwt";
+import { e2eCookieDomain } from "./origin";
 
 export const E2E_USER_ID = "00000000-0000-4000-8000-000000000001";
 
 const SESSION_COOKIE = "authjs.session-token";
 const SECURE_SESSION_COOKIE = "__Secure-authjs.session-token";
+type E2EEnvironment = Readonly<Record<string, string | undefined>>;
 
 export function sessionCookies(
   type: "demo" | "subscriber",
   {
     authVersion = 1,
     email = "e2e-user@example.invalid",
+    environment = process.env,
     id = E2E_USER_ID,
     subscribedUntil = type === "subscriber" ? "2099-01-01T00:00:00.000Z" : null,
   }: {
     authVersion?: number;
     email?: string;
+    environment?: E2EEnvironment;
     id?: string;
     subscribedUntil?: string | null;
   } = {}
 ) {
-  const secret = process.env.AUTH_SECRET;
+  const secret = environment.AUTH_SECRET;
   if (!secret) {
     throw new Error("AUTH_SECRET is required for subscriber browser contracts");
   }
   const cookieNames =
-    process.env.E2E_PRODUCTION === "1"
+    environment.E2E_PRODUCTION === "1"
       ? [SESSION_COOKIE, SECURE_SESSION_COOKIE]
       : [SESSION_COOKIE];
 
   return Promise.all(
     cookieNames.map(async (name) => ({
-      domain: "localhost",
+      domain: e2eCookieDomain(environment),
       httpOnly: true,
       name,
       path: "/",

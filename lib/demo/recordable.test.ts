@@ -14,7 +14,7 @@ const validOptions: RecordableOptions = {
   status: "completed",
 };
 
-test("a valid Daytona demo recording is allowed", () => {
+test("a valid hosted demo recording is allowed", () => {
   assert.doesNotThrow(() => assertRecordable(validOptions));
 });
 

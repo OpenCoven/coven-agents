@@ -39,10 +39,46 @@ or expired state is guest state.
 
 Stripe is evidence for paid periods, but it does not directly authorize an
 application request. Only the signature-verified webhook route may translate a
-supported Stripe event into database entitlement state. The administrative
-`pnpm subscription grant|revoke|status` command remains an explicit operator
-override for bootstrap or complimentary access and writes the same authority
-columns.
+supported Stripe event into database entitlement state.
+
+### Administrative overrides
+
+`pnpm subscription grant|revoke|status` is an authorized operator override for
+bootstrap or complimentary access, not Stripe evidence or production
+certification. `status` is read-only. Each `grant` or `revoke` requires a
+bounded `--reference-stdin`; mutations read one bounded printable UTF-8 value
+from standard input, then hash it with SHA-256 before any database lookup or
+mutation. The value is capped at 128 encoded bytes and may include printable
+Unicode; control, format, surrogate, and Unicode line- or paragraph-separator
+characters are rejected. The raw value is never accepted through command
+arguments or printed.
+
+`grant` defaults to 365 days and is finite: the exported
+`MAX_SUBSCRIPTION_OVERRIDE_DAYS = 3650` upper bound prevents an indefinite
+entitlement. `revoke` immediately clears the paid period. Both commands run
+one transaction that locks the exact tenant-owner `User` row, fences a stale
+authority version, increments `authVersion` exactly once, updates
+`subscribedUntil` and `billingPeriodStart`, sets the finite paired active
+override marker (`grant` or `revoke` plus its transaction time), and inserts one immutable
+`SubscriptionOverrideAudit` record. The audit stores only its ID, owner
+reference, `grant` or `revoke` action, prior and new paid-through timestamps,
+prior and new authority versions, creation time, and the reference digest.
+It has no email, raw reference, arbitrary operator text, Stripe identifiers,
+payload, secret, or payment data. Audit, entitlement, authority, and commit
+failures roll the whole transaction back. A successful override invalidates
+existing authority rather than relying on a sign-out/in instruction.
+
+This override is intentionally separate from normal Stripe webhook authority,
+checkout, run admission, and mid-run transition policy. It remains stronger
+than delayed automatic Stripe evidence. A paid invoice event must be strictly
+newer than the marker's authenticated event (or normalized invoice) creation
+time and must independently satisfy the exact interval rule before it can
+supersede an override and atomically clear the marker. Checkout-reference,
+failed, stale, no-op, ambiguous, and rejected events never clear it. The
+reconciliation snapshot and write fence include both marker fields, so an
+administrative change cannot be overwritten between provider observation and
+commit. The marker contains neither the operator reference nor a digest; the
+immutable audit table is the only override evidence record.
 
 Auth.js carries `subscribedUntil` in its server-managed session token and
 recomputes the derived type on every callback, so expiry is exact without
@@ -50,13 +86,47 @@ trusting a client-supplied plan. Protected routes then call
 `authorizeSubscriberAccess`, which checks both the session classification and
 the current database `authVersion` and subscription timestamp. Dispatch
 revalidates those authorities again in `lib/runner/runtime.ts` before capacity,
-credential, or Daytona work.
+credential, sandbox, or provider work.
+
+### Runner mid-run entitlement
+
+`RUNNER_MID_RUN_ENTITLEMENT_POLICY` in
+`lib/runner/entitlement-policy.ts` codifies two distinct execution states:
+unlaunched work is `revalidate_before_effects`, while one exact,
+durably-authorized, `running` attempt is `finish_current` for at most
+`maxDurationMs` (15 minutes). Before every queued or otherwise unlaunched
+dispatch, the runner reads the current account row and requires matching
+`authVersion` plus a strictly active stored paid period or the existing
+renewal-only grace period. Revoked, expired, unknown, or unavailable authority
+therefore terminalizes or defer-closes before capacity accounting, credential
+access or write, prewarm, sandbox creation, and provider I/O. A stale browser
+session also fails its normal `authVersion` revalidation before any product
+operation.
+
+`finish_current` is neither new eligibility nor renewal grace. Once the exact
+launch has been persisted and the run is `running`, a later cancellation,
+downgrade, refund, or administrative revoke does not itself stop that process.
+Reconciliation may use only its durable attempt identity to collect bounded
+output, finish it, or perform its existing cleanup; it never re-acquires
+entitlement, credentials, or a fresh provider attempt for that running work.
+The existing maximum duration, command timeout, output bounds, exact cleanup,
+and explicit authorized cancellation paths (including operator/security
+cancellation) remain in force. A user stop request continues to require the
+existing product-access policy; entitlement loss does not create a new stop
+capability.
+If the provider proves the launched process absent, any requeue is still an
+unlaunched dispatch and must revalidate before it can do anything; current
+ineligibility prevents a second launch.
+
+This policy changes neither product read access nor data/export behavior.
+State, data, and any existing export surface remain readable only under their
+existing product-access policy; `finish_current` grants no such access.
 
 A successful payment does not make a browser redirect authoritative. The
 verified webhook must first update the database. A token minted before payment
 still carries its earlier date because ordinary callbacks do not poll the user
-row; it must be re-established, currently by signing out and back in, before it
-can carry subscriber type. Cancellation does not revoke an already paid
+row; a later authenticated session carries the updated type. Cancellation does
+not revoke an already paid
 period; authority ends when `subscribedUntil` passes. An explicit
 administrative revoke clears the period immediately.
 
@@ -171,9 +241,12 @@ state.
 1. Require both Stripe secrets and the `stripe-signature` header.
 2. Verify the signature against the exact raw request body before reading any
    event as authority.
-3. Claim the Stripe event ID in `StripeEvent` inside the same transaction that
-   locks and updates the owner. Any claim, lock, decision, update, or commit
-   failure rolls the claim back so Stripe receives a retryable `503`.
+3. Claim the Stripe event ID in `StripeEvent` inside the same atomic
+   transaction that locks and mutates the owner (or inserts a manual
+   reconciliation record). This is not a claim-before-processing design: any
+   claim, lock, decision, owner mutation, reconciliation insert, or commit
+   failure rolls the claim back so Stripe receives a retryable `503` and the
+   same event remains redeliverable.
 4. Resolve invoice ownership by the unique persisted
    `User.stripeCustomerId` first. That path does not retrieve the Stripe
    Customer and ignores stale provider metadata. Only an unmapped Customer may
@@ -184,11 +257,14 @@ state.
    exact Customer and Checkout Session IDs.
 6. Allow-list entitlement changes through `lib/billing/webhook.ts`.
    `invoice.paid` accepts the subscription ID, billing-period start, and
-   period end as one exact interval. A same-subscription renewal may advance
-   it. A different subscription may replace it only when no paid interval is
-   backed, or when its start is at or after the stored end and its end advances.
+   period end as one exact interval and carries the signature-authenticated
+   Stripe event creation time. A same-subscription renewal may advance it. A
+   different subscription may replace it only when no paid interval is backed,
+   or when its start is at or after the stored end and its end advances.
    Overlapping replacement intervals never merge or reset usage; they enter
-   manual reconciliation. Unknown events change nothing.
+   manual reconciliation. An active administrative override rejects evidence
+   created at or before its marker and is cleared only by a strictly newer
+   successful paid application. Unknown events change nothing.
 7. Persist manual dispositions by inserting `StripeEvent` and
    `StripeReconciliation` together. A redelivery conflicts on the event ID and
    returns `deduped`; a reconciliation insert or commit failure rolls both rows
@@ -217,6 +293,80 @@ period, an unknown billing reason, or a second failure inside grace grants
 nothing. Stripe dunning may continue, but this application does not extend
 again. `customer.subscription.deleted` also changes nothing because the
 already-paid period expires through its stored timestamp.
+
+## Automatic bounded Stripe reconciliation
+
+`GET /api/internal/stripe-reconcile` is an authenticated scheduled-machine
+surface, not a browser or operator override endpoint. It accepts only the
+existing `CRON_SECRET` bearer credential, applies its IP-only abuse admission
+before credential validation or billing construction, accepts an empty body,
+and returns aggregate counts only. It has no subscriber session, manual runner
+credential, provider selection, or browser-controlled inputs. Missing billing
+configuration fails closed. This route is repository behavior, not evidence
+that a scheduler, Stripe credential, or live reconciliation has been deployed.
+
+The service is deliberately a **positive-repair sweep**, not Stripe event
+replay. It scans only local `User` rows which already hold a Stripe Customer or
+Subscription reference, selecting only the local ID, `authVersion`,
+`billingPeriodStart`, `subscribedUntil`, both existing mappings, and the
+active override marker. It never lists Customers globally. A stored valid
+Subscription is retrieved first; only an absent, not-found, or appropriate
+terminal Subscription causes a strictly bounded Subscription list under that
+exact stored Customer. The list selects exactly one `active` configured-Price
+candidate: terminal and known ineligible statuses do not make that candidate
+ambiguous, while malformed observations, unknown future statuses, duplicate
+configured-Price items, and multiple active candidates still defer. A verified
+Customer may therefore gain its verified missing Subscription ID, but
+reconciliation does not invent a Customer mapping.
+
+An automatic mutation requires all of the following at once:
+
+1. the exact stored Customer and one exact Subscription agree in the provider
+   observations;
+2. that Subscription is `active`, contains the configured Price, and names one
+   latest invoice;
+3. the latest invoice is paid, has the same Customer and Subscription, and has
+   a supported `subscription_create`, `subscription_cycle`, or
+   `subscription_update` billing reason plus a finite normalized invoice
+   creation time; and
+4. exactly one non-proration subscription-item line for the configured Price
+   supplies a valid start/end interval for that Subscription.
+
+The exact paid interval is then evaluated by the same pure ordering rule as
+`invoice.paid`: duplicates, stale intervals, and contained intervals are
+no-ops; a later valid interval advances the exact tuple; an overlapping or
+crossing replacement is deferred. Normal reconciliation does **not** increment
+`authVersion`, matching webhook semantics.
+
+Subscription status is a search filter, never payment evidence. `trialing`,
+`past_due`, `unpaid`, `canceled`, `incomplete`, `incomplete_expired`, `paused`,
+and future/unknown statuses are deferred rather than granting entitlement.
+The service does not grant trials, infer grace from `past_due`, shorten or
+clear a period, revoke from canceled/unpaid status, or resolve a conflict.
+Malformed/deleted references, Customer or Subscription disagreement, multiple
+candidates, unavailable or unbounded provider pages, missing/ambiguous lines,
+unpaid latest invoices, unsupported reasons, and provider failures are all
+deferred with finite in-memory reason codes. No provider payload, amount,
+metadata, payment detail, arbitrary error, Customer, Subscription, invoice,
+or reason code is persisted for automatic work.
+
+`StripeReconciliationRun` is a singleton coordination row containing only a
+local cursor plus lease owner, fence, expiry, and update time. It acquires,
+takes over, renews, and releases by exact owner-and-fence checks against
+database time; no database transaction stays open across Stripe calls. Each
+completed user commits its cursor advance and any positive mutation in one
+transaction under both that lease fence and a null-safe exact snapshot of
+`authVersion`, paid interval, Customer ID, Subscription ID, and override
+marker. A webhook or administrative change therefore produces a conflict
+instead of an overwrite; an expired or taken-over worker cannot commit. A
+crash before that transaction leaves the row eligible for a later sweep. Cursor
+scans are ordered and wrap at the end, so deferred rows retry in later sweeps
+without permanently starving later local rows. Batch size, total users/batches,
+provider concurrency, provider pages/results, invoice-line pages/results, and
+lease TTL are finite validated bounds; a per-user provider failure does not
+stop later users. Stripe `401` and `403` configuration or permission failures
+are instead systemic: the run aborts and the route returns a sanitized
+`503 billing_provider_unauthorized`, never an ordinary deferred aggregate.
 
 ## Reconciliation evidence and runbook
 
@@ -278,6 +428,7 @@ the accounting read fails, the endpoint returns `capacity_unavailable`.
 | Obsolete open Checkout Session cannot be expired | Checkout returns `checkout_session_conflict`; no replacement Session is created. | Restore Stripe access, retry cleanup with the same application key, and confirm only the current Price/version remains payable. |
 | An open subscription Checkout Session lacks current ownership markers | Checkout returns `checkout_session_conflict` and does not expire or replace the Session. | An operator must verify the Customer, user, mode, and creation history in Stripe, then expire or otherwise resolve the unowned Session before retrying. |
 | Missing billing configuration | Checkout or webhook returns `billing_unavailable`. | Restore the deployment secrets and verify configuration without logging values. |
+| Stripe Invoice, Invoice Line Item, Subscription, or Customer read is unauthorized | Stripe reconciliation aborts with sanitized `503 billing_provider_unauthorized`; it does not report ordinary per-user deferrals. | Restore least-privilege key access for Customer read/write, Subscription read, Invoice read, Invoice Line Item read, and Checkout Session write; retry after validating access without logging key or Stripe error details. |
 | Missing or invalid webhook signature | `400`; no event is trusted. | Correct the endpoint secret or delivery configuration, then request a provider redelivery. |
 | Duplicate Stripe event | The event ID conflicts and the delivery returns `deduped`. | Confirm the original event produced the intended database period; do not bypass deduplication. |
 | Persisted Customer mapping is absent but valid checkout metadata could still converge | The delivery remains unclaimed and returns `503` until local attempt provenance proves the same owner and Customer. | Let checkout attachment or recovery settle, then accept Stripe's redelivery. Never attach ownership from metadata alone. |
@@ -288,7 +439,7 @@ the accounting read fails, the endpoint returns `capacity_unavailable`.
 | Renewal payment fails | One three-day renewal-only grace extension may be written. | Verify the event reason, prior paid period, stored period end, and that grace did not compound. |
 | Initial payment fails | No entitlement is granted. | Complete payment successfully; never use renewal grace as a trial. |
 | Usage or reservation storage fails | New run admission fails closed before credential access. | Restore PostgreSQL/admission dependencies and retry the same run ID so deduplication and compensation remain effective. |
-| Subscription expires or is revoked during later work | New protected operations fail authority checks. | Re-establish the session after a legitimate renewal; investigate stale authority rather than extending timestamps speculatively. |
+| Subscription expires or is revoked during later work | Queued or unlaunched work fails its current-authority recheck before any credential or provider effect. One already-running, durably authorized attempt may only `finish_current` within the 15-minute runner bound; an authorized operator/security cancellation remains explicit. | Re-establish the session after a legitimate renewal; reconcile or explicitly cancel the exact existing attempt, and investigate stale authority rather than extending timestamps speculatively. |
 
 Administrative repair must use verified Stripe records and the current database
 state. Never accept a browser-supplied plan, period, Customer ID, or webhook

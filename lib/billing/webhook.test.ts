@@ -21,6 +21,7 @@ const PRICE_ID = "price_webhook";
 const USER_ID = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
 const CHECKOUT_ATTEMPT_ID = "11111111-1111-4111-8111-111111111111";
 const CHECKOUT_INTEGRATION_IDENTIFIER = "opencoven_coven_agents_qohuikyr";
+const OVERRIDE_AT = new Date("2026-09-25T12:00:00.000Z");
 
 test("a paid invoice sets the period end", () => {
   const update = subscriptionUpdate({
@@ -201,6 +202,167 @@ test("newer paid authority makes an older paid event a claimed no-op", async () 
     subscribedUntil: new Date("2026-11-20T12:00:00.000Z"),
   });
   assert.equal(writer.updateCount, 1);
+});
+
+test("a paid event created at or before a durable revoke cannot restore entitlement", () => {
+  const revoked: WebhookUser = {
+    ...paidUser(),
+    billingPeriodStart: null,
+    stripeSubscriptionId: "sub_webhook",
+    subscribedUntil: null,
+    subscriptionOverrideAction: "revoke",
+    subscriptionOverrideAt: OVERRIDE_AT,
+  };
+
+  assert.equal(
+    stripeEventMutation(
+      revoked,
+      paidIntent({
+        eventCreatedAt: OVERRIDE_AT,
+        eventId: "evt_paid_before_revoke",
+        periodEnd: NEXT_PERIOD_END,
+        periodStart: PAID_UNTIL,
+      })
+    ),
+    null
+  );
+});
+
+test("a strictly newer applicable paid event supersedes a durable revoke", () => {
+  const revoked: WebhookUser = {
+    ...paidUser(),
+    billingPeriodStart: null,
+    subscribedUntil: null,
+    subscriptionOverrideAction: "revoke",
+    subscriptionOverrideAt: OVERRIDE_AT,
+  };
+
+  assert.deepEqual(
+    stripeEventMutation(
+      revoked,
+      paidIntent({
+        eventCreatedAt: new Date(OVERRIDE_AT.getTime() + 1),
+        eventId: "evt_paid_after_revoke",
+        periodEnd: NEXT_PERIOD_END,
+        periodStart: PAID_UNTIL,
+      })
+    ),
+    {
+      billingPeriodStart: PAID_UNTIL,
+      stripeSubscriptionId: "sub_webhook",
+      subscribedUntil: NEXT_PERIOD_END,
+      subscriptionOverrideAction: null,
+      subscriptionOverrideAt: null,
+    }
+  );
+});
+
+test("a grant takes precedence over older paid evidence", () => {
+  const granted: WebhookUser = {
+    ...paidUser(),
+    subscriptionOverrideAction: "grant",
+    subscriptionOverrideAt: OVERRIDE_AT,
+  };
+
+  assert.equal(
+    stripeEventMutation(
+      granted,
+      paidIntent({
+        eventCreatedAt: new Date(OVERRIDE_AT.getTime() - 1),
+        eventId: "evt_paid_before_grant",
+        periodEnd: NEXT_PERIOD_END,
+        periodStart: PAID_UNTIL,
+      })
+    ),
+    null
+  );
+});
+
+test("failed invoices do not clear a durable revoke", async () => {
+  const revoked: WebhookUser = {
+    ...paidUser(),
+    billingPeriodStart: null,
+    subscribedUntil: null,
+    subscriptionOverrideAction: "revoke",
+    subscriptionOverrideAt: OVERRIDE_AT,
+  };
+  const writer = new MemoryStripeEventWriter([revoked]);
+
+  assert.equal(
+    await writer.apply(
+      failedIntent("evt_failed_after_revoke", {
+        eventCreatedAt: new Date(OVERRIDE_AT.getTime() + 1),
+      })
+    ),
+    "applied"
+  );
+  assert.deepEqual(writer.users.get(USER_ID), revoked);
+});
+
+test("failed invoices cannot modify an active administrative grant", async () => {
+  const grantUntil = new Date("2026-10-25T12:00:00.000Z");
+  const granted: WebhookUser = {
+    ...paidUser(),
+    billingPeriodStart: OVERRIDE_AT,
+    subscribedUntil: grantUntil,
+    subscriptionOverrideAction: "grant",
+    subscriptionOverrideAt: OVERRIDE_AT,
+  };
+  const writer = new MemoryStripeEventWriter([granted]);
+
+  assert.equal(
+    await writer.apply(
+      failedIntent("evt_failed_after_grant", {
+        eventCreatedAt: new Date(OVERRIDE_AT.getTime() + 1),
+        periodEnd: new Date("2026-11-25T12:00:00.000Z"),
+        periodStart: grantUntil,
+      })
+    ),
+    "applied"
+  );
+  assert.deepEqual(writer.users.get(USER_ID), granted);
+});
+
+test("concurrent old and new paid events leave a revoke only for newer evidence", async () => {
+  await Promise.all(
+    (["old-first", "new-first"] as const).map(async (order) => {
+      const revoked: WebhookUser = {
+        ...paidUser(),
+        billingPeriodStart: null,
+        subscribedUntil: null,
+        subscriptionOverrideAction: "revoke",
+        subscriptionOverrideAt: OVERRIDE_AT,
+      };
+      const writer = new MemoryStripeEventWriter([revoked]);
+      const old = paidIntent({
+        eventCreatedAt: OVERRIDE_AT,
+        eventId: `evt_old_revoke_${order}`,
+        periodEnd: PAID_UNTIL,
+        periodStart: PAID_FROM,
+      });
+      const fresh = paidIntent({
+        eventCreatedAt: new Date(OVERRIDE_AT.getTime() + 1),
+        eventId: `evt_new_revoke_${order}`,
+        periodEnd: NEXT_PERIOD_END,
+        periodStart: PAID_UNTIL,
+      });
+
+      await Promise.all(
+        order === "old-first"
+          ? [writer.apply(old), writer.apply(fresh)]
+          : [writer.apply(fresh), writer.apply(old)]
+      );
+
+      assert.deepEqual(writer.users.get(USER_ID), {
+        ...revoked,
+        billingPeriodStart: PAID_UNTIL,
+        subscribedUntil: NEXT_PERIOD_END,
+        subscriptionOverrideAction: null,
+        subscriptionOverrideAt: null,
+      });
+      assert.equal(writer.updateCount, 1);
+    })
+  );
 });
 
 test("concurrent distinct paid events preserve the newest period in either arrival order", async () => {
@@ -1000,7 +1162,7 @@ test("duplicate events do not update a User twice", async () => {
   assert.equal(writer.updateCount, 1);
 });
 
-test("a failed database application rolls back its event claim for retry", async () => {
+test("a failed owner mutation rolls back its atomic event claim for retry", async () => {
   const writer = new MemoryStripeEventWriter([
     {
       billingPeriodStart: PAID_FROM,
@@ -1503,6 +1665,7 @@ test("persisted Customer ownership is used before Stripe metadata retrieval", as
     {
       billingReason: "subscription_cycle",
       customerId: "cus_webhook",
+      eventCreatedAt: new Date("2026-09-26T00:00:00.000Z"),
       eventId: event.id,
       eventType: "invoice_paid",
       periodEnd: NEXT_PERIOD_END,
@@ -1728,6 +1891,7 @@ test("unmapped Customer fallback rejects missing, foreign, malformed, and retire
 test("invoice.paid grants the exact Stripe invoice period", async () => {
   const writes: StripeEventUpdateInput[] = [];
   const event = invoiceEvent({
+    eventCreatedAt: OVERRIDE_AT,
     id: "evt_invoice_paid",
     periodEnd: NEXT_PERIOD_END,
     periodStart: PAID_UNTIL,
@@ -1757,6 +1921,7 @@ test("invoice.paid grants the exact Stripe invoice period", async () => {
     {
       billingReason: "subscription_cycle",
       customerId: "cus_webhook",
+      eventCreatedAt: OVERRIDE_AT,
       eventId: "evt_invoice_paid",
       eventType: "invoice_paid",
       periodEnd: NEXT_PERIOD_END,
@@ -2518,6 +2683,7 @@ function paidUser(): WebhookUser {
 }
 
 function paidIntent(input: {
+  eventCreatedAt?: Date;
   eventId: string;
   periodEnd: Date;
   periodStart: Date;
@@ -2526,6 +2692,8 @@ function paidIntent(input: {
   return {
     billingReason: "subscription_cycle",
     customerId: "cus_webhook",
+    eventCreatedAt:
+      input.eventCreatedAt ?? new Date("2026-09-26T00:00:00.000Z"),
     eventId: input.eventId,
     eventType: "invoice_paid",
     periodEnd: input.periodEnd,
@@ -2541,16 +2709,21 @@ function failedIntent(
       | "subscription_create"
       | "subscription_cycle"
       | "subscription_update";
+    eventCreatedAt?: Date;
+    periodEnd?: Date;
+    periodStart?: Date;
     stripeSubscriptionId?: string;
   } = {}
 ): StripeEventUpdateInput {
   return {
     billingReason: input.billingReason ?? "subscription_cycle",
     customerId: "cus_webhook",
+    eventCreatedAt:
+      input.eventCreatedAt ?? new Date("2026-09-26T00:00:00.000Z"),
     eventId,
     eventType: "invoice_payment_failed",
-    periodEnd: NEXT_PERIOD_END,
-    periodStart: PAID_UNTIL,
+    periodEnd: input.periodEnd ?? NEXT_PERIOD_END,
+    periodStart: input.periodStart ?? PAID_UNTIL,
     stripeSubscriptionId: input.stripeSubscriptionId ?? "sub_webhook",
   };
 }
@@ -2766,6 +2939,7 @@ function checkoutEvent(input: {
 function invoiceEvent(input: {
   billingReason?: Stripe.Invoice.BillingReason;
   customerMetadata?: Stripe.Metadata;
+  eventCreatedAt?: Date;
   expanded?: boolean;
   hasMore?: boolean;
   id: string;
@@ -2800,7 +2974,7 @@ function invoiceEvent(input: {
       subscriptionId,
     }),
   ];
-  return stripeEvent(input.id, input.type, {
+  const event = stripeEvent(input.id, input.type, {
     billing_reason: input.billingReason ?? "subscription_cycle",
     customer,
     id: "in_webhook",
@@ -2822,6 +2996,13 @@ function invoiceEvent(input: {
     period_end: Math.floor(PAID_UNTIL.getTime() / 1000),
     period_start: Math.floor(PAID_FROM.getTime() / 1000),
   } as unknown as Stripe.Invoice);
+  return {
+    ...event,
+    created: Math.floor(
+      (input.eventCreatedAt ?? new Date("2026-09-26T00:00:00.000Z")).getTime() /
+        1000
+    ),
+  };
 }
 
 function invoiceLine(

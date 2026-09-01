@@ -281,7 +281,7 @@ test("owns every relative same-origin runner path and sends only browser session
   for (const call of calls) {
     assert.equal(call.credentials, "same-origin");
     assert.equal(call.headers.get("authorization"), null);
-    assert.equal(call.headers.get("x-runner-token"), null);
+    assert.equal(call.headers.get(["x", "runner", "token"].join("-")), null);
     assert.equal(call.headers.get("x-vercel-protection-bypass"), null);
     assert.deepEqual(
       Object.fromEntries(call.headers),

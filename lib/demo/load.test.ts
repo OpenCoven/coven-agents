@@ -7,6 +7,10 @@ const RUN_ID = "11111111-2222-4333-8444-555555555555";
 const OPERATION_ID = "22222222-3333-4444-8555-666666666666";
 
 function validTranscript(name: string) {
+  const provenance = {
+    fixture: name,
+    kind: "synthetic-demo",
+  };
   return JSON.stringify({
     events: [
       {
@@ -17,9 +21,11 @@ function validTranscript(name: string) {
           type: "accepted",
         },
         offsetMs: 0,
+        provenance,
       },
     ],
     name,
+    provenance,
     recordedAt: "2026-08-24T12:00:00.000Z",
     result: {
       agentId: AGENT_ID,
@@ -41,6 +47,12 @@ test("unparseable input yields null rather than throwing", () => {
 
 test("input failing schema validation yields null", () => {
   assert.equal(loadTranscript(JSON.stringify({ name: "x" })), null);
+});
+
+test("input exceeding the raw fixture byte limit yields null", () => {
+  const oversized = `${validTranscript("oversized")}${" ".repeat(256 * 1024)}`;
+
+  assert.equal(loadTranscript(oversized), null);
 });
 
 test("a valid transcript with numeric event ids is returned parsed", () => {
