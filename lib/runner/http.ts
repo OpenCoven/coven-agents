@@ -56,7 +56,9 @@ type RunnerHttpLogger = Readonly<{
   error: (message: string, details: Readonly<{ name: string }>) => void;
 }>;
 
-type After = (callback: () => void | Promise<void>) => void;
+type AfterTask = Promise<unknown> | (() => void | Promise<void>);
+
+type After = (task: AfterTask) => void;
 
 export type RunnerHttpDependencies = Readonly<{
   after?: After;
@@ -259,6 +261,37 @@ function schedule(
         // The durable queue and authenticated cron are the correctness path.
       }
     });
+  } catch {
+    // `after` is a latency optimization and must never change a response.
+  }
+}
+
+function scheduleLiveRunReconciliation(
+  dependencies: RunnerHttpDependencies,
+  service: RunnerService,
+  live: boolean
+): void {
+  if (!live) {
+    return;
+  }
+  schedule(dependencies, async () => {
+    await service.reconcileAndDispatch();
+  });
+}
+
+function startLiveRunReconciliation(
+  dependencies: RunnerHttpDependencies,
+  service: RunnerService,
+  live: boolean
+): void {
+  if (!dependencies.after || !live) {
+    return;
+  }
+  try {
+    const task = service.reconcileAndDispatch().catch(() => {
+      // The durable queue and authenticated cron are the correctness path.
+    });
+    dependencies.after(task);
   } catch {
     // `after` is a latency optimization and must never change a response.
   }
@@ -556,12 +589,18 @@ export function createRunnerHttpHandlers(
         }
         const service = await dependencies.createService(context);
         const result = await service.getRun(context.principal, runId);
-        return result.kind === "found"
-          ? runnerJsonResponse(runSnapshotEnvelopeSchema, {
-              apiVersion: AGENT_RUNNER_API_VERSION,
-              run: result.run,
-            })
-          : runNotFound(dependencies);
+        if (result.kind !== "found") {
+          return runNotFound(dependencies);
+        }
+        scheduleLiveRunReconciliation(
+          dependencies,
+          service,
+          result.run.status === "queued" || result.run.status === "running"
+        );
+        return runnerJsonResponse(runSnapshotEnvelopeSchema, {
+          apiVersion: AGENT_RUNNER_API_VERSION,
+          run: result.run,
+        });
       }),
 
     getRunEvents: (request, runId) =>
@@ -593,6 +632,7 @@ export function createRunnerHttpHandlers(
         if (initial.kind === "not_found") {
           return runNotFound(dependencies);
         }
+        startLiveRunReconciliation(dependencies, service, !initial.terminal);
         const stream = eventStream({
           lastEventId,
           read: async (cursor) => {
@@ -649,12 +689,20 @@ export function createRunnerHttpHandlers(
         }
         const service = await dependencies.createService(context);
         const result = await service.listAgentRuns(context.principal, agentId);
-        return result.kind === "found"
-          ? runnerJsonResponse(runListEnvelopeSchema, {
-              apiVersion: AGENT_RUNNER_API_VERSION,
-              runs: result.runs,
-            })
-          : agentNotFound(dependencies);
+        if (result.kind !== "found") {
+          return agentNotFound(dependencies);
+        }
+        scheduleLiveRunReconciliation(
+          dependencies,
+          service,
+          result.runs.some(
+            (run) => run.status === "queued" || run.status === "running"
+          )
+        );
+        return runnerJsonResponse(runListEnvelopeSchema, {
+          apiVersion: AGENT_RUNNER_API_VERSION,
+          runs: result.runs,
+        });
       }),
 
     listAgents: (request) =>

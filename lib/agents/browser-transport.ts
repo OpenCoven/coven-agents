@@ -52,6 +52,11 @@ export type StreamRunEventsOptions = Readonly<{
   signal?: AbortSignal;
 }>;
 
+export type RunnerStopOutcome = Readonly<{
+  pending: boolean;
+  run: RunSnapshot;
+}>;
+
 type EventStreamProgress = {
   cursor: number;
   terminal: boolean;
@@ -81,7 +86,7 @@ export interface RunnerTransport {
     input: StartRunInput,
     signal?: AbortSignal
   ) => Promise<RunSnapshot>;
-  stopRun: (runId: string, signal?: AbortSignal) => Promise<RunSnapshot>;
+  stopRun: (runId: string, signal?: AbortSignal) => Promise<RunnerStopOutcome>;
   streamRunEvents: (
     runId: string,
     options: StreamRunEventsOptions
@@ -413,17 +418,21 @@ export class BrowserRunnerTransport implements RunnerTransport {
     return this.followRunEvents(runId, options.lastEventId ?? 0, options);
   }
 
-  async stopRun(runId: string, signal?: AbortSignal): Promise<RunSnapshot> {
-    return (
-      await this.readJson(
-        await this.fetch(`/api/runs/${encodeURIComponent(runId)}/stop`, {
-          method: "POST",
-          signal,
-        }),
-        runSnapshotEnvelopeSchema,
-        { signal }
-      )
-    ).run;
+  async stopRun(
+    runId: string,
+    signal?: AbortSignal
+  ): Promise<RunnerStopOutcome> {
+    const response = await this.fetch(
+      `/api/runs/${encodeURIComponent(runId)}/stop`,
+      {
+        method: "POST",
+        signal,
+      }
+    );
+    const envelope = await this.readJson(response, runSnapshotEnvelopeSchema, {
+      signal,
+    });
+    return { pending: response.status === 202, run: envelope.run };
   }
 
   private async fetch(
