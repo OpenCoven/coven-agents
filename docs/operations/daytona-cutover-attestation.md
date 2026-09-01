@@ -3,7 +3,7 @@
 - Status: Daytona production control plane verified and superseded execution
   resources retired; full subscriber lifecycle exercise remains approval-gated
 - Prepared: 2026-08-29
-- Updated: 2026-08-30
+- Updated: 2026-09-01
 - Scope: same-origin browser access, Daytona lifecycle, durable recovery, and
   provider-resource disposition
 
@@ -85,6 +85,78 @@ Repository evidence checklist:
       documented exceptions.
 - [x] Exact local gate results are recorded above.
 
+## Accepted credential materialization policy
+
+This is a repository policy ratification, not a claim of a new deployed
+exercise. Production evidence remains required in the checklist below.
+
+The accepted production lifecycle is one persistent tenant-scoped Daytona
+sandbox per product agent. Runs reuse that sandbox; they do not create
+ephemeral per-run sandboxes. Creation fixes sandbox TTL at `0` and automatic
+deletion at `-1`. Only the existing database-, version-, and
+generation-fenced lifecycle can reset or decommission it.
+
+Daytona Secrets are not used and are not a source of truth. The encrypted
+tenant credential row in application custody remains the source. After fresh
+entitlement, capacity, and lease checks, the final credential acquisition
+transaction locks and reads exactly one `(tenant, harness)` row and returns an
+immutable one-use plaintext snapshot. The runner rechecks entitlement
+immediately before fresh acquisition and before provider start. Replacement or
+deletion waits for that read; it changes only later acquisition: it cannot
+switch tenant or revision inside the acquired handle, cannot reuse that
+handle, and cannot retroactively rewrite an exact attempt that was already
+durably authorized and started under the bounded `finish_current` policy.
+Entitlement or account revocation stops fresh acquisition and launch;
+`finish_current` has no credential reacquisition or replacement-start
+authority.
+
+The application passes that snapshot in exactly one per-call environment value
+to a fixed Daytona staging command. It applies `umask 077`, writes only the
+deterministic `(run, attempt)` credential path, applies and verifies mode
+`0600`, and sends no other environment values. That invocation is neither a
+persistent sandbox configuration nor the launched harness environment. The
+attempt-owned session reads its file into the harness-auth variable, deletes
+the file immediately, unsets all other harness, provider-model, and
+control-plane credential variables, then `exec`s the harness. The harness
+command receives no provider or control-plane secret value. This deliberately
+limited server-to-sandbox transfer corrects the inaccurate blanket statement
+that plaintext never leaves the server; browser code, Daytona Secrets,
+persistent configuration, and all control-plane secrets remain outside that
+transfer.
+
+Earlier wording that environment injection requires an ephemeral per-run
+sandbox is superseded. It described persistent sandbox configuration or the
+harness environment, not the single fixed staging call into an attempt-scoped,
+mode-`0600` file. The replacement controls are one-use application-owned
+acquisition, immediate session-owned deletion, terminal and recovery sweeping,
+and sandbox reset whenever file or session absence cannot be proved.
+
+### Cleanup and recovery procedure
+
+1. Derive the only permitted session and credential path from the durable run
+   and attempt UUIDs. A worker must not accept caller-provided session or path
+   identifiers.
+2. Before a new staging call, remove and confirm absence of a stale session
+   with the same deterministic attempt identity. Do not stage while its
+   absence is ambiguous.
+3. On every pre-launch failure, remove and verify both that credential path
+   and that attempt session before releasing durable preparation.
+4. On terminal or cancellation cleanup, again remove and verify both exact
+   resources. A session `404` or `410` proves only the session's absence; it
+   does not skip credential-path cleanup.
+5. Keep any ambiguous lookup, deletion, or path verification as an explicit
+   cleanup/recovery/reset-required state. It cannot be reported as a
+   successful start, stop, cancellation, or terminal cleanup.
+6. Reset or decommission only through the existing durable agent
+   version/generation fence. An older attempt must not reset a replacement
+   sandbox, and a reset sandbox must not be reused until provider absence and
+   database finalization are confirmed.
+7. Retain Daytona evidence that deleting a process session terminates its
+   complete process tree, including a deliberately detached descendant. Until
+   that evidence exists, session-record absence alone cannot prove that a
+   residual process cannot observe a later staging file; treat the sandbox as
+   reset-required before persistent reuse.
+
 ## Production cutover and retirement evidence
 
 Read-only inventory was collected on 2026-08-29. Authorized production
@@ -164,12 +236,31 @@ for removal of the superseded provider.
 
 - [ ] Create an agent through the production same-origin API.
 - [ ] Confirm one tenant-scoped persistent sandbox is assigned.
+- [ ] Confirm its creation policy records TTL `0`, auto-delete `-1`, and no
+      Daytona Secret or persistent harness credential configuration.
 - [ ] Start the same operation twice and prove one durable run.
 - [ ] Resume SSE from a retained event cursor without gaps or duplicates.
 - [ ] Stop a running attempt and confirm bounded terminal convergence.
 - [ ] Delete the agent and confirm provider cleanup plus database finalization.
 - [ ] Capture only sanitized IDs, timestamps, status transitions, and aggregate
       counts.
+
+### Credential materialization
+
+- [ ] Capture a sanitized deployment exercise proving the one-value fixed
+      staging call creates the deterministic mode-`0600` attempt file, the
+      attempt session deletes it before the harness, and the launched harness
+      has no provider or control-plane secret value.
+- [ ] Exercise replacement and deletion around acquisition with only
+      sanitized outcome/revision classifications: an acquired one-use snapshot
+      remains fixed, a later acquisition sees the replacement or absence, and
+      no tenant/harness swap occurs.
+- [ ] Exercise a stale-session, path-cleanup, or provider-ambiguity recovery
+      and retain only sanitized evidence that no success was reported before
+      exact cleanup or fenced reset converged.
+- [ ] Retain provider-backed evidence that session deletion eliminates a
+      deliberately detached descendant. If that cannot be proved, retain the
+      fenced sandbox-reset result before reusing the persistent sandbox.
 
 ### Same-origin and security boundary
 

@@ -78,7 +78,8 @@ export type ProductionClaimDependencies = Readonly<{
   clock?: () => Date;
   dispatch: (
     claimed: RunnerClaimedDispatch,
-    context: CredentialContext
+    context: CredentialContext,
+    revalidateCredentialContext: () => Promise<CredentialContextDecision>
   ) => Promise<RunnerDispatchResult>;
   environment?: Readonly<Record<string, string | undefined>>;
   findAccount?: ProductionAccountFinder;
@@ -397,7 +398,9 @@ export async function dispatchProductionClaim(
       dependencies.operator
     );
   }
-  return dependencies.dispatch(claimed, decision.context);
+  return dependencies.dispatch(claimed, decision.context, () =>
+    credentialContextForRun(claimed.run, dependencies)
+  );
 }
 
 function nextDispatchLease(leaseMilliseconds: number): Readonly<{
@@ -509,14 +512,15 @@ function hermeticConfiguredClaimDispatcher(
     ]);
     const resolvedLimits = limits ?? admission.admissionLimitsFromEnvironment();
     return dispatchProductionClaim(claimed, {
-      dispatch: (authorized, context) =>
-        admission.dispatchRunnerClaim(
+      dispatch: (authorized, context, revalidateCredentialContext) => {
+        let currentContext = context;
+        return admission.dispatchRunnerClaim(
           authorized,
           composition.hermeticRunnerDispatchDependencies({
             credentialDependencies:
               credentials.drizzleRunnerCredentialDependencies(database),
             credentialInput: (run) => ({
-              ...context,
+              ...currentContext,
               harnessId: run.agentRuntime,
               operationId: run.operationId,
               runId: run.id,
@@ -524,9 +528,17 @@ function hermeticConfiguredClaimDispatcher(
             }),
             limits: resolvedLimits,
             operator: OPERATOR,
+            revalidateCredentialAuthority: async () => {
+              const decision = await revalidateCredentialContext();
+              if (decision.kind === "allowed") {
+                currentContext = decision.context;
+              }
+              return decision.kind;
+            },
             store,
           })
-        ),
+        );
+      },
       findAccount,
       operator: OPERATOR,
       store,

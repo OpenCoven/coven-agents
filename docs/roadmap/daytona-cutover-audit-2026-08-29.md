@@ -16,7 +16,7 @@ Candidate base:
 | --- | --- | --- |
 | Browser transport | Relative same-origin APIs are the current browser boundary. | Active docs now describe Auth.js session access only. |
 | Authority | Subscriber state and tenant ownership are server-derived. | Security and roadmap docs cite route and dispatch-time checks. |
-| Credential custody | Harness plaintext is server-only and attempt-scoped. | README, ADRs, runbooks, and threat model use one custody model. |
+| Credential custody | Harness plaintext uses only the ratified short-lived server-to-sandbox attempt transfer. | README, ADRs, runbooks, and threat model use one custody model. |
 | Provider lifecycle | Daytona is the sole execution provider. | ADR-002 records lifecycle, rollback, and adapter criteria. |
 | Durable state | PostgreSQL owns runs, events, attempts, cancellation, and recovery. | Roadmap and diagnostics proposals now use durable database evidence. |
 | Historical guidance | Fully decommissioned implementation plans could be mistaken for current instructions. | The dated governance exception and sanitized [tombstone index](../superpowers/README.md) make the reviewed policy evolution and Git-history recovery explicit. |

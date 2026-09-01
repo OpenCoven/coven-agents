@@ -16,7 +16,8 @@ Goals:
 
 1. A caller cannot select or access another tenant.
 2. Guest and lapsed accounts cannot consume subscriber resources.
-3. Harness credentials stay encrypted at rest, server-only in transit, and
+3. Harness credentials stay encrypted at rest, cross only through the
+   ratified server-to-authorized-sandbox attempt staging transport, and remain
    attempt-scoped in Daytona.
 4. Provider work is fenced by durable run, attempt, generation, and lease
    ownership.
@@ -69,8 +70,12 @@ browser response contains provider configuration or tenant harness plaintext.
 
 Credential encryption and scope live in `lib/credentials/store.ts`.
 `lib/credentials/runner-credential.ts` reserves capacity, binds one-use
-authority, reads the tenant credential, and returns an opaque acquisition
-handle. Pre-launch failure compensates the exact usage, lease, and reservation.
+authority, and returns an opaque one-use acquisition handle. Its final
+acquisition transaction locks and reads exactly one tenant-and-harness row,
+then returns one immutable plaintext snapshot. Replacement or deletion waits
+for that read and affects later acquisitions; it cannot change tenant,
+harness, or revision inside a returned handle. Pre-launch failure compensates
+the exact usage, lease, and reservation.
 
 ### B3. Control plane to Daytona
 
@@ -83,15 +88,38 @@ a bounded `finish_current` continuation: only an exact, durable, running
 attempt can reconcile after a later entitlement loss, and it still reaches the
 15-minute run-duration bound.
 
-The tenant harness credential is the only secret sent through the process
-staging environment. `DAYTONA_API_KEY`, `RUNNER_MANUAL_RECONCILE_SECRET`,
-diagnostic bearers, credential KEKs, Auth.js signing material, and other
-control-plane claims stay in the server-side provider/client dependencies;
-they are not process inputs or sandbox environment values. This is enforced by
-the per-call staging-environment assertion in
-`lib/runner/daytona/process.test.ts` and the neutral/provider dependency
-guards in `lib/runner/executor-boundary.test.ts`. A sandbox cannot echo a
-control-plane value it was never given.
+After sandbox readiness and immediately before credential acquisition, the
+runner rechecks the live account. It repeats that check after capacity
+commit and before provider start, compensating the unstarted acquisition if
+authority is gone. This closes the dispatch-time race for fresh acquisition
+and launch; it does not alter one exact attempt already durably running under
+`finish_current`.
+
+The tenant harness credential is intentionally sent once from the server to
+its authorized sandbox, but only through the fixed process staging command's
+single per-call harness-auth environment value. That command uses `umask 077`,
+writes the deterministic attempt path, and verifies mode `0600`. This staging
+environment is neither persistent sandbox configuration nor the harness
+environment. The attempt session reads it, immediately deletes the file,
+unsets other harness/provider-model/control-plane credential variables, and
+execs the harness. No Daytona Secret is used or treated as a source of truth.
+
+`DAYTONA_API_KEY`, `RUNNER_MANUAL_RECONCILE_SECRET`, diagnostic bearers,
+credential KEKs, Auth.js signing material, billing credentials, and database
+credentials stay in server-side dependencies; they are neither staging inputs
+nor harness environment values. This is enforced by the exact per-call staging
+assertion in `lib/runner/daytona/process.test.ts` and the neutral/provider
+dependency guards in `lib/runner/executor-boundary.test.ts`. A sandbox cannot
+echo a control-plane value it was never given.
+
+Before a new staging call, the adapter confirms absence of the same
+attempt-derived session. Pre-launch, terminal, cancellation, and recovery
+cleanup each address only the deterministic session and credential path.
+Cleanup verifies path absence even when Daytona returns session `404` or
+`410`. Any ambiguous deletion, lookup, or path check remains
+cleanup/recovery/reset-required and cannot report a successful outcome.
+Sandbox reset and decommission retain their independent durable version and
+generation fences.
 
 ### B4. Reconciliation and diagnostics
 
@@ -158,7 +186,7 @@ and parsed forms. Repository scanning reports only path, line, and category.
 | --- | --- | --- | --- |
 | T1 | Forged or stale identity reaches another tenant | Live account revalidation, server-derived tenant, scoped store methods | Session compromise remains useful until revocation |
 | T2 | Guest, revoked, or lapsed authority reaches execution | Fail-closed session union, dispatch-time current-authority recheck, and bounded `finish_current` only after durable launch | Retain deployed revocation-before-launch and revocation-during-run evidence |
-| T3 | Credential crosses tenant scope | Tenant+harness AAD, one-use acquisition, exact compensation | Plaintext exists briefly in server and process memory |
+| T3 | Credential crosses tenant scope or persists in a sandbox | Tenant+harness AAD, final locked scoped snapshot, one-use acquisition, fixed one-value staging, immediate file deletion, exact compensation and sweeping | Plaintext exists briefly in server and authorized sandbox process memory; retain provider evidence that session deletion contains the complete process tree, or reset before persistent reuse |
 | T4 | Database and KEK are both compromised | Per-row AES-GCM data keys and versioned wrapping | Combined compromise defeats encryption |
 | T5 | Stale provider work mutates a replacement | Sandbox generation, attempt ID, version, and lease fences | New adapters must preserve equivalent fencing |
 | T6 | Harness exfiltrates data | Daytona isolation and domain allowlist | Complete `coven-agents-cloud.4` |
@@ -173,12 +201,19 @@ and parsed forms. Repository scanning reports only path, line, and category.
 ## Incident and recovery expectations
 
 - Revoke affected account or credential authority first.
+- Treat credential replacement or deletion as forward-looking: it blocks later
+  acquisition, but does not mutate a plaintext snapshot already acquired by an
+  exact authorized launch. Entitlement revocation prevents fresh acquisition;
+  only the bounded exact-attempt `finish_current` recovery may continue.
 - Rotate the active secret, redeploy, and prove the old value is rejected.
 - Preserve PostgreSQL cleanup ownership until Daytona absence and database
   finalization are confirmed.
 - Keep recovery idempotent, cursor-bounded, lease-bounded, and exact-attempt
   fenced.
 - Never turn ambiguous provider state into a success result.
+- When session or credential-file absence cannot be confirmed, retain the
+  cleanup record and reset the fenced persistent sandbox before reuse. Do not
+  stage a new credential into that ambiguous attempt.
 - Use the bounded internal inventory before a resource-offboarding exercise;
   it is evidence only. Decommission app-owned resources through the durable
   application lifecycle, and never delete or adopt a resource from a label,
@@ -193,12 +228,15 @@ Primary executable evidence:
 - `lib/runner/auth.test.ts`
 - `lib/runner/http.test.ts`
 - `lib/credentials/runner-credential.test.ts`
+- `lib/credentials/store.test.ts`
 - `lib/runner/admission.test.ts`
 - `lib/runner/store.test.ts`
 - `lib/runner/sse.test.ts`
 - `lib/runner/reconcile.test.ts`
 - `lib/runner/evidence.test.ts`
 - `lib/runner/daytona/process.test.ts`
+- `lib/runner/daytona/names.test.ts`
+- `lib/runner/daytona/sandbox.test.ts`
 - `lib/runner/daytona/resource-inventory.test.ts`
 - `lib/runner/resource-observability.test.ts`
 - `lib/runner/http.test.ts`

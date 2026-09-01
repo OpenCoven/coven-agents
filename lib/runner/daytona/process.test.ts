@@ -968,6 +968,21 @@ test("stages only through per-call env and starts a safe asynchronous session", 
     workspace: "/workspace/repo",
   });
   assert.deepEqual(stage?.env, { COPILOT_GITHUB_TOKEN: SECRET });
+  assert.deepEqual(Object.keys(stage?.env ?? {}), ["COPILOT_GITHUB_TOKEN"]);
+  assert.equal(
+    stage?.command,
+    [
+      "umask 077",
+      `printf '%s' "$COPILOT_GITHUB_TOKEN" > '${PATH}'`,
+      `chmod 600 '${PATH}'`,
+      `[ "$(stat -c '%a' '${PATH}' 2>/dev/null || stat -f '%Lp' '${PATH}')" = 600 ]`,
+    ].join(" && ")
+  );
+  assert.equal(
+    calls.filter((call) => call.kind === "command" && call.env !== undefined)
+      .length,
+    1
+  );
   for (const serverOnlySecret of [
     "AUTH_SECRET",
     "CREDENTIAL_KEK",
@@ -1004,7 +1019,7 @@ test("stages only through per-call env and starts a safe asynchronous session", 
       `COPILOT_GITHUB_TOKEN="$(cat -- '${PATH}')"`,
       "export COPILOT_GITHUB_TOKEN",
       `rm -f -- '${PATH}'`,
-      "unset GH_TOKEN GITHUB_TOKEN CODEX_API_KEY CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY AZURE_OPENAI_API_KEY GOOGLE_API_KEY OPENAI_API_KEY",
+      "unset GH_TOKEN GITHUB_TOKEN CODEX_API_KEY CLAUDE_CODE_OAUTH_TOKEN AI_GATEWAY_API_KEY ANTHROPIC_API_KEY AZURE_OPENAI_API_KEY GOOGLE_API_KEY OPENAI_API_KEY ABUSE_KEY_SECRET AUTH_GITHUB_SECRET AUTH_SECRET BLOB_READ_WRITE_TOKEN CREDENTIAL_KEK CREDENTIAL_KEK_CURRENT_VERSION CREDENTIAL_KEK_V1 CREDENTIAL_KEK_V2 CRON_SECRET DAYTONA_API_KEY OPERATOR_DIAGNOSTIC_TOKEN POSTGRES_URL REDIS_URL RUNNER_MANUAL_RECONCILE_SECRET STRIPE_SECRET_KEY STRIPE_WEBHOOK_SECRET",
       "export CI=true",
       "mkdir -p -- '/workspace/repo'",
       "cd -- '/workspace/repo'",

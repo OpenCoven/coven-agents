@@ -146,6 +146,11 @@ export type RunnerDispatchResult =
       runId: string;
     };
 
+export type RunnerCredentialAuthority =
+  | "allowed"
+  | "authority_revoked"
+  | "unavailable";
+
 export type RunnerDispatchDependencies = Readonly<{
   acquireCredential: (
     input: RunnerCredentialAcquireInput
@@ -154,12 +159,15 @@ export type RunnerDispatchDependencies = Readonly<{
   credentialInput: (
     run: RunnerRunRecord,
     agent: RunnerAgentRecord
-  ) => RunnerCredentialAcquireInput;
+  ) => RunnerCredentialAcquireInput | Promise<RunnerCredentialAcquireInput>;
   dispatchLeaseMs?: number;
   executor: RunnerExecutor;
   limits: RunnerAdmissionLimits;
   operator: RunnerOperator;
   randomToken?: () => string;
+  revalidateCredentialAuthority?: (
+    run: RunnerRunRecord
+  ) => Promise<RunnerCredentialAuthority>;
   sealAttemptRedaction?: (input: {
     attemptId: string;
     credential: string;
@@ -426,6 +434,20 @@ async function requeuePreparedDispatch(
   return released ? await releaseUnstarted(dependencies, released) : false;
 }
 
+async function revalidateCredentialAuthority(
+  dependencies: RunnerDispatchDependencies,
+  run: RunnerRunRecord
+): Promise<RunnerCredentialAuthority> {
+  if (!dependencies.revalidateCredentialAuthority) {
+    return "allowed";
+  }
+  try {
+    return await dependencies.revalidateCredentialAuthority(run);
+  } catch {
+    return "unavailable";
+  }
+}
+
 export async function terminalizeUnstartedDispatchFailure(
   dependencies: Readonly<{
     clock?: () => Date;
@@ -667,10 +689,38 @@ export async function dispatchRunnerClaim(
     }
   }
 
+  const authorityBeforeCredential = await revalidateCredentialAuthority(
+    dependencies,
+    run
+  );
+  if (authorityBeforeCredential === "authority_revoked") {
+    return (await terminalizePreparedDispatchFailure(
+      dependencies,
+      callbacks,
+      preparedAttemptId,
+      run,
+      "authority_revoked",
+      "Run authority is no longer valid.",
+      false
+    ))
+      ? { kind: "refused", reason: "authority", runId: run.id }
+      : { kind: "retained", reason: "cleanup_pending", runId: run.id };
+  }
+  if (authorityBeforeCredential === "unavailable") {
+    return (await requeuePreparedDispatch(
+      dependencies,
+      callbacks,
+      preparedAttemptId,
+      run.id
+    ))
+      ? { kind: "retryable", reason: "credential_unavailable", runId: run.id }
+      : { kind: "retained", reason: "cleanup_pending", runId: run.id };
+  }
+
   let credential: RunnerCredentialAcquireResult;
   try {
     credential = await dependencies.acquireCredential(
-      dependencies.credentialInput(run, ensured.agent)
+      await dependencies.credentialInput(run, ensured.agent)
     );
   } catch {
     return (await requeuePreparedDispatch(
@@ -801,6 +851,39 @@ export async function dispatchRunnerClaim(
       return { kind: "retained", reason: "cleanup_pending", runId: run.id };
     }
     return (await releaseUnstarted(dependencies, released))
+      ? { kind: "retryable", reason: "credential_unavailable", runId: run.id }
+      : { kind: "retained", reason: "cleanup_pending", runId: run.id };
+  }
+
+  const authorityBeforeStart = await revalidateCredentialAuthority(
+    dependencies,
+    run
+  );
+  if (authorityBeforeStart !== "allowed") {
+    try {
+      await credential.acquisition.compensate();
+    } catch {
+      return { kind: "retained", reason: "cleanup_pending", runId: run.id };
+    }
+    if (authorityBeforeStart === "authority_revoked") {
+      return (await terminalizePreparedDispatchFailure(
+        dependencies,
+        callbacks,
+        preparedAttemptId,
+        run,
+        "authority_revoked",
+        "Run authority is no longer valid.",
+        false
+      ))
+        ? { kind: "refused", reason: "authority", runId: run.id }
+        : { kind: "retained", reason: "cleanup_pending", runId: run.id };
+    }
+    return (await requeuePreparedDispatch(
+      dependencies,
+      callbacks,
+      preparedAttemptId,
+      run.id
+    ))
       ? { kind: "retryable", reason: "credential_unavailable", runId: run.id }
       : { kind: "retained", reason: "cleanup_pending", runId: run.id };
   }

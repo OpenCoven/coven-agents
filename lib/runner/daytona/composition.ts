@@ -85,13 +85,14 @@ function configuredClaimDispatcher(
     ]);
     const resolvedLimits = limits ?? admission.admissionLimitsFromEnvironment();
     return dispatchProductionClaim(claimed, {
-      dispatch: (authorized, context) => {
+      dispatch: (authorized, context, revalidateCredentialContext) => {
+        let currentContext = context;
         const credentialDependencies =
           credentials.drizzleRunnerCredentialDependencies(database);
         const dependencies = executor.daytonaRunnerDispatchDependencies({
           credentialDependencies,
           credentialInput: (run, _agent) => ({
-            ...context,
+            ...currentContext,
             harnessId: run.agentRuntime,
             operationId: run.operationId,
             runId: run.id,
@@ -99,6 +100,13 @@ function configuredClaimDispatcher(
           }),
           limits: resolvedLimits,
           operator: OPERATOR,
+          revalidateCredentialAuthority: async () => {
+            const decision = await revalidateCredentialContext();
+            if (decision.kind === "allowed") {
+              currentContext = decision.context;
+            }
+            return decision.kind;
+          },
           sandboxConfiguration: sandbox.daytonaSandboxConfiguration(),
           sandboxDependencies: { daytona, observe },
           store,

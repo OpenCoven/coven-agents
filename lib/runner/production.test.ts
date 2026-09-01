@@ -933,6 +933,85 @@ test("production dispatches only a currently subscribed matching authority", asy
   });
 });
 
+test("production passes a fresh account revalidation to credential dispatch", async () => {
+  const current = claimed(5);
+  let accountReads = 0;
+  let revalidated: string | undefined;
+
+  const result = await dispatchProductionClaim(current, {
+    dispatch: async (_actualClaim, _context, revalidate) => {
+      revalidated = (await revalidate()).kind;
+      return revalidated === "authority_revoked"
+        ? { kind: "refused", reason: "authority", runId: current.run.id }
+        : { kind: "started", runId: current.run.id };
+    },
+    environment: {
+      ABUSE_KEY_SECRET: "production-test-key",
+      GLOBAL_DAILY_RUN_CAP: "500",
+    },
+    findAccount: () => {
+      accountReads += 1;
+      return Promise.resolve({
+        authVersion: accountReads === 1 ? 5 : 6,
+        billingPeriodStart: new Date("2026-08-01T00:00:00.000Z"),
+        subscribedUntil: ACTIVE_SUBSCRIPTION_UNTIL,
+      });
+    },
+    operator,
+    store: {} as never,
+  });
+
+  assert.deepEqual(result, {
+    kind: "refused",
+    reason: "authority",
+    runId: current.run.id,
+  });
+  assert.equal(revalidated, "authority_revoked");
+  assert.equal(accountReads, 2);
+});
+
+test("production revalidation returns the current billing-period context", async () => {
+  const current = claimed(5);
+  let accountReads = 0;
+  let refreshedContext: unknown;
+
+  const result = await dispatchProductionClaim(current, {
+    dispatch: async (_actualClaim, _context, revalidate) => {
+      const refreshed = await revalidate();
+      assert.equal(refreshed.kind, "allowed");
+      if (refreshed.kind === "allowed") {
+        refreshedContext = refreshed.context;
+      }
+      return { kind: "started", runId: current.run.id };
+    },
+    environment: {
+      ABUSE_KEY_SECRET: "production-test-key",
+      GLOBAL_DAILY_RUN_CAP: "500",
+    },
+    findAccount: () => {
+      accountReads += 1;
+      return Promise.resolve({
+        authVersion: 5,
+        billingPeriodStart:
+          accountReads === 1
+            ? new Date("2026-08-01T00:00:00.000Z")
+            : new Date("2026-09-01T00:00:00.000Z"),
+        subscribedUntil: ACTIVE_SUBSCRIPTION_UNTIL,
+      });
+    },
+    operator,
+    store: {} as never,
+  });
+
+  assert.deepEqual(result, { kind: "started", runId: current.run.id });
+  assert.deepEqual(refreshedContext, {
+    globalDailyCap: 500,
+    keySecret: "production-test-key",
+    periodStart: new Date("2026-09-01T00:00:00.000Z"),
+  });
+  assert.equal(accountReads, 2);
+});
+
 test("production releases failed claim setup for durable retry without provider leakage", async () => {
   const current = claimed(5);
   let dispatched = 0;

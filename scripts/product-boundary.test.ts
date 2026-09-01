@@ -468,6 +468,42 @@ test("the accepted Daytona ADR records the current execution boundary", () => {
   }
 });
 
+test("credential materialization remains attempt-scoped inside persistent Daytona sandboxes", () => {
+  const adr = readFileSync(daytonaAdrUrl, "utf8");
+  const threatModel = readFileSync(
+    new URL("docs/security/execution-threat-model.md", repositoryRoot),
+    "utf8"
+  );
+  const attestation = readFileSync(cutoverAttestationUrl, "utf8");
+
+  for (const policy of [
+    /one tenant-scoped persistent Daytona sandbox/i,
+    /Daytona Secrets are not used/i,
+    /exactly one\s+environment entry/i,
+    /deterministic\s+`\(run, attempt\)` credential path/i,
+    /Replacement, deletion, and entitlement races/i,
+    /Cleanup ambiguity/i,
+  ]) {
+    assert.match(adr, policy);
+  }
+  assert.doesNotMatch(
+    adr,
+    /credential plaintext never crosses the server boundary/i
+  );
+  assert.match(
+    threatModel,
+    /server-to-authorized-sandbox attempt staging transport/
+  );
+  assert.match(threatModel, /session `404` or\s+`410`/);
+  assert.match(adr, /complete process tree/i);
+  assert.match(attestation, /repository policy ratification/i);
+  assert.match(
+    attestation,
+    /Earlier wording that environment injection requires an ephemeral per-run\s+sandbox is superseded/
+  );
+  assert.match(attestation, /deliberately detached descendant/i);
+});
+
 test("the cutover attestation separates repository and production evidence", () => {
   const attestation = readFileSync(cutoverAttestationUrl, "utf8");
 

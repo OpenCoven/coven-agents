@@ -199,15 +199,35 @@ function asyncCommand(
   harnessCommand: string
 ): string {
   const providerCredentialVariables = [
+    "AI_GATEWAY_API_KEY",
     "ANTHROPIC_API_KEY",
     "AZURE_OPENAI_API_KEY",
     "GOOGLE_API_KEY",
     "OPENAI_API_KEY",
   ];
+  const controlPlaneCredentialVariables = [
+    "ABUSE_KEY_SECRET",
+    "AUTH_GITHUB_SECRET",
+    "AUTH_SECRET",
+    "BLOB_READ_WRITE_TOKEN",
+    "CREDENTIAL_KEK",
+    "CREDENTIAL_KEK_CURRENT_VERSION",
+    "CREDENTIAL_KEK_V1",
+    "CREDENTIAL_KEK_V2",
+    "CRON_SECRET",
+    "DAYTONA_API_KEY",
+    "OPERATOR_DIAGNOSTIC_TOKEN",
+    "POSTGRES_URL",
+    "REDIS_URL",
+    "RUNNER_MANUAL_RECONCILE_SECRET",
+    "STRIPE_SECRET_KEY",
+    "STRIPE_WEBHOOK_SECRET",
+  ];
   const credentialVariables = [
     ...new Set([
       ...HARNESS_SPECS.flatMap((spec) => spec.authEnvVars),
       ...providerCredentialVariables,
+      ...controlPlaneCredentialVariables,
     ]),
   ].filter((name) => name !== authName);
   const restricted = executionPermission !== "unrestricted";

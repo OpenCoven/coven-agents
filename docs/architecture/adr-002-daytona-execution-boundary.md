@@ -34,8 +34,9 @@ remains in PostgreSQL.
    and `RunnerPersistentResourceLifecycle` owns per-agent prewarm,
    decommission, stale/ambiguous recovery, reset, and bounded resource
    inventory. Tenant harness credentials are acquired through server-only
-   custody, staged for one attempt, and never returned to browser code.
-   Daytona SDK configuration, identifiers, and handles remain in the adapter.
+   custody, materialized for one attempt under the policy below, and never
+   returned to browser code. Daytona SDK configuration, identifiers, and
+   handles remain in the adapter.
 5. **PostgreSQL owns execution truth.** Agent, run, event, operation,
    admission, dispatch, attempt, cancellation, sandbox, and reconciliation
    records are durable database state. Provider observations update those
@@ -64,13 +65,102 @@ remains in PostgreSQL.
     deletion remains disabled so valid persistent work cannot disappear
     outside fenced database recovery and decommission.
 
+## Credential materialization policy
+
+This ADR ratifies **staged attempt-file transport** as the selected equivalent
+credential transport for the persistent Daytona lifecycle:
+
+- One tenant-scoped persistent Daytona sandbox belongs to each product agent;
+  runs do not create ephemeral per-run sandboxes. Its TTL is `0` and automatic
+  deletion is `-1`; database- and generation-fenced lifecycle transitions are
+  the only application deletion authority.
+- Daytona Secrets are not used. They are neither a credential source of truth
+  nor a fallback transport. The application credential row remains encrypted
+  PostgreSQL custody until one server-owned acquisition returns a plaintext
+  snapshot.
+- After the pre-launch entitlement recheck, capacity reservation, and
+  one-use lease, the final credential acquisition transaction locks and reads
+  exactly one `(tenant, harness)` row. It decrypts one immutable plaintext
+  snapshot into an opaque, one-use handle. It does not return a credential to
+  a browser or durable provider configuration.
+- The adapter makes one `executeCommand` staging call with exactly one
+  environment entry: the selected harness-auth variable and that plaintext.
+  Its fixed command applies `umask 077`, writes only the deterministic
+  `(run, attempt)` credential path, changes it to mode `0600`, and verifies
+  the mode. The staging environment is not the persistent sandbox
+  configuration and is not the launched harness environment.
+- The deterministic attempt session reads that file into its harness-auth
+  variable, deletes the file before running the harness, unsets all other
+  harness, provider-model, and control-plane credential variables, then
+  `exec`s the harness. The harness command carries no control-plane secret or
+  provider credential value. The sandbox has no durable harness credential.
+
+The earlier heuristic that any environment injection requires an ephemeral
+per-run sandbox is superseded because it conflates a persistent sandbox's
+configuration or harness environment with this single, fixed, attempt-scoped
+staging call. A blanket claim that credential plaintext remains entirely on
+the server is also inaccurate: this policy intentionally transfers one tenant
+harness plaintext from the server to its already-authorized sandbox. The real
+boundaries are narrower and enforceable: no browser receives it, no
+control-plane secret enters the sandbox, no Daytona Secret stores it, no
+provider configuration retains it, and the launched attempt consumes and
+deletes its only file.
+
+### Replacement, deletion, and entitlement races
+
+Credential replacement or deletion is ordered at acquisition, not by mutating
+an acquired handle:
+
+1. The final acquisition transaction locks the exact tenant-and-harness row
+   while it reads one snapshot. A concurrent replacement or deletion waits
+   for that transaction; an earlier completed replacement is the snapshot
+   read, while an earlier completed deletion yields no credential.
+2. Once returned, the handle cannot swap tenant, harness, or credential
+   revision, cannot be serialized, and can invoke one launch boundary only.
+   A later replacement or deletion affects later acquisitions only; it does
+   not retroactively rewrite that authorized snapshot.
+3. Initial dispatch validates current entitlement before context effects, and
+   the runner revalidates it immediately before fresh credential acquisition
+   and again before provider start. Revocation therefore prevents fresh
+   acquisition or launch. It does not retroactively rewrite an exact, durably
+   authorized and started `finish_current` attempt; that bounded recovery path
+   neither acquires another credential nor starts a replacement.
+
+### Attempt cleanup and recovery
+
+The run and attempt UUIDs derive the only session and credential-file path an
+attempt may address. Before staging, the adapter removes and confirms absence
+of a stale session with that exact deterministic name; it never treats another
+attempt's session or path as cleanup authority. A pre-launch failure removes
+and verifies both exact resources before durable preparation can be released.
+Terminal and cancellation cleanup likewise removes and verifies the exact
+session and path. A Daytona `404` or `410` confirms session absence, but still
+requires credential-path cleanup.
+
+Cleanup ambiguity, including a failed path check, cannot become a successful
+start, stop, cancellation, or terminal result. It remains a durable
+cleanup/recovery obligation and requires a sandbox reset when absence cannot
+be confirmed. Reset and decommission are independently fenced by the agent's
+durable version and sandbox generation, so an old attempt cannot destroy a
+replacement sandbox.
+
+Persistent reuse additionally depends on Daytona process-session containment:
+session deletion must terminate the attempt's complete process tree, including
+any attempted background descendants. The source adapter can confirm only the
+provider session and deterministic file path. Until provider behavior is
+retained as deployment evidence, a missing session record is not proof that a
+detached process cannot observe a later staging file; that condition requires
+a fenced sandbox reset before reuse.
+
 ## Provider adapter and rollback criteria
 
 A provider adapter may be replaced only through a superseding ADR and a
 versioned migration that proves:
 
 - tenant and subscriber authority remain server-derived;
-- credential plaintext never crosses the server boundary;
+- tenant harness plaintext crosses only through an equivalent explicit,
+  attempt-scoped transport with no browser, provider-configuration, or
+  control-plane-secret exposure;
 - persistent per-agent workspace ownership and deletion semantics are
   equivalent;
 - idempotent starts, cursor-safe event replay, bounded evidence, cancellation,

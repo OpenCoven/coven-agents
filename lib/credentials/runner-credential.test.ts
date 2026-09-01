@@ -202,6 +202,70 @@ test("runner credential is one-use and never serializes its plaintext", async ()
   ]);
 });
 
+test("acquisitions retain an immutable scoped snapshot through replacement and deletion", async () => {
+  const calls: string[] = [];
+  const service = dependencies(calls);
+  const observedScopes: Array<readonly [string, string]> = [];
+  let current: string | null = "credential-revision-one";
+  service.readCredential = async (tenant, harnessId) => {
+    observedScopes.push([tenant, harnessId]);
+    return current;
+  };
+
+  const first = await acquireRunnerCredential(input(), service);
+  assert.equal(first.kind, "acquired");
+  if (first.kind !== "acquired") {
+    throw new Error("First credential acquisition unexpectedly failed.");
+  }
+
+  current = "credential-revision-two";
+  const second = await acquireRunnerCredential(
+    {
+      ...input(),
+      operationId: "00000000-0000-4000-8000-000000000004",
+      runId: "00000000-0000-4000-8000-000000000005",
+    },
+    service
+  );
+  assert.equal(second.kind, "acquired");
+  if (second.kind !== "acquired") {
+    throw new Error("Replacement credential acquisition unexpectedly failed.");
+  }
+
+  current = null;
+  const deleted = await acquireRunnerCredential(
+    {
+      ...input(),
+      operationId: "00000000-0000-4000-8000-000000000006",
+      runId: "00000000-0000-4000-8000-000000000007",
+    },
+    service
+  );
+  assert.equal(deleted.kind, "unavailable");
+  assert.equal(
+    deleted.kind === "unavailable" && deleted.error.code,
+    "no_credential"
+  );
+  assert.deepEqual(observedScopes, [
+    ["tenant_a", "copilot"],
+    ["tenant_a", "copilot"],
+    ["tenant_a", "copilot"],
+  ]);
+
+  await first.acquisition.commit();
+  await second.acquisition.commit();
+  assert.equal(
+    await first.acquisition.use((credential) => credential.credential),
+    "credential-revision-one"
+  );
+  assert.equal(
+    await second.acquisition.use((credential) => credential.credential),
+    "credential-revision-two"
+  );
+  await assert.rejects(() => first.acquisition.use(() => Promise.resolve()));
+  await assert.rejects(() => second.acquisition.use(() => Promise.resolve()));
+});
+
 test("credential acquisition releases reservation and lease when preparation fails", async () => {
   const calls: string[] = [];
   const service = dependencies(calls);
