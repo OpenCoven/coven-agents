@@ -1860,7 +1860,8 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         if (run.daytonaAttemptId) {
           return { kind: "not_live" };
         }
-        const attemptId = randomUUID() as RunnerDaytonaAttemptId;
+        const attemptId =
+          input.attemptId ?? (randomUUID() as RunnerDaytonaAttemptId);
         const [updated] = await transaction.execute(
           statement(
             "claim-daytona-process-preparation",

@@ -90,6 +90,11 @@ export type RunnerStartedExecution = Readonly<{
 }>;
 
 export type RunnerExecutor = Readonly<{
+  /**
+   * A provider may derive a deterministic attempt identifier from the
+   * server-minted run ID. Browser request data never reaches this boundary.
+   */
+  attemptIdForRun?: (runId: string) => RunnerExecutionAttemptId;
   executionProvenance: RunnerExecutionProvenance;
   ensureExecutionContext: (authority: RunnerDispatchAuthority) => Promise<
     Readonly<{
@@ -118,7 +123,8 @@ export function runnerDispatchAuthorizers(
   store: DispatchAuthorizerStore,
   operator: RunnerOperator,
   authority: RunnerDispatchAuthority,
-  executionProvenance: RunnerExecutionProvenance
+  executionProvenance: RunnerExecutionProvenance,
+  deterministicAttemptId?: RunnerExecutionAttemptId
 ): RunnerExecutionAuthorizers {
   let prepared: RunnerDispatchAuthority | undefined;
   let latest = authority;
@@ -157,7 +163,12 @@ export function runnerDispatchAuthorizers(
       const result = await store.authorizeDaytonaPreparation(
         operator,
         authority,
-        { executionProvenance }
+        {
+          ...(deterministicAttemptId
+            ? { attemptId: deterministicAttemptId }
+            : {}),
+          executionProvenance,
+        }
       );
       if (result.kind !== "authorized") {
         return null;

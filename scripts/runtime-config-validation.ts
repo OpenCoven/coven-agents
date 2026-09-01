@@ -7,6 +7,7 @@ import {
   daytonaRequestTimeout,
   daytonaSnapshotConfiguration,
 } from "../lib/runner/daytona/config";
+import { hermeticRunnerMode } from "../lib/runner/hermetic/mode";
 
 const BETA_EMAIL = /^[^\s@,]+@[^\s@,]+$/;
 const REQUIRED_PRODUCTION_VARIABLES = [
@@ -291,6 +292,7 @@ export async function validateRuntimeConfig(
   env: NodeJS.ProcessEnv,
   explicitRelease: boolean
 ): Promise<void> {
+  hermeticRunnerMode(env);
   validateSubscriptionCheckoutEnvironment(env);
 
   const productionRelease = isProductionRelease(env, explicitRelease);

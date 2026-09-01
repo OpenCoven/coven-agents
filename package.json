@@ -30,6 +30,7 @@
     "start": "pnpm validate:release && next start",
     "subscription": "tsx --env-file-if-exists=.env.local --conditions=react-server scripts/subscription.ts",
     "test": "export PLAYWRIGHT=True && pnpm exec playwright test",
+    "test:e2e:hermetic": "tsx --conditions=react-server scripts/e2e-hermetic.ts",
     "test:unit": "tsx --test scripts/*.test.ts && tsx --conditions=react-server --test 'lib/**/*.test.ts' 'app/**/*.test.ts' && pnpm --filter @opencoven/agent-contracts test && pnpm --filter @opencoven/harness test",
     "typecheck": "tsc --noEmit && pnpm -r typecheck",
     "validate:platform-residue": "tsx scripts/platform-residue-scan.ts",

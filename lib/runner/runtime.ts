@@ -20,7 +20,7 @@ import type {
   RunnerReconciliationExecutionResult,
   RunnerReconciliationResult,
 } from "./attempt-reconcile";
-import { COPILOT_CLI_VERSION } from "./daytona/image";
+import { COPILOT_CLI_VERSION } from "./copilot-version";
 import type {
   RunnerDeleteAgentResult,
   RunnerPrewarmOptions,
@@ -36,6 +36,7 @@ import type {
 
 const OPERATOR: RunnerOperator = { kind: "runner-operator" };
 const RECONCILIATION_LEASE_TTL_SECONDS = 360;
+const HERMETIC_DISPATCH_LEASE_MS = 1000;
 const EMPTY_RECONCILIATION_COUNTS: RunnerReconciliationResult = {
   adopted: 0,
   deferred: 0,
@@ -453,7 +454,7 @@ function reconciliationFailure(
   };
 }
 
-function productionReconcile(
+function daytonaProductionReconcile(
   database: ProductionDatabase,
   store: RunnerStore,
   findAccount?: ProductionAccountFinder,
@@ -564,7 +565,7 @@ function productionReconcile(
   };
 }
 
-async function createProductionRunnerServiceForPrincipal(
+async function createDaytonaRunnerServiceForPrincipal(
   databasePrincipal: ProductionDatabasePrincipal,
   dependencies: ProductionRunnerRuntimeDependencies
 ) {
@@ -637,7 +638,7 @@ async function createProductionRunnerServiceForPrincipal(
       )(claimed);
     },
     listHarnesses: async () => registryHarnesses(),
-    reconcileAndDispatch: productionReconcile(
+    reconcileAndDispatch: daytonaProductionReconcile(
       database,
       store,
       dependencies.findAccount,
@@ -685,6 +686,241 @@ async function createProductionRunnerServiceForPrincipal(
       }
     },
   });
+}
+
+function hermeticConfiguredDispatcher(
+  database: ProductionDatabase,
+  store: RunnerStore,
+  findAccount?: ProductionAccountFinder
+): () => Promise<RunnerDispatchResult> {
+  return async () => {
+    const admission = await import("./admission");
+    let claimed: RunnerClaimedDispatch | null;
+    let limits: RunnerAdmissionLimits;
+    try {
+      limits = admission.admissionLimitsFromEnvironment();
+      claimed = await store.claimNextDispatch(OPERATOR, {
+        ...nextDispatchLease(HERMETIC_DISPATCH_LEASE_MS),
+        limits,
+      });
+    } catch {
+      return { kind: "unavailable", reason: "admission_unavailable" };
+    }
+    if (!claimed) {
+      return { kind: "idle" };
+    }
+    return hermeticConfiguredClaimDispatcher(
+      database,
+      store,
+      limits,
+      findAccount
+    )(claimed);
+  };
+}
+
+function hermeticConfiguredClaimDispatcher(
+  database: ProductionDatabase,
+  store: RunnerStore,
+  limits?: RunnerAdmissionLimits,
+  findAccount?: ProductionAccountFinder
+): (claimed: RunnerClaimedDispatch) => Promise<RunnerDispatchResult> {
+  return async (claimed) => {
+    const [admission, credentials, composition] = await Promise.all([
+      import("./admission"),
+      import("@/lib/credentials/runner-credential"),
+      import("./hermetic/composition"),
+    ]);
+    const resolvedLimits = limits ?? admission.admissionLimitsFromEnvironment();
+    return dispatchProductionClaim(claimed, {
+      dispatch: (authorized, context) =>
+        admission.dispatchRunnerClaim(
+          authorized,
+          composition.hermeticRunnerDispatchDependencies({
+            credentialDependencies:
+              credentials.drizzleRunnerCredentialDependencies(database),
+            credentialInput: (run) => ({
+              ...context,
+              harnessId: run.agentRuntime,
+              operationId: run.operationId,
+              runId: run.id,
+              tenant: run.tenant,
+            }),
+            limits: resolvedLimits,
+            operator: OPERATOR,
+            store,
+          })
+        ),
+      findAccount,
+      operator: OPERATOR,
+      store,
+    });
+  };
+}
+
+function hermeticProductionReconcile(
+  database: ProductionDatabase,
+  store: RunnerStore,
+  findAccount?: ProductionAccountFinder,
+  reportFailure?: (failure: RunnerReconciliationFailure) => void
+): RunnerService["reconcileAndDispatch"] {
+  return async () => {
+    let stage: RunnerReconciliationFailure["stage"] = "lease";
+    try {
+      return await runLeasedReconciliation({
+        reconcile: async () => {
+          stage = "composition";
+          const [
+            admission,
+            credentials,
+            reconciliation,
+            composition,
+            teamOrchestration,
+            teamStoreModule,
+          ] = await Promise.all([
+            import("./admission"),
+            import("@/lib/credentials/runner-credential"),
+            import("./attempt-reconcile"),
+            import("./hermetic/composition"),
+            import("@/lib/teams/orchestrate"),
+            import("@/lib/teams/store"),
+          ]);
+          const credentialDependencies =
+            credentials.drizzleRunnerCredentialDependencies(database);
+          const dependencies =
+            composition.hermeticRunnerReconciliationDependencies({
+              credentialDependencies,
+              credentialInput: () => {
+                throw new Error(
+                  "Reconciliation dispatch must resolve account credentials first."
+                );
+              },
+              limits: admission.admissionLimitsFromEnvironment(),
+              operator: OPERATOR,
+              store,
+            });
+          const teams = teamOrchestration.createTeamOrchestrator({
+            admit: (input) => admission.admitRunnerRun(input, { store }),
+            cancelRun: (_principal, runId) =>
+              reconciliation.cancelRunnerRun(
+                runId,
+                composition.hermeticRunnerCancellationDependencies({
+                  credentialDependencies,
+                  operator: OPERATOR,
+                  store,
+                })
+              ),
+            operator: OPERATOR,
+            store: teamStoreModule.createTeamStore(
+              teamStoreModule.drizzleTeamStoreDatabase(database)
+            ),
+          });
+          stage = "reconcile";
+          return reconciliation.reconcileAndDispatch({
+            ...dependencies,
+            claimTeamRuns: teams.claimReadySteps,
+            dispatch: hermeticConfiguredDispatcher(
+              database,
+              store,
+              findAccount
+            ),
+            dispatchClaim: hermeticConfiguredClaimDispatcher(
+              database,
+              store,
+              undefined,
+              findAccount
+            ),
+            projectTeamRuns: teams.projectTerminalSteps,
+          });
+        },
+        store,
+      });
+    } catch (error) {
+      const { RunnerServiceError: RuntimeServiceError } = await import(
+        "./errors"
+      );
+      const runnerError = error instanceof RuntimeServiceError;
+      reportFailure?.(reconciliationFailure(error, stage, runnerError));
+      if (runnerError) {
+        throw error;
+      }
+      // biome-ignore lint/style/useErrorCause: The custom error preserves the sanitized cause through its options.
+      throw new RuntimeServiceError(
+        "reconcile_unavailable",
+        "Runner reconciliation is unavailable.",
+        true,
+        { cause: error }
+      );
+    }
+  };
+}
+
+async function createHermeticRunnerServiceForPrincipal(
+  databasePrincipal: ProductionDatabasePrincipal,
+  dependencies: ProductionRunnerRuntimeDependencies
+) {
+  const database = await (dependencies.databaseFor ?? productionDatabase)(
+    databasePrincipal
+  );
+  const [
+    credentials,
+    reconciliation,
+    composition,
+    sandbox,
+    service,
+    storeModule,
+  ] = await Promise.all([
+    import("@/lib/credentials/runner-credential"),
+    import("./attempt-reconcile"),
+    import("./hermetic/composition"),
+    import("./hermetic/sandbox"),
+    import("./service"),
+    import("./store"),
+  ]);
+  const store = storeModule.createRunnerStore(
+    storeModule.drizzleRunnerStoreDatabase(database)
+  );
+  const credentialDependencies =
+    credentials.drizzleRunnerCredentialDependencies(database);
+
+  return service.createRunnerService({
+    cancelRun: (runId) =>
+      reconciliation.cancelRunnerRun(
+        runId,
+        composition.hermeticRunnerCancellationDependencies({
+          credentialDependencies,
+          operator: OPERATOR,
+          store,
+        })
+      ),
+    deleteSandbox: (principal, agentId) =>
+      sandbox.deleteHermeticSandbox(principal, agentId, store),
+    dispatchClaim: hermeticConfiguredClaimDispatcher(
+      database,
+      store,
+      undefined,
+      dependencies.findAccount
+    ),
+    listHarnesses: async () => registryHarnesses(),
+    reconcileAndDispatch: hermeticProductionReconcile(
+      database,
+      store,
+      dependencies.findAccount,
+      dependencies.reportReconciliationFailure
+    ),
+    store,
+    warmSandbox: (principal, agent) =>
+      sandbox.warmHermeticSandbox(principal, agent, store),
+  });
+}
+
+async function createProductionRunnerServiceForPrincipal(
+  databasePrincipal: ProductionDatabasePrincipal,
+  dependencies: ProductionRunnerRuntimeDependencies
+) {
+  const { hermeticRunnerMode } = await import("./hermetic/mode");
+  return hermeticRunnerMode() === "hermetic"
+    ? createHermeticRunnerServiceForPrincipal(databasePrincipal, dependencies)
+    : createDaytonaRunnerServiceForPrincipal(databasePrincipal, dependencies);
 }
 
 export function createProductionRunnerRuntime(

@@ -87,6 +87,12 @@ export type RunnerExecutionContextResetResult =
  * all provider failures throw so callers preserve the durable retry record.
  */
 export type RunnerReconciliationProvider = Readonly<{
+  /**
+   * Production providers need the persisted credential only to redact opaque
+   * output. The hermetic adapter emits fixed, credential-free evidence and
+   * therefore must not retain credential material solely for recovery.
+   */
+  requiresAttemptRedaction?: boolean;
   resolveExecutionContext: (
     run: RunnerRunRecord,
     authority: RunnerDispatchAuthority
@@ -445,7 +451,7 @@ async function stopTerminalAttempt(
 
 function terminalEvidence(
   snapshot: RunnerAttemptLogSnapshot,
-  credential: string
+  credential: string | null
 ): Readonly<{
   commandEvidence: CommandEvidence[];
   error: RunError | null;
@@ -622,10 +628,13 @@ async function reconcileAttachedProcess(
       adopted.authority,
       dependencies
     );
-    if (!redactionCredential) {
+    if (
+      !redactionCredential &&
+      (dependencies.provider.requiresAttemptRedaction ?? true)
+    ) {
       return { adopted: true, kind: "deferred" };
     }
-    const credentialForRedaction = redactionCredential;
+    const credentialForRedaction = redactionCredential ?? null;
     const { authority: adoptedAuthority, run: adoptedRun } = adopted;
     let authority = adoptedAuthority;
     let liveRun = adoptedRun;

@@ -559,7 +559,8 @@ export async function dispatchRunnerClaim(
     dependencies.store,
     dependencies.operator,
     authority,
-    dependencies.executor.executionProvenance
+    dependencies.executor.executionProvenance,
+    dependencies.executor.attemptIdForRun?.(run.id)
   );
   let preparedAttemptId: NonNullable<RunnerDispatchAuthority["attemptId"]>;
   try {

@@ -80,6 +80,7 @@ const RUNTIME_CONFIGURATION_KEYS = [
   "CREDENTIAL_KEK_CURRENT_VERSION",
   "CREDENTIAL_KEK_V1",
   "CREDENTIAL_KEK_V2",
+  "COVEN_HERMETIC_RUNNER",
   "CRON_SECRET",
   "DAYTONA_API_KEY",
   "DAYTONA_API_URL",
@@ -89,6 +90,7 @@ const RUNTIME_CONFIGURATION_KEYS = [
   "DAYTONA_REQUEST_TIMEOUT_MS",
   "DAYTONA_SNAPSHOT",
   "DAYTONA_TARGET",
+  "E2E_HERMETIC_RUNNER",
   "GLOBAL_DAILY_RUN_CAP",
   "NEXTAUTH_URL",
   "NODE_ENV",
@@ -183,6 +185,17 @@ test("rejects missing required production configuration", () => {
       `Missing required production environment variables: ${variableName}.`
     );
   }
+});
+
+test("rejects the hermetic runner selection for a production validation", () => {
+  const result = runValidator({
+    COVEN_HERMETIC_RUNNER: "1",
+    E2E_HERMETIC_RUNNER: "1",
+  });
+  assertRejectedWithMessage(
+    result,
+    "COVEN_HERMETIC_RUNNER is unavailable when NODE_ENV is production."
+  );
 });
 
 test("rejects blank required production configuration", () => {

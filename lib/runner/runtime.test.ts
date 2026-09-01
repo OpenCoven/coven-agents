@@ -73,6 +73,61 @@ test("importing the core runtime constructs neither database nor Daytona clients
   assert.deepEqual(JSON.parse(result.stdout), { imported: true });
 });
 
+test("guarded hermetic composition builds a service without Daytona configuration", () => {
+  const script = [
+    'const runtime = await import("./lib/runner/runtime.ts");',
+    "const instance = runtime.createProductionRunnerRuntime({",
+    "databaseFor: () => ({ transaction: () => Promise.reject(new Error('not requested')) })",
+    "});",
+    `await instance.createSubscriberService(${JSON.stringify(subscriber)});`,
+    "process.stdout.write(JSON.stringify({ hermetic: true }));",
+  ].join("");
+  const result = spawnSync(
+    process.execPath,
+    [
+      "--conditions=react-server",
+      "--import",
+      "tsx",
+      "--input-type=module",
+      "--eval",
+      script,
+    ],
+    {
+      cwd: repositoryRoot,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        COVEN_HERMETIC_RUNNER: "1",
+        DAYTONA_API_KEY: "",
+        DAYTONA_SNAPSHOT: "",
+        E2E_HERMETIC_RUNNER: "1",
+        NODE_ENV: "development",
+        POSTGRES_URL: "postgres://localhost:5432/not-used",
+      },
+    }
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { hermetic: true });
+});
+
+test("hermetic provider files retain no Daytona SDK boundary", () => {
+  for (const path of [
+    "./hermetic/composition.ts",
+    "./hermetic/executor.ts",
+    "./hermetic/reconcile.ts",
+    "./hermetic/sandbox.ts",
+  ]) {
+    const source = readFileSync(new URL(path, import.meta.url), "utf8");
+    assert.doesNotMatch(source, /@daytona\/sdk/u);
+  }
+  const runtime = readFileSync(
+    new URL("./runtime.ts", import.meta.url),
+    "utf8"
+  );
+  assert.doesNotMatch(runtime, /from ["']\.\/daytona\//u);
+});
+
 test("core runtime has no diagnostic composition dependency", () => {
   const runtime = readFileSync(
     new URL("./runtime.ts", import.meta.url),

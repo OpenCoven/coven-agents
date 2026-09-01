@@ -324,6 +324,7 @@ export type ReleaseDaytonaAttemptInput = {
 };
 
 export type AuthorizeDaytonaPreparationInput = Readonly<{
+  attemptId?: RunnerDaytonaAttemptId;
   executionProvenance: RunnerExecutionProvenance;
 }>;
 

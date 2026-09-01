@@ -348,6 +348,7 @@ const scriptNames = [
   "start",
   "subscription",
   "test",
+  "test:e2e:hermetic",
   "test:unit",
   "typecheck",
   "validate:platform-residue",

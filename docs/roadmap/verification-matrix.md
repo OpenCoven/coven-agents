@@ -30,6 +30,7 @@ retained; full product release certification remains pending.
 | Subscriber classification | `Verified` | Auth unit coverage and 28-case authenticated browser contract | Real OAuth and active/expired account exercise |
 | Same-origin execution session | `Verified` | Browser transport, runner authorization, product-boundary, and browser contract tests | Production-equivalent Auth.js request evidence |
 | Tenant credential custody | `Verified` | Credential, isolation, and evidence-safety unit suites | Retained production-equivalent isolation and redaction exercise |
+| Hermetic PostgreSQL browser certification | `Implemented` | `pnpm test:e2e:hermetic`, guarded server-only executor, disposable PostgreSQL seed, signed Auth.js cookies, real API/browser assertions, and demo zero-write inventory | Dated successful local command record; this does not replace Daytona or deployed-environment evidence |
 | Daytona lifecycle | `Verified` | Daytona adapter and runner service unit suites | Dated provider create, reuse, run, stop, delete, and cleanup artifact |
 | Idempotent starts | `Verified` | Admission, store, and browser retry unit suites | Retry exercise against release-equivalent PostgreSQL |
 | Cursor-safe SSE | `Verified` | Server and browser reconnect/cursor unit suites | Release-equivalent reconnect exercise with retained cursor evidence |
