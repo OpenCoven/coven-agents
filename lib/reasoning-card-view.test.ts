@@ -16,7 +16,12 @@ test("reasoning card keeps disclosure, focus, and reduced-motion semantics", () 
   assert.match(source, /motion-reduce:transition-none/u);
   assert.match(source, /aria-hidden=\{!isOpen\}/u);
   assert.match(source, /inert=\{!isOpen\}/u);
-  assert.match(source, /Show \{step\.collapsedCount\} routine tool calls/u);
+  assert.match(source, /totalCollapsedCount/u);
+  assert.match(source, /Show \{totalCollapsedCount\} routine tool calls/u);
+  assert.doesNotMatch(
+    source,
+    /Show \{step\.collapsedCount\} routine tool calls/u
+  );
   assert.match(source, /expandedFocusRef\.current\?\.focus\(\)/u);
   assert.match(source, /useRef\(!isStreaming\)/u);
   assert.match(

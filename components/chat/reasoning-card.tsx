@@ -159,6 +159,14 @@ export function ReasoningCard({
     () => foldReasoningCardSteps(model.steps, false),
     [model.steps]
   );
+  const totalCollapsedCount = useMemo(
+    () =>
+      collapsedSteps.reduce(
+        (total, step) => total + (step.collapsedCount ?? 0),
+        0
+      ),
+    [collapsedSteps]
+  );
   const visibleSteps = expanded ? model.steps : collapsedSteps;
   const firstHiddenStepId = useMemo(() => {
     const visibleIds = new Set(
@@ -310,19 +318,22 @@ export function ReasoningCard({
                           ) : null}
                         </div>
                         <ReasoningStepDescription step={step} />
-                        {step.collapsedCount !== undefined && (
-                          <button
-                            className="mt-0.5 justify-self-start border-0 bg-transparent p-0 text-[12px] text-[var(--accent-presence,var(--primary))] hover:underline focus-visible:rounded-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--ring-focus,var(--ring))]"
-                            onClick={handleExpand}
-                            type="button"
-                          >
-                            Show {step.collapsedCount} routine tool calls
-                          </button>
-                        )}
                       </div>
                     </div>
                   );
                 })}
+
+                {!expanded && totalCollapsedCount > 0 ? (
+                  <div className="pb-2 pl-[26px]">
+                    <button
+                      className="border-0 bg-transparent p-0 text-[12px] text-[var(--accent-presence,var(--primary))] hover:underline focus-visible:rounded-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--ring-focus,var(--ring))]"
+                      onClick={handleExpand}
+                      type="button"
+                    >
+                      Show {totalCollapsedCount} routine tool calls
+                    </button>
+                  </div>
+                ) : null}
 
                 <div className="flex items-center justify-between gap-3 border-[var(--border-hairline,var(--border))] border-t py-2 pl-[26px] text-[12px] text-[var(--text-muted,var(--muted-foreground))]">
                   <span>{model.footer}</span>
