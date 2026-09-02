@@ -17,7 +17,6 @@ const REDIRECT_URI = "https://app.example/api/github/callback";
 const USER_TOKEN = `ghu_${"A".repeat(32)}`;
 const SECOND_USER_TOKEN = `ghu_${"C".repeat(32)}`;
 const ACCESS_REVOCATION_URL = `https://api.github.com/applications/${CLIENT_ID}/token`;
-const GRANT_REVOCATION_URL = `https://api.github.com/applications/${CLIENT_ID}/grant`;
 const REFRESH_REVOCATION_URL = "https://api.github.com/credentials/revoke";
 
 test("user authorization proves an exact accessible installation and revokes its complete token pair", async () => {
@@ -32,7 +31,7 @@ test("user authorization proves an exact accessible installation and revokes its
 
   const authority = await client.proveInstallationAccess(proofInput());
 
-  assert.equal(requests.length, 5);
+  assert.equal(requests.length, 6);
   assert.deepEqual(authority, {
     repositories: [
       {
@@ -47,7 +46,7 @@ test("user authorization proves an exact accessible installation and revokes its
   });
   assert.deepEqual(
     requests.map(({ redirect }) => redirect),
-    ["error", "error", "error", "error", "error"]
+    ["error", "error", "error", "error", "error", "error"]
   );
   assert.equal(requests[0]?.url, "https://github.com/login/oauth/access_token");
   assert.equal(requests[0]?.method, "POST");
@@ -74,16 +73,20 @@ test("user authorization proves an exact accessible installation and revokes its
     requests[1]?.headers.get("authorization"),
     `Bearer ${USER_TOKEN}`
   );
-  const grantCleanup = requests.find(({ method }) => method === "DELETE");
-  assert.equal(grantCleanup?.url, GRANT_REVOCATION_URL);
-  assert.match(grantCleanup?.headers.get("authorization") ?? "", /^Basic /u);
-  assert.deepEqual(JSON.parse(grantCleanup?.body ?? "{}"), {
-    access_token: USER_TOKEN,
-  });
-  assert.equal(
-    requests.some(({ url }) => url === REFRESH_REVOCATION_URL),
-    false
+  assert.deepEqual(
+    requests
+      .filter(isCleanupRequest)
+      .map(({ method, url }) => [method, url])
+      .sort(),
+    [
+      ["DELETE", ACCESS_REVOCATION_URL],
+      ["POST", REFRESH_REVOCATION_URL],
+    ].sort()
   );
+  assert.deepEqual(revokedCredentials(requests).sort(), [
+    `ghr_${"B".repeat(32)}`,
+    USER_TOKEN,
+  ]);
 });
 
 test("user authorization enumerates exact installation repositories and derives safe collaborator ceilings", async () => {
@@ -413,7 +416,7 @@ test("user installation responses are byte-bounded, well-formed, and time-bounde
       .filter(isCleanupRequest)
       .map(({ url }) => url)
       .sort(),
-    [GRANT_REVOCATION_URL]
+    [ACCESS_REVOCATION_URL, REFRESH_REVOCATION_URL].sort()
   );
 });
 
@@ -509,9 +512,11 @@ test("valid token candidates in a malformed exchange response are revoked before
     client.proveInstallationAccess(proofInput()),
     providerError("github_provider_invalid_response", false)
   );
-  assert.equal(requests.length, 2);
-  assert.deepEqual(revokedCredentials(requests), [USER_TOKEN]);
-  assert.equal(requests.at(-1)?.url, GRANT_REVOCATION_URL);
+  assert.equal(requests.length, 3);
+  assert.deepEqual(revokedCredentials(requests).sort(), [
+    `ghr_${"B".repeat(32)}`,
+    USER_TOKEN,
+  ]);
 });
 
 test("a valid refresh candidate is revoked when its access-token companion is malformed", async () => {
@@ -598,6 +603,52 @@ test("OAuth and user-installation response bodies remain inside the request time
     userBody.proveInstallationAccess(proofInput()),
     providerError("github_provider_timeout", true)
   );
+});
+
+test("a late exchange response is observed and its token pair is revoked", async () => {
+  const refreshToken = `ghr_${"B".repeat(32)}`;
+  const requests: CapturedRequest[] = [];
+  let releaseExchange!: () => void;
+  const exchangeReleased = new Promise<void>((resolve) => {
+    releaseExchange = resolve;
+  });
+  const client = clientFor(
+    async (input, init = {}) => {
+      requests.push(capturedRequest(input, init));
+      if (input === "https://github.com/login/oauth/access_token") {
+        await exchangeReleased;
+        return jsonResponse(tokenBody(USER_TOKEN, refreshToken));
+      }
+      if (input === REFRESH_REVOCATION_URL) {
+        return new Response(null, { status: 202 });
+      }
+      if (init.method === "DELETE") {
+        return new Response(null, { status: 204 });
+      }
+      assert.fail(`Unexpected request to ${input}`);
+    },
+    { timeoutMs: 5 }
+  );
+
+  const pending = client.proveInstallationAccess(proofInput());
+  let settled = false;
+  void pending.then(
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    }
+  );
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(settled, false);
+
+  releaseExchange();
+  await assert.rejects(pending, providerError("github_provider_timeout", true));
+  assert.deepEqual(revokedCredentials(requests).sort(), [
+    refreshToken,
+    USER_TOKEN,
+  ]);
 });
 
 test("user tokens and provider bodies cannot leak through lookup or revocation errors", async () => {

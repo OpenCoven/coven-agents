@@ -102,7 +102,7 @@ export function createGitHubUserAuthorizationClient(
     url: string,
     init: RequestInit,
     stage: "exchange" | "user"
-  ): Promise<unknown> {
+  ): Promise<Readonly<{ timedOut: boolean; value: unknown }>> {
     return timedRequest(url, init, stage, async (response) => {
       const text = await readBoundedText(response, maxResponseBytes);
       try {
@@ -132,18 +132,15 @@ export function createGitHubUserAuthorizationClient(
     init: RequestInit,
     stage: "exchange" | "refresh-revoke" | "revoke" | "user",
     consume: (response: Response) => Promise<T>
-  ): Promise<T> {
+  ): Promise<Readonly<{ timedOut: boolean; value: T }>> {
     const controller = new AbortController();
     let timedOut = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<never>((_resolve, reject) => {
-      timer = globalThis.setTimeout(() => {
-        timedOut = true;
-        controller.abort();
-        reject(timeoutError());
-      }, timeoutMs);
-    });
-    const operation = async (): Promise<T> => {
+    timer = globalThis.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+    try {
       let response: Response;
       try {
         response = await fetchImpl(url, {
@@ -159,25 +156,30 @@ export function createGitHubUserAuthorizationClient(
           await response.body?.cancel().catch(() => undefined);
           throw statusError(response, stage);
         }
-        return await consume(response);
+        return { timedOut, value: await consume(response) };
       } catch (error) {
-        if (error instanceof GitHubProviderError) {
-          throw error;
-        }
         if (timedOut || controller.signal.aborted) {
           throw timeoutError();
         }
+        if (error instanceof GitHubProviderError) {
+          throw error;
+        }
         throw unavailableError();
       }
-    };
-
-    try {
-      return await Promise.race([operation(), timeout]);
     } finally {
       if (timer !== undefined) {
         globalThis.clearTimeout(timer);
       }
     }
+  }
+
+  function requireOnTime<T>(
+    result: Readonly<{ timedOut: boolean; value: T }>
+  ): T {
+    if (result.timedOut) {
+      throw timeoutError();
+    }
+    return result.value;
   }
 
   function exchangeCode(
@@ -198,23 +200,23 @@ export function createGitHubUserAuthorizationClient(
         code_verifier: proof.codeVerifier,
         redirect_uri: proof.redirectUri,
       });
-      const parsed = object(
-        await requestJson(
-          `${GITHUB_OAUTH_ORIGIN}/login/oauth/access_token`,
-          {
-            body: body.toString(),
-            headers: {
-              accept: "application/json",
-              "content-type": "application/x-www-form-urlencoded",
-              "user-agent": "OpenCoven-GitHub-App",
-            },
-            method: "POST",
+      const exchange = await requestJson(
+        `${GITHUB_OAUTH_ORIGIN}/login/oauth/access_token`,
+        {
+          body: body.toString(),
+          headers: {
+            accept: "application/json",
+            "content-type": "application/x-www-form-urlencoded",
+            "user-agent": "OpenCoven-GitHub-App",
           },
-          "exchange"
-        )
+          method: "POST",
+        },
+        "exchange"
       );
-      let validationError: GitHubProviderError | null =
-        parsed.access_token === undefined && typeof parsed.error === "string"
+      const parsed = object(exchange.value);
+      let validationError: GitHubProviderError | null = exchange.timedOut
+        ? timeoutError()
+        : parsed.access_token === undefined && typeof parsed.error === "string"
           ? new GitHubProviderError("github_oauth_exchange_rejected", {
               retryable: false,
               status: 400,
@@ -263,11 +265,13 @@ export function createGitHubUserAuthorizationClient(
     const ids = new Set<string>();
     for (let page = 1; page <= maxPages; page += 1) {
       const body = object(
-        // biome-ignore lint/performance/noAwaitInLoops: each bounded page depends on the prior count
-        await requestJson(
-          `${GITHUB_API_ORIGIN}/user/installations?page=${page}&per_page=100`,
-          { headers: apiHeaders(`Bearer ${token}`), method: "GET" },
-          "user"
+        requireOnTime(
+          // biome-ignore lint/performance/noAwaitInLoops: each bounded page depends on the prior count
+          await requestJson(
+            `${GITHUB_API_ORIGIN}/user/installations?page=${page}&per_page=100`,
+            { headers: apiHeaders(`Bearer ${token}`), method: "GET" },
+            "user"
+          )
         )
       );
       const currentTotal = nonNegativeInteger(body.total_count);
@@ -322,13 +326,15 @@ export function createGitHubUserAuthorizationClient(
     token: string
   ): Promise<GitHubUserInstallationAuthority["user"]> {
     const body = object(
-      await requestJson(
-        `${GITHUB_API_ORIGIN}/user`,
-        {
-          headers: apiHeaders(["Bearer", token].join(" ")),
-          method: "GET",
-        },
-        "user"
+      requireOnTime(
+        await requestJson(
+          `${GITHUB_API_ORIGIN}/user`,
+          {
+            headers: apiHeaders(["Bearer", token].join(" ")),
+            method: "GET",
+          },
+          "user"
+        )
       )
     );
     return {
@@ -351,13 +357,15 @@ export function createGitHubUserAuthorizationClient(
       let pageValue: unknown;
       try {
         // biome-ignore lint/performance/noAwaitInLoops: each bounded page depends on the prior count
-        pageValue = await requestJson(
-          `${GITHUB_API_ORIGIN}/user/installations/${installationId}/repositories?page=${page}&per_page=100`,
-          {
-            headers: apiHeaders(["Bearer", token].join(" ")),
-            method: "GET",
-          },
-          "user"
+        pageValue = requireOnTime(
+          await requestJson(
+            `${GITHUB_API_ORIGIN}/user/installations/${installationId}/repositories?page=${page}&per_page=100`,
+            {
+              headers: apiHeaders(["Bearer", token].join(" ")),
+              method: "GET",
+            },
+            "user"
+          )
         );
       } catch (error) {
         if (
@@ -428,74 +436,39 @@ export function createGitHubUserAuthorizationClient(
         `${input.clientId}:${clientSecret}`,
         "utf8"
       ).toString("base64");
-      await timedRequest(
-        `${GITHUB_API_ORIGIN}/applications/${input.clientId}/token`,
-        {
-          body: JSON.stringify({ access_token: token }),
-          headers: apiHeaders(`Basic ${basic}`),
-          method: "DELETE",
-        },
-        "revoke",
-        () => Promise.resolve()
-      );
-    });
-  }
-
-  async function revokeGrant(token: string): Promise<void> {
-    await withClientSecret(input.clientSecret, async (clientSecret) => {
-      const basic = Buffer.from(
-        `${input.clientId}:${clientSecret}`,
-        "utf8"
-      ).toString("base64");
-      await timedRequest(
-        `${GITHUB_API_ORIGIN}/applications/${input.clientId}/grant`,
-        {
-          body: JSON.stringify({ access_token: token }),
-          headers: apiHeaders(`Basic ${basic}`),
-          method: "DELETE",
-        },
-        "revoke",
-        () => Promise.resolve()
+      requireOnTime(
+        await timedRequest(
+          `${GITHUB_API_ORIGIN}/applications/${input.clientId}/token`,
+          {
+            body: JSON.stringify({ access_token: token }),
+            headers: apiHeaders(`Basic ${basic}`),
+            method: "DELETE",
+          },
+          "revoke",
+          () => Promise.resolve()
+        )
       );
     });
   }
 
   async function revokeRefreshToken(token: string): Promise<void> {
-    await timedRequest(
-      `${GITHUB_API_ORIGIN}/credentials/revoke`,
-      {
-        body: JSON.stringify({ credentials: [token] }),
-        headers: {
-          accept: "application/vnd.github+json",
-          "content-type": "application/json",
-          "user-agent": "OpenCoven-GitHub-App",
-          "x-github-api-version": GITHUB_API_VERSION,
+    requireOnTime(
+      await timedRequest(
+        `${GITHUB_API_ORIGIN}/credentials/revoke`,
+        {
+          body: JSON.stringify({ credentials: [token] }),
+          headers: {
+            accept: "application/vnd.github+json",
+            "content-type": "application/json",
+            "user-agent": "OpenCoven-GitHub-App",
+            "x-github-api-version": GITHUB_API_VERSION,
+          },
+          method: "POST",
         },
-        method: "POST",
-      },
-      "refresh-revoke",
-      () => Promise.resolve()
+        "refresh-revoke",
+        () => Promise.resolve()
+      )
     );
-  }
-
-  async function revokeCompleteAuthority(
-    accessToken: string,
-    refreshToken: string
-  ): Promise<void> {
-    const [grantResult] = await Promise.allSettled([revokeGrant(accessToken)]);
-    if (grantResult?.status === "fulfilled") {
-      return;
-    }
-    const fallback = await Promise.allSettled([
-      revokeRefreshToken(refreshToken),
-      revokeToken(accessToken),
-    ]);
-    const fallbackError = fallback.find(
-      (result): result is PromiseRejectedResult => result.status === "rejected"
-    )?.reason;
-    if (fallbackError !== undefined) {
-      throw fallbackError;
-    }
   }
 
   return {
@@ -533,17 +506,10 @@ export function createGitHubUserAuthorizationClient(
 
       let revocationError: unknown;
       try {
-        const revocations =
-          accessToken !== null &&
-          refreshToken !== null &&
-          OAUTH_USER_PATTERN.test(accessToken)
-            ? [revokeCompleteAuthority(accessToken, refreshToken)]
-            : [
-                ...(refreshToken === null
-                  ? []
-                  : [revokeRefreshToken(refreshToken)]),
-                ...(accessToken === null ? [] : [revokeToken(accessToken)]),
-              ];
+        const revocations = [
+          ...(refreshToken === null ? [] : [revokeRefreshToken(refreshToken)]),
+          ...(accessToken === null ? [] : [revokeToken(accessToken)]),
+        ];
         const results = await Promise.allSettled(revocations);
         revocationError = results.find(
           (result): result is PromiseRejectedResult =>
