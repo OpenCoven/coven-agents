@@ -226,23 +226,48 @@ test("rejects raw or unrecognized evidence fields", () => {
 
 test("rejects secret-shaped values in recognized fields and unsafe references", () => {
   const secret = `ghp_${"A1b2C3d4E5f6G7h8I9j0".repeat(2)}`;
+  const opaqueSecret = "q7V9m2K4p8R1t6W3x5Y0z9A2b4C6d8E0";
+  const separatedOpaqueSecret = "q7v9m2k4p8r1t6w3-x5y0z9a2b4c6d8e0";
+  const { manifestDigest: _manifestDigest, ...candidate } = receipt().candidate;
+  assert.throws(() =>
+    candidateManifestDigest({
+      ...candidate,
+      appBuild: opaqueSecret,
+    })
+  );
+  assert.throws(() =>
+    candidateManifestDigest({
+      ...candidate,
+      appBuild: separatedOpaqueSecret,
+    })
+  );
   const unsafeBlocker = receipt();
   unsafeBlocker.review = { decision: "pending", reviewers: [] };
   unsafeBlocker.openBlockers = [`Provider failed with ${secret}`];
   refreshEvidenceBindings(unsafeBlocker);
   const opaqueSecretBlocker = receipt();
   opaqueSecretBlocker.review = { decision: "pending", reviewers: [] };
-  opaqueSecretBlocker.openBlockers = [
-    "Provider failed with q7V9m2K4p8R1t6W3x5Y0z9A2b4C6d8E0",
-  ];
+  opaqueSecretBlocker.openBlockers = [`Provider failed with ${opaqueSecret}`];
   refreshEvidenceBindings(opaqueSecretBlocker);
 
   const unsafeReference = receipt();
   unsafeReference.rollback.deploymentReference = `https://example.com/deployment?token=${secret}`;
   refreshEvidenceBindings(unsafeReference);
   const encodedReference = receipt();
-  encodedReference.rollback.deploymentReference = `https://example.com/deployment?value=${encodeURIComponent(secret)}`;
+  const encodedSecret = Array.from(
+    secret,
+    (character) => `%${character.charCodeAt(0).toString(16).padStart(2, "0")}`
+  )
+    .join("")
+    .replaceAll("%", "%25");
+  encodedReference.rollback.deploymentReference = `https://example.com/deployment?value=${encodedSecret}`;
   refreshEvidenceBindings(encodedReference);
+  const opaqueReference = receipt();
+  opaqueReference.rollback.deploymentReference = `https://example.com/deployment?value=${opaqueSecret}`;
+  refreshEvidenceBindings(opaqueReference);
+  const opaqueHostnameReference = receipt();
+  opaqueHostnameReference.rollback.deploymentReference = `https://${opaqueSecret}.example.com/deployment`;
+  refreshEvidenceBindings(opaqueHostnameReference);
 
   assert.equal(readinessReceiptSchema.safeParse(unsafeBlocker).success, false);
   assert.equal(
@@ -253,8 +278,22 @@ test("rejects secret-shaped values in recognized fields and unsafe references", 
     readinessReceiptSchema.safeParse(unsafeReference).success,
     false
   );
+  assert.throws(() =>
+    candidateManifestDigest({
+      ...candidate,
+      adapterVersion: `secret-scan: allow-next-line -- fixture\n${secret}`,
+    })
+  );
   assert.equal(
     readinessReceiptSchema.safeParse(encodedReference).success,
+    false
+  );
+  assert.equal(
+    readinessReceiptSchema.safeParse(opaqueReference).success,
+    false
+  );
+  assert.equal(
+    readinessReceiptSchema.safeParse(opaqueHostnameReference).success,
     false
   );
 });
@@ -502,6 +541,42 @@ test("requires cryptographically distinct reviewer signing keys", () => {
         reviewerKeys: sharedReviewerKeys,
       }),
     /cryptographically distinct reviewer keys/u
+  );
+});
+
+test("requires canonical public-only reviewer key PEM", () => {
+  const privateKeyRegistry = reviewerKeys.map((key) =>
+    key.keyId === "release_operator-key"
+      ? {
+          ...key,
+          publicKeyPem: keyPairs.release_operator.privateKey,
+        }
+      : key
+  );
+  const trailingSecretRegistry = reviewerKeys.map((key) =>
+    key.keyId === "release_operator-key"
+      ? {
+          ...key,
+          publicKeyPem: `${key.publicKeyPem}ghp_${"A1b2C3d4E5f6G7h8I9j0".repeat(2)}`,
+        }
+      : key
+  );
+
+  assert.throws(
+    () =>
+      validateReadinessReceipt(receipt(), {
+        ...validationOptions(),
+        reviewerKeys: privateKeyRegistry,
+      }),
+    /canonical public keys/u
+  );
+  assert.throws(
+    () =>
+      validateReadinessReceipt(receipt(), {
+        ...validationOptions(),
+        reviewerKeys: trailingSecretRegistry,
+      }),
+    /canonical public keys/u
   );
 });
 

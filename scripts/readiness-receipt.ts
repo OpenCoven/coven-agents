@@ -10,21 +10,52 @@ const MAX_RECEIPT_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 const digestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/u);
 const gitShaSchema = z.string().regex(/^[a-f0-9]{40}$/u);
+const SECRET_SCAN_SUPPRESSION = /secret-scan:\s*allow-next-line\b/iu;
 const secretSafeStringSchema = z
   .string()
-  .refine((value) => scanText("readiness-receipt.json", value).length === 0, {
-    message: "value must not contain secret-shaped content",
-  });
-const secretSafeFreeTextSchema = secretSafeStringSchema.refine(
-  (value) =>
-    !value
-      .split(/[^A-Za-z0-9+/_=-]+/u)
-      .filter(Boolean)
-      .some((token) => looksLikeRealSecret(token)),
+  .refine((value) => !/[\r\n]/u.test(value), {
+    message: "value must be a single line",
+  })
+  .refine(
+    (value) =>
+      !SECRET_SCAN_SUPPRESSION.test(value) &&
+      scanText("readiness-receipt.json", value).length === 0,
+    {
+      message: "value must not contain secret-shaped content",
+    }
+  );
+const PUBLIC_OPAQUE_IDENTIFIER =
+  /^(?:dpl_[A-Za-z0-9]{16,}|[a-f0-9]{40}|[a-f0-9]{64}|[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12})$/u;
+const DESCRIPTIVE_IDENTIFIER =
+  /^(?:[a-z]{2,15}|\d{1,15}|v\d{1,8})(?:[-_.:/](?:[a-z]{2,15}|\d{1,15}|v\d{1,8}))+$/u;
+
+function containsOpaqueSecret(value: string): boolean {
+  return (
+    value
+      .match(/[A-Za-z0-9+_=-]{16,}/gu)
+      ?.some(
+        (token) =>
+          !PUBLIC_OPAQUE_IDENTIFIER.test(token) &&
+          !DESCRIPTIVE_IDENTIFIER.test(token) &&
+          looksLikeRealSecret(token)
+      ) ?? false
+  );
+}
+
+const secretSafeOpaqueStringSchema = secretSafeStringSchema.refine(
+  (value) => !containsOpaqueSecret(value),
   { message: "value must not contain opaque secret-shaped content" }
 );
-const versionSchema = secretSafeStringSchema.trim().min(1).max(128);
-const identifierSchema = secretSafeStringSchema.trim().min(1).max(128);
+const versionSchema = secretSafeOpaqueStringSchema
+  .trim()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:+/@-]*$/u);
+const identifierSchema = secretSafeOpaqueStringSchema
+  .trim()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/u);
 const utcTimestampSchema = z.string().refine(
   (value) => {
     const parsed = new Date(value);
@@ -39,22 +70,35 @@ const httpsUrlSchema = z
   .refine(
     (value) => {
       const url = new URL(value);
-      let decodedComponents: string;
+      let decodedComponents = [
+        url.hostname,
+        url.pathname,
+        url.search,
+        url.hash,
+      ].join("\n");
       try {
-        decodedComponents = [
-          decodeURIComponent(url.pathname),
-          decodeURIComponent(url.search),
-          decodeURIComponent(url.hash),
-        ].join("\n");
+        for (let depth = 0; depth < 4; depth += 1) {
+          const decoded = decodeURIComponent(decodedComponents);
+          if (decoded === decodedComponents) {
+            break;
+          }
+          decodedComponents = decoded;
+        }
       } catch {
+        return false;
+      }
+      if (/%[0-9a-f]{2}/iu.test(decodedComponents)) {
         return false;
       }
       return (
         url.protocol === "https:" &&
         url.username === "" &&
         url.password === "" &&
+        !SECRET_SCAN_SUPPRESSION.test(value) &&
+        !SECRET_SCAN_SUPPRESSION.test(decodedComponents) &&
         scanText("readiness-reference.txt", value).length === 0 &&
-        scanText("readiness-reference.txt", decodedComponents).length === 0
+        scanText("readiness-reference.txt", decodedComponents).length === 0 &&
+        !containsOpaqueSecret(decodedComponents)
       );
     },
     {
@@ -211,7 +255,7 @@ const reviewerApprovalSchema = z
     decisionDigest: digestSchema,
     evidenceSetDigest: digestSchema,
     keyId: identifierSchema,
-    reviewerId: secretSafeStringSchema.trim().email().max(254),
+    reviewerId: secretSafeOpaqueStringSchema.trim().email().max(254),
     role: reviewerRoleSchema,
     signature: z
       .string()
@@ -587,7 +631,7 @@ export const readinessReceiptSchema = z
     environment: environmentSchema,
     evidenceSetDigest: digestSchema,
     openBlockers: z
-      .array(secretSafeFreeTextSchema.trim().min(1).max(256))
+      .array(secretSafeOpaqueStringSchema.trim().min(1).max(256))
       .max(32),
     receiptVersion: z.literal(1),
     recordedAt: utcTimestampSchema,
@@ -998,6 +1042,12 @@ function reviewerKeyRegistryViolation(
     reviewerIds.add(key.reviewerId);
     try {
       const publicKey = createPublicKey(key.publicKeyPem);
+      const canonicalPem = publicKey
+        .export({ format: "pem", type: "spki" })
+        .toString();
+      if (key.publicKeyPem !== canonicalPem) {
+        return "reviewer key registry requires canonical public keys";
+      }
       if (publicKey.asymmetricKeyType !== "ed25519") {
         return "reviewer key registry requires Ed25519 public keys";
       }
@@ -1188,7 +1238,7 @@ const reviewerKeySchema = z
   .object({
     keyId: identifierSchema,
     publicKeyPem: z.string().min(1).max(4096),
-    reviewerId: secretSafeStringSchema.trim().email().max(254),
+    reviewerId: secretSafeOpaqueStringSchema.trim().email().max(254),
     roles: z.array(reviewerRoleSchema).min(1).max(3),
   })
   .strict();
