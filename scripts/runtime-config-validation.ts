@@ -1,4 +1,7 @@
-import { validateAbuseConfig } from "../lib/abuse/config";
+import {
+  enforcesProductionAbuseConfig,
+  validateAbuseConfig,
+} from "../lib/abuse/config";
 import { approvedApplicationOrigin } from "../lib/auth/application-origin";
 import { validateSubscriptionCheckoutEnvironment } from "../lib/billing/config-core";
 import { credentialKekRingFromEnvironment } from "../lib/credentials/key-ring";
@@ -300,9 +303,16 @@ export async function validateRuntimeConfig(
     }
   }
 
+  /**
+   * Predicts what `register()` will enforce at boot, which is decided by
+   * NODE_ENV and not by the release audience. Hardcoding this to true made the
+   * validator stricter than the server for local development, and reading it
+   * from `productionRelease` instead would make it laxer than the server for
+   * Vercel previews, which boot with NODE_ENV=production.
+   */
   validateAbuseConfig({
     globalDailyRunCap: env.GLOBAL_DAILY_RUN_CAP,
-    isProduction: true,
+    isProduction: enforcesProductionAbuseConfig(env.NODE_ENV),
     keySecret: env.ABUSE_KEY_SECRET,
     redisUrl: env.REDIS_URL,
   });

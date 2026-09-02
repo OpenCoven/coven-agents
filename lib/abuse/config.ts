@@ -3,6 +3,22 @@ const MISSING_ABUSE_KEY_SECRET =
 const INVALID_GLOBAL_DAILY_RUN_CAP =
   "GLOBAL_DAILY_RUN_CAP must be a positive integer.";
 
+/**
+ * Whether reservation and abuse configuration is enforced for a given runtime.
+ *
+ * This is deliberately NODE_ENV rather than the release audience. A Vercel
+ * preview builds and boots with NODE_ENV=production, so `register()` enforces
+ * these rules there, even though `isProductionRelease` treats a preview as not
+ * production because it is not the approved production audience. Startup and
+ * validation must read this the same way: if validation used the release
+ * notion instead, a preview would build clean and then fail at boot.
+ */
+export function enforcesProductionAbuseConfig(
+  nodeEnv: string | undefined
+): boolean {
+  return nodeEnv === "production";
+}
+
 export function validateAbuseConfig(input: {
   globalDailyRunCap: string | undefined;
   isProduction: boolean;
