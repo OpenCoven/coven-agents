@@ -89,7 +89,7 @@ test.describe("Legacy chat surface", () => {
     await expect(page.getByPlaceholder("Search models...")).not.toBeVisible();
   });
 
-  test("reasoning uses the compact evidence timeline disclosure", async ({
+  test("reasoning uses the OpenCoven reasoning activity card", async ({
     context,
     page,
   }) => {
