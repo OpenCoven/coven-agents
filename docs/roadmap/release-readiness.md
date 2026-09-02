@@ -113,8 +113,12 @@ validate it before requesting approval:
 pnpm readiness:check path/to/readiness-receipt.json \
   --expected-sha "$(git rev-parse HEAD)" \
   --expected-candidate-digest "$DEPLOYMENT_CANDIDATE_DIGEST" \
+  --expected-environment "$DEPLOYMENT_ENVIRONMENT" \
   --expected-rollback-sha "$CERTIFIED_ROLLBACK_SHA" \
   --expected-rollback-candidate-digest "$CERTIFIED_ROLLBACK_DIGEST" \
+  --expected-rollback-certification-digest "$ROLLBACK_CERTIFICATION_DIGEST" \
+  --expected-rollback-schema-digest "$ROLLBACK_SCHEMA_DIGEST" \
+  --expected-rollback-deployment-reference "$ROLLBACK_DEPLOYMENT_URL" \
   --reviewer-keys path/to/authorized-reviewer-keys.json
 ```
 
@@ -131,13 +135,17 @@ The strict version-1 contract is defined in
   smoke journeys;
 - explicit failure or recovery dispositions, evidence digests, and retention
   classes, plus one canonical evidence-set digest;
+- a canonical release-decision digest covering the candidate, deployment
+  environment, evidence set, blockers, receipt and manifest versions, receipt
+  timestamp, requested decision, and complete rollback certification;
 - candidate-bound evidence-redaction and retired-provider results;
 - a distinct previously certified rollback candidate with retained deployment
   and schema-compatibility evidence;
 - open blockers and signed approvals from the three required reviewer roles.
 
-Every object is strict, so unrecognized fields such as raw tokens or provider
-output are rejected, and receipt files are capped at 1 MiB. A `go` decision is
+Every object is strict, recognized text fields are scanned for secret-shaped
+content, HTTPS references reject embedded credentials and secret-bearing query
+or fragment values, and receipt files are capped at 1 MiB. A `go` decision is
 invalid unless every required manifest entry has durable passing evidence,
 every passing or failing result retains at least one evidence digest, every
 result passes or is explicitly not applicable, redaction and retirement
@@ -146,15 +154,24 @@ and product owner approve. Required entries cannot be replaced by one generic
 result per layer, and ephemeral evidence cannot satisfy them.
 
 Each approval carries a stable reviewer identity, role, timestamp, candidate
-digest, evidence-set digest, HTTPS approval reference, signing-key identifier,
-and Ed25519 signature. The trusted reviewer-key file is supplied independently
-at validation time and binds each key to an authorized identity and role; it is
-not embedded in the receipt. The validator also requires independently supplied
-candidate and rollback digests, rejects a rollback target equal to the
-candidate, rejects future-dated receipts beyond five minutes of clock skew, and
-rejects `go` receipts older than seven days. Generate expected digests from the
-deployment and previously certified rollback manifests rather than copying
-values out of the receipt under review.
+digest, evidence-set digest, complete release-decision digest, HTTPS approval
+reference, signing-key identifier, and Ed25519 signature. Neither the
+environment, blocker list, requested decision, receipt issuance time, nor
+rollback certification can be changed without new approvals. Approvals must
+occur after the latest evidence they attest. The trusted reviewer-key file is
+supplied independently at validation time and binds each key to an authorized
+identity and role; it is not embedded in the receipt. Final decisions reject
+duplicate reviewer identities, key identifiers, and public-key fingerprints,
+preventing one private key from satisfying multiple approval roles.
+
+The validator also requires an independently supplied deployment environment,
+candidate digest, rollback source and candidate digests, rollback
+certification and schema-compatibility digests, and rollback deployment
+reference. It rejects a rollback target equal to the candidate, rejects
+evidence dated more than five minutes in the future, and rejects final receipts
+when any required evidence or approval is older than seven days. Generate
+expected values from the deployment and previously certified rollback
+manifests rather than copying values out of the receipt under review.
 
 A reviewer-key file contains a strict top-level `keys` array. Each entry names
 `keyId`, `reviewerId`, authorized `roles`, and an Ed25519 `publicKeyPem`.
@@ -162,9 +179,11 @@ Public keys are not secrets, but the approved key registry remains controlled
 release configuration. Private signing keys must never enter the repository,
 receipt, command line, logs, or evidence bundle.
 
-A not-applicable result does not satisfy a required manifest entry. Pending
-receipts may retain deferred evidence and blockers without implying release
-approval or requiring signed `go` attestations.
+A not-applicable result does not satisfy a required manifest entry. A `no_go`
+receipt requires an explicit blocker or failed evidence, at least one signed
+rejecting reviewer, the same independent candidate and rollback bindings, and
+fresh evidence. Pending receipts may retain deferred evidence and blockers
+without implying release approval or requiring signed final attestations.
 
 Store the receipt only in the approved evidence system. Do not commit
 production identifiers, credentials, provider output, private repository

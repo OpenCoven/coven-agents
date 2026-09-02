@@ -2,6 +2,7 @@ import { createHash, createPublicKey, verify } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
+import { looksLikeRealSecret, scanText } from "./secret-scan";
 
 const MAX_RECEIPT_BYTES = 1_048_576;
 const MAX_REVIEWER_KEYS_BYTES = 65_536;
@@ -9,8 +10,21 @@ const MAX_RECEIPT_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 const digestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/u);
 const gitShaSchema = z.string().regex(/^[a-f0-9]{40}$/u);
-const versionSchema = z.string().trim().min(1).max(128);
-const identifierSchema = z.string().trim().min(1).max(128);
+const secretSafeStringSchema = z
+  .string()
+  .refine((value) => scanText("readiness-receipt.json", value).length === 0, {
+    message: "value must not contain secret-shaped content",
+  });
+const secretSafeFreeTextSchema = secretSafeStringSchema.refine(
+  (value) =>
+    !value
+      .split(/[^A-Za-z0-9+/_=-]+/u)
+      .filter(Boolean)
+      .some((token) => looksLikeRealSecret(token)),
+  { message: "value must not contain opaque secret-shaped content" }
+);
+const versionSchema = secretSafeStringSchema.trim().min(1).max(128);
+const identifierSchema = secretSafeStringSchema.trim().min(1).max(128);
 const utcTimestampSchema = z.string().refine(
   (value) => {
     const parsed = new Date(value);
@@ -22,9 +36,32 @@ const httpsUrlSchema = z
   .string()
   .url()
   .max(2048)
-  .refine((value) => new URL(value).protocol === "https:", {
-    message: "reference must use HTTPS",
-  });
+  .refine(
+    (value) => {
+      const url = new URL(value);
+      let decodedComponents: string;
+      try {
+        decodedComponents = [
+          decodeURIComponent(url.pathname),
+          decodeURIComponent(url.search),
+          decodeURIComponent(url.hash),
+        ].join("\n");
+      } catch {
+        return false;
+      }
+      return (
+        url.protocol === "https:" &&
+        url.username === "" &&
+        url.password === "" &&
+        scanText("readiness-reference.txt", value).length === 0 &&
+        scanText("readiness-reference.txt", decodedComponents).length === 0
+      );
+    },
+    {
+      message:
+        "reference must use HTTPS without credentials or secret-shaped content",
+    }
+  );
 const reviewerRoleSchema = z.enum([
   "release_operator",
   "security_reviewer",
@@ -45,6 +82,7 @@ const layerSchema = z.enum([
   "deployed_staging",
   "production_smoke",
 ]);
+const environmentSchema = z.enum(["hermetic", "staging", "production"]);
 const retentionClassSchema = z.enum([
   "ephemeral_test",
   "release_evidence",
@@ -170,11 +208,21 @@ const reviewerApprovalSchema = z
     approvedAt: utcTimestampSchema,
     candidateDigest: digestSchema,
     decision: z.enum(["approve", "reject", "pending"]),
+    decisionDigest: digestSchema,
     evidenceSetDigest: digestSchema,
     keyId: identifierSchema,
-    reviewerId: z.string().trim().email().max(254),
+    reviewerId: secretSafeStringSchema.trim().email().max(254),
     role: reviewerRoleSchema,
-    signature: z.string().min(1).max(256),
+    signature: z
+      .string()
+      .regex(/^[A-Za-z0-9+/]{86}==$/u)
+      .refine(
+        (value) => {
+          const decoded = Buffer.from(value, "base64");
+          return decoded.length === 64 && decoded.toString("base64") === value;
+        },
+        { message: "signature must be canonical Ed25519 Base64" }
+      ),
   })
   .strict();
 
@@ -188,6 +236,7 @@ export function reviewerApprovalPayload(
     approvedAt: approval.approvedAt,
     candidateDigest: approval.candidateDigest,
     decision: approval.decision,
+    decisionDigest: approval.decisionDigest,
     evidenceSetDigest: approval.evidenceSetDigest,
     keyId: approval.keyId,
     reviewerId: approval.reviewerId,
@@ -389,6 +438,7 @@ export const READINESS_TEST_MANIFEST = [
 ] as const;
 
 type EvidenceSetInput = {
+  recordedAt: string;
   redaction: {
     candidateDigest: string;
     evidenceDigest: string;
@@ -403,6 +453,15 @@ type EvidenceSetInput = {
     outcome: string;
     recordedAt: string;
     retentionClass: string;
+  };
+  rollback: {
+    candidateDigest: string;
+    certificationEvidenceDigest: string;
+    certifiedAt: string;
+    deploymentReference: string;
+    schemaCompatibilityEvidenceDigest: string;
+    targetCandidateDigest: string;
+    targetSourceSha: string;
   };
   syntheticCorrelations: {
     accountDigest: string;
@@ -437,8 +496,14 @@ export function evidenceSetManifestDigest(
       recordedAt: result.recordedAt,
       retentionClass: result.retentionClass,
     }))
-    .sort((left, right) => left.id.localeCompare(right.id));
+    .sort((left, right) =>
+      Buffer.compare(
+        Buffer.from(left.id, "utf8"),
+        Buffer.from(right.id, "utf8")
+      )
+    );
   return sha256({
+    recordedAt: evidence.recordedAt,
     redaction: {
       candidateDigest: evidence.redaction.candidateDigest,
       evidenceDigest: evidence.redaction.evidenceDigest,
@@ -454,6 +519,17 @@ export function evidenceSetManifestDigest(
       recordedAt: evidence.retiredProvider.recordedAt,
       retentionClass: evidence.retiredProvider.retentionClass,
     },
+    rollback: {
+      candidateDigest: evidence.rollback.candidateDigest,
+      certificationEvidenceDigest:
+        evidence.rollback.certificationEvidenceDigest,
+      certifiedAt: evidence.rollback.certifiedAt,
+      deploymentReference: evidence.rollback.deploymentReference,
+      schemaCompatibilityEvidenceDigest:
+        evidence.rollback.schemaCompatibilityEvidenceDigest,
+      targetCandidateDigest: evidence.rollback.targetCandidateDigest,
+      targetSourceSha: evidence.rollback.targetSourceSha,
+    },
     syntheticCorrelations: {
       accountDigest: evidence.syntheticCorrelations.accountDigest,
       runDigest: evidence.syntheticCorrelations.runDigest,
@@ -463,12 +539,56 @@ export function evidenceSetManifestDigest(
   }) as `sha256:${string}`;
 }
 
+type ReleaseDecisionInput = {
+  candidate: { manifestDigest: string };
+  environment: string;
+  evidenceSetDigest: string;
+  openBlockers: readonly string[];
+  receiptVersion: number;
+  recordedAt: string;
+  review: { decision: string };
+  rollback: EvidenceSetInput["rollback"];
+  testManifestVersion: number;
+};
+
+export function releaseDecisionManifestDigest(
+  decision: ReleaseDecisionInput
+): `sha256:${string}` {
+  const openBlockers = [...decision.openBlockers].sort((left, right) =>
+    Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"))
+  );
+  return sha256({
+    candidateDigest: decision.candidate.manifestDigest,
+    environment: decision.environment,
+    evidenceSetDigest: decision.evidenceSetDigest,
+    openBlockers,
+    receiptVersion: decision.receiptVersion,
+    recordedAt: decision.recordedAt,
+    requestedDecision: decision.review.decision,
+    rollback: {
+      candidateDigest: decision.rollback.candidateDigest,
+      certificationEvidenceDigest:
+        decision.rollback.certificationEvidenceDigest,
+      certifiedAt: decision.rollback.certifiedAt,
+      deploymentReference: decision.rollback.deploymentReference,
+      schemaCompatibilityEvidenceDigest:
+        decision.rollback.schemaCompatibilityEvidenceDigest,
+      targetCandidateDigest: decision.rollback.targetCandidateDigest,
+      targetSourceSha: decision.rollback.targetSourceSha,
+    },
+    testManifestVersion: decision.testManifestVersion,
+  }) as `sha256:${string}`;
+}
+
 export const readinessReceiptSchema = z
   .object({
     candidate: candidateSchema,
-    environment: z.enum(["hermetic", "staging", "production"]),
+    decisionDigest: digestSchema,
+    environment: environmentSchema,
     evidenceSetDigest: digestSchema,
-    openBlockers: z.array(z.string().trim().min(1).max(256)).max(32),
+    openBlockers: z
+      .array(secretSafeFreeTextSchema.trim().min(1).max(256))
+      .max(32),
     receiptVersion: z.literal(1),
     recordedAt: utcTimestampSchema,
     redaction: z
@@ -594,6 +714,11 @@ export const readinessReceiptSchema = z
       ]);
     }
 
+    const latestEvidenceTime = Math.max(
+      ...evidenceTimestamps.map(([, timestamp]) =>
+        new Date(timestamp).valueOf()
+      )
+    );
     const roles = new Set<string>();
     const reviewerIds = new Set<string>();
     const keyIds = new Set<string>();
@@ -629,6 +754,14 @@ export const readinessReceiptSchema = z
           path: ["review", "reviewers", index, "candidateDigest"],
         });
       }
+      if (reviewer.decisionDigest !== receipt.decisionDigest) {
+        context.addIssue({
+          code: "custom",
+          message:
+            "reviewer approval must bind to the complete release decision",
+          path: ["review", "reviewers", index, "decisionDigest"],
+        });
+      }
       if (reviewer.evidenceSetDigest !== receipt.evidenceSetDigest) {
         context.addIssue({
           code: "custom",
@@ -641,6 +774,13 @@ export const readinessReceiptSchema = z
         reviewer.approvedAt,
         ["review", "reviewers", index, "approvedAt"],
       ]);
+      if (new Date(reviewer.approvedAt).valueOf() < latestEvidenceTime) {
+        context.addIssue({
+          code: "custom",
+          message: "reviewer approval must follow the latest retained evidence",
+          path: ["review", "reviewers", index, "approvedAt"],
+        });
+      }
     }
 
     for (const [label, timestamp, path] of evidenceTimestamps) {
@@ -680,6 +820,14 @@ export const readinessReceiptSchema = z
         path: ["evidenceSetDigest"],
       });
     }
+    const expectedDecisionDigest = releaseDecisionManifestDigest(receipt);
+    if (receipt.decisionDigest !== expectedDecisionDigest) {
+      context.addIssue({
+        code: "custom",
+        message: "release decision digest does not match the complete decision",
+        path: ["decisionDigest"],
+      });
+    }
   });
 
 export type ReadinessReceipt = z.infer<typeof readinessReceiptSchema>;
@@ -693,7 +841,11 @@ export type ReviewerKey = {
 
 export type ReadinessValidationOptions = {
   expectedCandidateDigest?: string;
+  expectedEnvironment?: ReadinessReceipt["environment"];
+  expectedRollbackCertificationEvidenceDigest?: string;
   expectedRollbackCandidateDigest?: string;
+  expectedRollbackDeploymentReference?: string;
+  expectedRollbackSchemaCompatibilityEvidenceDigest?: string;
   expectedRollbackSourceSha?: string;
   expectedSourceSha?: string;
   maxReceiptAgeMs?: number;
@@ -715,11 +867,32 @@ const DURABLE_RETENTION_CLASSES = new Set([
 export function readinessDecisionViolations(
   receipt: ReadinessReceipt
 ): string[] {
-  if (receipt.review.decision !== "go") {
+  if (receipt.review.decision === "pending") {
     return [];
   }
 
   const violations: string[] = [];
+  if (receipt.review.decision === "no_go") {
+    const hasBlockingEvidence =
+      receipt.openBlockers.length > 0 ||
+      receipt.tests.some((result) => result.outcome === "fail") ||
+      receipt.redaction.outcome === "fail" ||
+      receipt.retiredProvider.outcome === "fail";
+    if (!hasBlockingEvidence) {
+      violations.push(
+        "no-go decision requires an explicit blocker or failed evidence"
+      );
+    }
+    if (
+      !receipt.review.reviewers.some(
+        (reviewer) => reviewer.decision === "reject"
+      )
+    ) {
+      violations.push("no-go decision requires a rejecting reviewer");
+    }
+    return violations;
+  }
+
   if (
     receipt.tests.some(
       (result) =>
@@ -791,10 +964,12 @@ function reviewerApprovalsAreValid(
     ) {
       return false;
     }
+
     try {
       const signature = Buffer.from(approval.signature, "base64");
       return (
         signature.length === 64 &&
+        signature.toString("base64") === approval.signature &&
         verify(
           null,
           Buffer.from(reviewerApprovalPayload(approval)),
@@ -808,6 +983,38 @@ function reviewerApprovalsAreValid(
   });
 }
 
+function reviewerKeyRegistryViolation(
+  reviewerKeys: readonly ReviewerKey[]
+): string | undefined {
+  const keyIds = new Set<string>();
+  const reviewerIds = new Set<string>();
+  const fingerprints = new Set<string>();
+
+  for (const key of reviewerKeys) {
+    if (keyIds.has(key.keyId) || reviewerIds.has(key.reviewerId)) {
+      return "reviewer key registry requires unique key IDs and reviewer identities";
+    }
+    keyIds.add(key.keyId);
+    reviewerIds.add(key.reviewerId);
+    try {
+      const publicKey = createPublicKey(key.publicKeyPem);
+      if (publicKey.asymmetricKeyType !== "ed25519") {
+        return "reviewer key registry requires Ed25519 public keys";
+      }
+      const fingerprint = createHash("sha256")
+        .update(publicKey.export({ format: "der", type: "spki" }))
+        .digest("hex");
+      if (fingerprints.has(fingerprint)) {
+        return "final decisions require cryptographically distinct reviewer keys";
+      }
+      fingerprints.add(fingerprint);
+    } catch {
+      return "reviewer key registry contains an invalid public key";
+    }
+  }
+  return undefined;
+}
+
 export function validateReadinessReceipt(
   value: unknown,
   options: ReadinessValidationOptions = {}
@@ -815,9 +1022,12 @@ export function validateReadinessReceipt(
   const receipt = readinessReceiptSchema.parse(value);
   const violations = readinessDecisionViolations(receipt);
 
-  if (receipt.review.decision === "go") {
+  if (receipt.review.decision !== "pending") {
+    const finalDecision = receipt.review.decision;
     if (options.expectedSourceSha === undefined) {
-      violations.push("go validation requires an expected source SHA");
+      violations.push(
+        `${finalDecision} validation requires an expected source SHA`
+      );
     } else if (receipt.candidate.sourceSha !== options.expectedSourceSha) {
       violations.push(
         "receipt source SHA does not match the expected candidate"
@@ -825,7 +1035,7 @@ export function validateReadinessReceipt(
     }
     if (options.expectedCandidateDigest === undefined) {
       violations.push(
-        "go validation requires an expected candidate manifest digest"
+        `${finalDecision} validation requires an expected candidate manifest digest`
       );
     } else if (
       receipt.candidate.manifestDigest !== options.expectedCandidateDigest
@@ -834,8 +1044,19 @@ export function validateReadinessReceipt(
         "receipt candidate manifest digest does not match the expected deployment"
       );
     }
+    if (options.expectedEnvironment === undefined) {
+      violations.push(
+        `${finalDecision} validation requires an expected deployment environment`
+      );
+    } else if (receipt.environment !== options.expectedEnvironment) {
+      violations.push(
+        "receipt environment does not match the expected deployment"
+      );
+    }
     if (options.expectedRollbackSourceSha === undefined) {
-      violations.push("go validation requires an expected rollback source SHA");
+      violations.push(
+        `${finalDecision} validation requires an expected rollback source SHA`
+      );
     } else if (
       receipt.rollback.targetSourceSha !== options.expectedRollbackSourceSha
     ) {
@@ -845,7 +1066,7 @@ export function validateReadinessReceipt(
     }
     if (options.expectedRollbackCandidateDigest === undefined) {
       violations.push(
-        "go validation requires an expected rollback candidate digest"
+        `${finalDecision} validation requires an expected rollback candidate digest`
       );
     } else if (
       receipt.rollback.targetCandidateDigest !==
@@ -855,26 +1076,87 @@ export function validateReadinessReceipt(
         "receipt rollback candidate digest does not match the expected certified release"
       );
     }
+    if (options.expectedRollbackCertificationEvidenceDigest === undefined) {
+      violations.push(
+        `${finalDecision} validation requires an expected rollback certification digest`
+      );
+    } else if (
+      receipt.rollback.certificationEvidenceDigest !==
+      options.expectedRollbackCertificationEvidenceDigest
+    ) {
+      violations.push(
+        "receipt rollback certification does not match the expected certified release"
+      );
+    }
     if (
+      options.expectedRollbackSchemaCompatibilityEvidenceDigest === undefined
+    ) {
+      violations.push(
+        `${finalDecision} validation requires an expected rollback schema-compatibility digest`
+      );
+    } else if (
+      receipt.rollback.schemaCompatibilityEvidenceDigest !==
+      options.expectedRollbackSchemaCompatibilityEvidenceDigest
+    ) {
+      violations.push(
+        "receipt rollback schema compatibility does not match the expected certified release"
+      );
+    }
+    if (options.expectedRollbackDeploymentReference === undefined) {
+      violations.push(
+        `${finalDecision} validation requires an expected rollback deployment reference`
+      );
+    } else if (
+      receipt.rollback.deploymentReference !==
+      options.expectedRollbackDeploymentReference
+    ) {
+      violations.push(
+        "receipt rollback deployment reference does not match the expected certified release"
+      );
+    }
+    const reviewerKeyViolation =
+      options.reviewerKeys === undefined
+        ? undefined
+        : reviewerKeyRegistryViolation(options.reviewerKeys);
+    if (reviewerKeyViolation !== undefined) {
+      violations.push(reviewerKeyViolation);
+    } else if (
       options.reviewerKeys === undefined ||
       !reviewerApprovalsAreValid(receipt, options.reviewerKeys)
     ) {
       violations.push(
-        "go decision requires valid authorized signatures for every reviewer approval"
+        `${finalDecision} decision requires valid authorized signatures for every reviewer approval`
       );
     }
 
     const currentTime = (options.now ?? new Date()).valueOf();
-    const receiptTime = new Date(receipt.recordedAt).valueOf();
-    if (receiptTime > currentTime + MAX_CLOCK_SKEW_MS) {
-      violations.push("go receipt cannot be recorded in the future");
-    }
+    const maxReceiptAgeMs = options.maxReceiptAgeMs ?? MAX_RECEIPT_AGE_MS;
+    const timestamps = [
+      receipt.recordedAt,
+      receipt.redaction.recordedAt,
+      receipt.retiredProvider.recordedAt,
+      receipt.rollback.certifiedAt,
+      ...receipt.tests.map((result) => result.recordedAt),
+      ...receipt.review.reviewers.map((reviewer) => reviewer.approvedAt),
+    ];
     if (
-      currentTime - receiptTime >
-      (options.maxReceiptAgeMs ?? MAX_RECEIPT_AGE_MS)
+      timestamps.some(
+        (timestamp) =>
+          new Date(timestamp).valueOf() > currentTime + MAX_CLOCK_SKEW_MS
+      )
     ) {
       violations.push(
-        "go receipt cannot be older than the allowed receipt age"
+        `${finalDecision} receipt cannot contain future evidence`
+      );
+    }
+    if (
+      timestamps.some(
+        (timestamp) =>
+          currentTime - new Date(timestamp).valueOf() > maxReceiptAgeMs
+      )
+    ) {
+      violations.push(
+        `${finalDecision} evidence or approval cannot be older than the allowed receipt age`
       );
     }
   }
@@ -906,7 +1188,7 @@ const reviewerKeySchema = z
   .object({
     keyId: identifierSchema,
     publicKeyPem: z.string().min(1).max(4096),
-    reviewerId: z.string().trim().email().max(254),
+    reviewerId: secretSafeStringSchema.trim().email().max(254),
     roles: z.array(reviewerRoleSchema).min(1).max(3),
   })
   .strict();
@@ -940,17 +1222,28 @@ function cliValue(values: string[], flag: string): string | undefined {
   return value;
 }
 
+function cliEnvironment(
+  values: string[]
+): ReadinessReceipt["environment"] | undefined {
+  const value = cliValue(values, "--expected-environment");
+  return value === undefined ? undefined : environmentSchema.parse(value);
+}
+
 const [, entrypoint, receiptPath, ...argumentsAfterPath] = process.argv;
 if (entrypoint && import.meta.url === pathToFileURL(entrypoint).href) {
   try {
     if (!receiptPath) {
       throw new Error(
-        "Usage: pnpm readiness:check <receipt.json> --expected-sha <git-sha> --expected-candidate-digest <sha256> --expected-rollback-sha <git-sha> --expected-rollback-candidate-digest <sha256> --reviewer-keys <keys.json>"
+        "Usage: pnpm readiness:check <receipt.json> --expected-sha <git-sha> --expected-candidate-digest <sha256> --expected-environment <environment> --expected-rollback-sha <git-sha> --expected-rollback-candidate-digest <sha256> --expected-rollback-certification-digest <sha256> --expected-rollback-schema-digest <sha256> --expected-rollback-deployment-reference <https-url> --reviewer-keys <keys.json>"
       );
     }
     const expectedFlags = new Set([
       "--expected-candidate-digest",
+      "--expected-environment",
       "--expected-rollback-candidate-digest",
+      "--expected-rollback-certification-digest",
+      "--expected-rollback-deployment-reference",
+      "--expected-rollback-schema-digest",
       "--expected-rollback-sha",
       "--expected-sha",
       "--reviewer-keys",
@@ -971,9 +1264,22 @@ if (entrypoint && import.meta.url === pathToFileURL(entrypoint).href) {
         argumentsAfterPath,
         "--expected-candidate-digest"
       ),
+      expectedEnvironment: cliEnvironment(argumentsAfterPath),
       expectedRollbackCandidateDigest: cliValue(
         argumentsAfterPath,
         "--expected-rollback-candidate-digest"
+      ),
+      expectedRollbackCertificationEvidenceDigest: cliValue(
+        argumentsAfterPath,
+        "--expected-rollback-certification-digest"
+      ),
+      expectedRollbackDeploymentReference: cliValue(
+        argumentsAfterPath,
+        "--expected-rollback-deployment-reference"
+      ),
+      expectedRollbackSchemaCompatibilityEvidenceDigest: cliValue(
+        argumentsAfterPath,
+        "--expected-rollback-schema-digest"
       ),
       expectedRollbackSourceSha: cliValue(
         argumentsAfterPath,

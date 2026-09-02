@@ -12,6 +12,7 @@ import {
   type ReviewerKey,
   readinessDecisionViolations,
   readinessReceiptSchema,
+  releaseDecisionManifestDigest,
   reviewerApprovalPayload,
   validateReadinessReceipt,
   validateReadinessReceiptFile,
@@ -58,6 +59,16 @@ function receipt(): ReadinessReceipt {
     target: "synthetic-staging",
   };
   const candidateDigest = candidateManifestDigest(candidateWithoutDigest);
+  const rollback = {
+    candidateDigest,
+    certificationEvidenceDigest: digest,
+    certifiedAt: recordedAt,
+    deploymentReference:
+      "https://vercel.com/opencoven/coven-agents/deployments/previous",
+    schemaCompatibilityEvidenceDigest: digest,
+    targetCandidateDigest: `sha256:${"d".repeat(64)}`,
+    targetSourceSha: rollbackSourceSha,
+  };
   const tests = READINESS_TEST_MANIFEST.map((requirement, index) => ({
     candidateDigest,
     evidenceDigests: [`sha256:${index.toString(16).padStart(64, "0")}`],
@@ -69,6 +80,7 @@ function receipt(): ReadinessReceipt {
     retentionClass: "release_evidence" as const,
   }));
   const evidence = {
+    recordedAt,
     redaction: {
       candidateDigest,
       evidenceDigest: digest,
@@ -84,6 +96,7 @@ function receipt(): ReadinessReceipt {
       recordedAt,
       retentionClass: "operational_evidence" as const,
     },
+    rollback,
     syntheticCorrelations: {
       accountDigest: digest,
       runDigest: digest,
@@ -92,12 +105,24 @@ function receipt(): ReadinessReceipt {
     tests,
   };
   const evidenceSetDigest = evidenceSetManifestDigest(evidence);
+  const decisionDigest = releaseDecisionManifestDigest({
+    candidate: { manifestDigest: candidateDigest },
+    environment: "staging",
+    evidenceSetDigest,
+    openBlockers: [],
+    receiptVersion: 1,
+    recordedAt,
+    review: { decision: "go" },
+    rollback,
+    testManifestVersion: 1,
+  });
   const reviewers = roles.map((role) => {
     const approval = {
       approvalReference: `https://github.com/OpenCoven/coven-agents/issues/1#${role}`,
       approvedAt: recordedAt,
       candidateDigest,
       decision: "approve" as const,
+      decisionDigest,
       evidenceSetDigest,
       keyId: `${role}-key`,
       reviewerId: `${role}@opencoven.test`,
@@ -118,6 +143,7 @@ function receipt(): ReadinessReceipt {
       ...candidateWithoutDigest,
       manifestDigest: candidateDigest,
     },
+    decisionDigest,
     environment: "staging",
     evidenceSetDigest,
     openBlockers: [],
@@ -129,16 +155,7 @@ function receipt(): ReadinessReceipt {
       decision: "go",
       reviewers,
     },
-    rollback: {
-      candidateDigest,
-      certificationEvidenceDigest: digest,
-      certifiedAt: recordedAt,
-      deploymentReference:
-        "https://vercel.com/opencoven/coven-agents/deployments/previous",
-      schemaCompatibilityEvidenceDigest: digest,
-      targetCandidateDigest: `sha256:${"d".repeat(64)}`,
-      targetSourceSha: rollbackSourceSha,
-    },
+    rollback,
     syntheticCorrelations: evidence.syntheticCorrelations,
     testManifestVersion: 1,
     tests,
@@ -149,7 +166,13 @@ function validationOptions() {
   const value = receipt();
   return {
     expectedCandidateDigest: value.candidate.manifestDigest,
+    expectedEnvironment: value.environment,
     expectedRollbackCandidateDigest: value.rollback.targetCandidateDigest,
+    expectedRollbackCertificationEvidenceDigest:
+      value.rollback.certificationEvidenceDigest,
+    expectedRollbackDeploymentReference: value.rollback.deploymentReference,
+    expectedRollbackSchemaCompatibilityEvidenceDigest:
+      value.rollback.schemaCompatibilityEvidenceDigest,
     expectedRollbackSourceSha: rollbackSourceSha,
     expectedSourceSha: sourceSha,
     now,
@@ -159,9 +182,11 @@ function validationOptions() {
 
 function refreshEvidenceBindings(value: ReadinessReceipt) {
   value.evidenceSetDigest = evidenceSetManifestDigest(value);
+  value.decisionDigest = releaseDecisionManifestDigest(value);
   value.review.reviewers = value.review.reviewers.map((reviewer) => {
     const approval = {
       ...reviewer,
+      decisionDigest: value.decisionDigest,
       evidenceSetDigest: value.evidenceSetDigest,
     };
     return {
@@ -173,6 +198,14 @@ function refreshEvidenceBindings(value: ReadinessReceipt) {
       ).toString("base64"),
     };
   });
+}
+
+function refreshDecisionBindingWithoutResigning(value: ReadinessReceipt) {
+  value.decisionDigest = releaseDecisionManifestDigest(value);
+  value.review.reviewers = value.review.reviewers.map((reviewer) => ({
+    ...reviewer,
+    decisionDigest: value.decisionDigest,
+  }));
 }
 
 test("accepts a signed exact-deployment readiness receipt", () => {
@@ -189,6 +222,41 @@ test("rejects raw or unrecognized evidence fields", () => {
   };
 
   assert.equal(readinessReceiptSchema.safeParse(unsafe).success, false);
+});
+
+test("rejects secret-shaped values in recognized fields and unsafe references", () => {
+  const secret = `ghp_${"A1b2C3d4E5f6G7h8I9j0".repeat(2)}`;
+  const unsafeBlocker = receipt();
+  unsafeBlocker.review = { decision: "pending", reviewers: [] };
+  unsafeBlocker.openBlockers = [`Provider failed with ${secret}`];
+  refreshEvidenceBindings(unsafeBlocker);
+  const opaqueSecretBlocker = receipt();
+  opaqueSecretBlocker.review = { decision: "pending", reviewers: [] };
+  opaqueSecretBlocker.openBlockers = [
+    "Provider failed with q7V9m2K4p8R1t6W3x5Y0z9A2b4C6d8E0",
+  ];
+  refreshEvidenceBindings(opaqueSecretBlocker);
+
+  const unsafeReference = receipt();
+  unsafeReference.rollback.deploymentReference = `https://example.com/deployment?token=${secret}`;
+  refreshEvidenceBindings(unsafeReference);
+  const encodedReference = receipt();
+  encodedReference.rollback.deploymentReference = `https://example.com/deployment?value=${encodeURIComponent(secret)}`;
+  refreshEvidenceBindings(encodedReference);
+
+  assert.equal(readinessReceiptSchema.safeParse(unsafeBlocker).success, false);
+  assert.equal(
+    readinessReceiptSchema.safeParse(opaqueSecretBlocker).success,
+    false
+  );
+  assert.equal(
+    readinessReceiptSchema.safeParse(unsafeReference).success,
+    false
+  );
+  assert.equal(
+    readinessReceiptSchema.safeParse(encodedReference).success,
+    false
+  );
 });
 
 test("requires explicit recovery disposition for failed tests", () => {
@@ -246,6 +314,7 @@ test("allows pending receipts to retain explicit blockers and deferred evidence"
     reviewers: [],
   };
   pending.evidenceSetDigest = evidenceSetManifestDigest(pending);
+  pending.decisionDigest = releaseDecisionManifestDigest(pending);
 
   const parsed = readinessReceiptSchema.parse(pending);
 
@@ -331,6 +400,30 @@ test("requires external candidate and rollback bindings for go validation", () =
       }),
     /rollback source SHA does not match/u
   );
+  assert.throws(
+    () =>
+      validateReadinessReceipt(receipt(), {
+        ...validationOptions(),
+        expectedEnvironment: "production",
+      }),
+    /environment does not match/u
+  );
+  assert.throws(
+    () =>
+      validateReadinessReceipt(receipt(), {
+        ...validationOptions(),
+        expectedRollbackCertificationEvidenceDigest: `sha256:${"f".repeat(64)}`,
+      }),
+    /rollback certification does not match/u
+  );
+  assert.throws(
+    () =>
+      validateReadinessReceipt(receipt(), {
+        ...validationOptions(),
+        expectedRollbackSchemaCompatibilityEvidenceDigest: `sha256:${"f".repeat(64)}`,
+      }),
+    /rollback schema compatibility does not match/u
+  );
 });
 
 test("rejects spoofed, unauthorized, or invalid reviewer signatures", () => {
@@ -351,6 +444,64 @@ test("rejects spoofed, unauthorized, or invalid reviewer signatures", () => {
         reviewerKeys: [],
       }),
     /valid authorized signatures/u
+  );
+});
+
+test("reviewer signatures cover the complete release decision", () => {
+  const tampered = receipt();
+  tampered.environment = "production";
+  refreshDecisionBindingWithoutResigning(tampered);
+
+  assert.throws(
+    () =>
+      validateReadinessReceipt(tampered, {
+        ...validationOptions(),
+        expectedEnvironment: "production",
+      }),
+    /valid authorized signatures/u
+  );
+});
+
+test("rejects noncanonical signatures with appended secret content", () => {
+  const invalid = receipt();
+  invalid.review.reviewers[0] = {
+    ...invalid.review.reviewers[0],
+    signature: `${invalid.review.reviewers[0]?.signature}ghp_${"A1b2C3d4E5f6G7h8I9j0".repeat(2)}`,
+  };
+
+  assert.equal(readinessReceiptSchema.safeParse(invalid).success, false);
+});
+
+test("requires cryptographically distinct reviewer signing keys", () => {
+  const sharedKeyReceipt = receipt();
+  sharedKeyReceipt.review.reviewers = sharedKeyReceipt.review.reviewers.map(
+    (reviewer) => {
+      const approval = {
+        ...reviewer,
+        signature: undefined,
+      };
+      return {
+        ...reviewer,
+        signature: sign(
+          null,
+          Buffer.from(reviewerApprovalPayload(approval)),
+          keyPairs.release_operator.privateKey
+        ).toString("base64"),
+      };
+    }
+  );
+  const sharedReviewerKeys = reviewerKeys.map((key) => ({
+    ...key,
+    publicKeyPem: keyPairs.release_operator.publicKey,
+  }));
+
+  assert.throws(
+    () =>
+      validateReadinessReceipt(sharedKeyReceipt, {
+        ...validationOptions(),
+        reviewerKeys: sharedReviewerKeys,
+      }),
+    /cryptographically distinct reviewer keys/u
   );
 });
 
@@ -380,6 +531,54 @@ test("rejects future-dated and stale go receipts", () => {
         now: new Date("2026-09-20T00:00:00.000Z"),
       }),
     /older than/u
+  );
+});
+
+test("cannot renew stale evidence by changing only receipt time and signatures", () => {
+  const renewed = receipt();
+  renewed.recordedAt = "2026-09-19T23:30:00.000Z";
+  refreshEvidenceBindings(renewed);
+
+  assert.throws(
+    () =>
+      validateReadinessReceipt(renewed, {
+        ...validationOptions(),
+        now: new Date("2026-09-20T00:00:00.000Z"),
+      }),
+    /evidence or approval cannot be older than/u
+  );
+});
+
+test("requires approvals after the latest evidence they attest", () => {
+  const premature = receipt();
+  premature.tests[0] = {
+    ...premature.tests[0],
+    recordedAt: "2026-09-01T23:35:00.000Z",
+  };
+  premature.recordedAt = "2026-09-01T23:40:00.000Z";
+  refreshEvidenceBindings(premature);
+
+  assert.equal(readinessReceiptSchema.safeParse(premature).success, false);
+});
+
+test("binds rollback certification evidence into reviewer signatures", () => {
+  const tampered = receipt();
+  tampered.rollback.certificationEvidenceDigest = `sha256:${"e".repeat(64)}`;
+
+  assert.equal(readinessReceiptSchema.safeParse(tampered).success, false);
+});
+
+test("requires an explicit signed and externally bound no-go decision", () => {
+  const noGo = receipt();
+  noGo.review = {
+    decision: "no_go",
+    reviewers: [],
+  };
+  noGo.decisionDigest = releaseDecisionManifestDigest(noGo);
+
+  assert.throws(
+    () => validateReadinessReceipt(noGo),
+    /no-go decision requires an explicit blocker or failed evidence/u
   );
 });
 

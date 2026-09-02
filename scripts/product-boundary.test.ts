@@ -826,11 +826,10 @@ test("release readiness requires exact signed deployment attestations", () => {
   assert.match(readiness, /test manifest version 1/);
   assert.match(readiness, /ephemeral evidence cannot satisfy/);
   assert.match(readiness, /Ed25519 signature/);
+  assert.match(readiness, /complete release-decision digest/);
   assert.match(readiness, /trusted reviewer-key file/);
-  assert.match(
-    readiness,
-    /independently supplied\s+candidate and rollback digests/
-  );
+  assert.match(readiness, /independently supplied deployment environment/);
+  assert.match(readiness, /rollback\s+certification and schema-compatibility/);
   assert.match(readiness, /rejects a rollback target equal to the\s+candidate/);
   assert.match(readiness, /older than seven days/);
 });
