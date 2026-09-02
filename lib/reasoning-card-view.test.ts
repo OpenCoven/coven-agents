@@ -18,6 +18,12 @@ test("reasoning card keeps disclosure, focus, and reduced-motion semantics", () 
   assert.match(source, /inert=\{!isOpen\}/u);
   assert.match(source, /Show \{step\.collapsedCount\} routine tool calls/u);
   assert.match(source, /expandedFocusRef\.current\?\.focus\(\)/u);
+  assert.match(source, /useRef\(!isStreaming\)/u);
+  assert.match(source, /useReducedMotion\(\)/u);
+  assert.match(
+    source,
+    /reduceMotion\s*\?\s*\(\s*"live"\s*\)\s*:\s*\(\s*<Shimmer/u
+  );
 });
 
 test("reasoning card uses the exported OpenCoven surface tokens", () => {

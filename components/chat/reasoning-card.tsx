@@ -14,6 +14,7 @@ import {
   SparklesIcon,
   WrenchIcon,
 } from "lucide-react";
+import { useReducedMotion } from "motion/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Streamdown } from "streamdown";
 import {
@@ -108,8 +109,9 @@ export function ReasoningCard({
   const [isMounted, setIsMounted] = useState(defaultOpen || isStreaming);
   const [expanded, setExpanded] = useState(false);
   const [duration, setDuration] = useState<number>();
+  const reduceMotion = useReducedMotion();
   const startedAtRef = useRef<number | null>(isStreaming ? Date.now() : null);
-  const hasAutoClosedRef = useRef(false);
+  const hasAutoClosedRef = useRef(!isStreaming);
   const explicitlyClosedRef = useRef(false);
   const expandedFocusRef = useRef<HTMLDivElement>(null);
 
@@ -213,9 +215,13 @@ export function ReasoningCard({
             </span>
             <span className="font-[var(--font-mono)]">
               {isStreaming ? (
-                <Shimmer as="span" duration={1}>
-                  live
-                </Shimmer>
+                reduceMotion ? (
+                  "live"
+                ) : (
+                  <Shimmer as="span" duration={1}>
+                    live
+                  </Shimmer>
+                )
               ) : (
                 formatDuration(duration)
               )}

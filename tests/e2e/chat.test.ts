@@ -164,5 +164,7 @@ test.describe("Legacy chat surface", () => {
       card.getByText("The call did not complete. No result was assumed.")
     ).toBeVisible();
     await expect(card.getByText("1 tool call")).toBeVisible();
+    await page.waitForTimeout(1200);
+    await expect(trigger).toHaveAttribute("aria-expanded", "true");
   });
 });
