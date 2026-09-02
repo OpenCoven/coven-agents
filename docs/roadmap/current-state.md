@@ -1,16 +1,17 @@
 # Current Repository State
 
 - Snapshot date: 2026-09-01
-- Application baseline: `690dcfe897127b638def9c03a9de83c17fc376a2`
-- Evidence class: verified repository and local contract evidence plus retained
-  infrastructure cutover evidence
+- Application baseline: `4bf89dc98667efa1c46b5131e10d4b14bf5f86c3`
+- Evidence class: verified repository and local contract evidence, retained
+  infrastructure cutover evidence, and a public exact-build guest replay
 
-This snapshot includes the `fix/open-p0-gates` code candidate plus the
-documentation-only commit that updates this record. It distinguishes the
-completed infrastructure cutover and repository certification from pending
-deployed Daytona lifecycle, observation-window, and full product release
-approval. Private planning reconciliation remains pending and is not inferred
-from repository or Project evidence.
+This snapshot includes merged P0 repository certification through PR #183, the
+replay-timeline correction in PR #184, the public exact-build guest replay
+recorded by PR #185, and unreachable UI removal in PR #186. It distinguishes
+those completed boundaries from pending deployed Daytona lifecycle,
+observation-window, and full product release approval. Private planning
+reconciliation remains pending and is not inferred from repository or Project
+evidence.
 
 ## Implemented surfaces
 
@@ -59,15 +60,25 @@ from repository or Project evidence.
   [PR #180](https://github.com/OpenCoven/coven-agents/pull/180) added and
   integrated shared subscription-authority invalidation, strict expiry, and
   authority-scoped credential lifecycle controls.
+- [PR #183](https://github.com/OpenCoven/coven-agents/pull/183) merged the P0
+  provider-neutral execution, billing, entitlement, credential, replay, and
+  hermetic certification gates as `52fe9f8`.
+- [PR #184](https://github.com/OpenCoven/coven-agents/pull/184) stabilized
+  replay event timelines.
+- [PR #185](https://github.com/OpenCoven/coven-agents/pull/185) recorded the
+  credential-free public exact-build guest replay.
+- [PR #186](https://github.com/OpenCoven/coven-agents/pull/186) removed
+  unreachable UI and orphaned dependency residue and is the current repository
+  baseline.
 
 The application baseline also includes the merged console, billing,
 deployment-policy, branding, runner-reliability, coordinated-team, dependency,
 subscriber-surface, credential-lifecycle, and session-path corrections plus
-the P0 repository-certification candidate through
-`690dcfe897127b638def9c03a9de83c17fc376a2`. The
+the P0 repository certification through
+`4bf89dc98667efa1c46b5131e10d4b14bf5f86c3`. The
 [cutover attestation](../operations/daytona-cutover-attestation.md) records
-infrastructure production evidence while preserving the remaining product
-certification and approval gates.
+infrastructure production evidence and exact application-preview results while
+preserving the remaining product certification and approval gates.
 
 ## Known gaps
 
