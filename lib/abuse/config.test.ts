@@ -43,6 +43,25 @@ test("startup validation rejects malformed global run caps", () => {
   );
 });
 
+/**
+ * A blank value is what an environment variable created and left empty
+ * produces, and every other setting here treats blank as absent. Reading it as
+ * "configured, but malformed" reported a positive-integer error for a variable
+ * the operator never set.
+ */
+test("a blank run cap counts as absent, not as a malformed value", () => {
+  for (const globalDailyRunCap of ["", "   "]) {
+    assert.doesNotThrow(() =>
+      validateAbuseConfig({
+        globalDailyRunCap,
+        isProduction: true,
+        keySecret: undefined,
+        redisUrl: undefined,
+      })
+    );
+  }
+});
+
 test("startup validation accepts valid or missing Redis configuration", () => {
   assert.doesNotThrow(() =>
     validateAbuseConfig({
