@@ -23,6 +23,11 @@ test("reasoning card keeps disclosure, focus, and reduced-motion semantics", () 
     /Show \{step\.collapsedCount\} routine tool calls/u
   );
   assert.match(source, /expandedFocusRef\.current\?\.focus\(\)/u);
+  assert.match(
+    source,
+    /const handleExpand = useCallback\(\(\) => \{\s*hasAutoClosedRef\.current = true;\s*setExpanded\(true\);\s*\}, \[\]\);/u
+  );
+  assert.match(source, /\}, \[expanded, isOpen, isStreaming\]\);/u);
   assert.match(source, /useRef\(!isStreaming\)/u);
   assert.match(
     source,

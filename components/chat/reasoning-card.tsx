@@ -120,7 +120,7 @@ export function ReasoningCard({
       if (startedAtRef.current === null) {
         startedAtRef.current = Date.now();
       }
-      hasAutoClosedRef.current = false;
+      hasAutoClosedRef.current = expanded;
       if (!explicitlyClosedRef.current) {
         setIsOpen(true);
         setIsMounted(true);
@@ -137,6 +137,10 @@ export function ReasoningCard({
         hasAutoClosedRef.current = true;
       }
     }
+    if (expanded) {
+      hasAutoClosedRef.current = true;
+      return;
+    }
     if (isOpen && !hasAutoClosedRef.current) {
       const timer = setTimeout(() => {
         setIsOpen(false);
@@ -144,7 +148,7 @@ export function ReasoningCard({
       }, AUTO_CLOSE_DELAY);
       return () => clearTimeout(timer);
     }
-  }, [isOpen, isStreaming]);
+  }, [expanded, isOpen, isStreaming]);
 
   useEffect(() => {
     if (isOpen) {
@@ -196,7 +200,10 @@ export function ReasoningCard({
     },
     [isStreaming]
   );
-  const handleExpand = useCallback(() => setExpanded(true), []);
+  const handleExpand = useCallback(() => {
+    hasAutoClosedRef.current = true;
+    setExpanded(true);
+  }, []);
 
   return (
     <Collapsible
