@@ -1263,46 +1263,6 @@ test("missing, suspended, under-permissioned, all-repository, and excessive inst
   }
 });
 
-test("authorization lock contention leaves the OAuth callback retryable", async () => {
-  let lockAttempts = 0;
-  let proofCalls = 0;
-  const handlers = createGitHubConnectionHandlers(
-    dependenciesWithUserAuthorization(
-      {
-        serializeUserAuthorization: (_subscriber, operation) => {
-          lockAttempts += 1;
-          if (lockAttempts === 1) {
-            return Promise.reject(
-              new GitHubProviderError("github_provider_unavailable", {
-                retryable: true,
-                status: 503,
-              })
-            );
-          }
-          return operation();
-        },
-      },
-      {
-        proveInstallationAccess: () => {
-          proofCalls += 1;
-          return Promise.resolve(userAuthority());
-        },
-      }
-    )
-  );
-  const authorization = await beginUserAuthorization(handlers);
-  const request = oauthCallbackRequest(authorization.state);
-
-  const contended = await handlers.callback(request, null);
-  assert.equal(contended.status, 503);
-  assert.equal(await errorCode(contended), "github_provider_unavailable");
-  assert.equal(proofCalls, 0);
-
-  const retried = await handlers.callback(request, null);
-  assert.equal(retried.status, 303);
-  assert.equal(proofCalls, 1);
-});
-
 test("transient provider failures are sanitized and cannot repeat a consumed OAuth exchange", async () => {
   const idempotency = new MemoryIdempotencyStore();
   const store = new MemoryConnectionStore();

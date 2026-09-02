@@ -156,7 +156,8 @@ export function createGitHubUserAuthorizationClient(
           await response.body?.cancel().catch(() => undefined);
           throw statusError(response, stage);
         }
-        return { timedOut, value: await consume(response) };
+        const value = await consume(response);
+        return { timedOut, value };
       } catch (error) {
         if (timedOut || controller.signal.aborted) {
           throw timeoutError();
@@ -356,8 +357,8 @@ export function createGitHubUserAuthorizationClient(
     for (let page = 1; page <= maxPages; page += 1) {
       let pageValue: unknown;
       try {
-        // biome-ignore lint/performance/noAwaitInLoops: each bounded page depends on the prior count
         pageValue = requireOnTime(
+          // biome-ignore lint/performance/noAwaitInLoops: each bounded page depends on the prior count
           await requestJson(
             `${GITHUB_API_ORIGIN}/user/installations/${installationId}/repositories?page=${page}&per_page=100`,
             {

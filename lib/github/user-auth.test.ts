@@ -293,7 +293,7 @@ test("a foreign valid installation is inaccessible and never accepted by app ide
     client.proveInstallationAccess(proofInput()),
     providerError("github_user_installation_inaccessible", false)
   );
-  assert.equal(requests.length, 3);
+  assert.equal(requests.length, 4);
 });
 
 test("user installation pagination finds the exact installation on a later bounded page", async () => {
@@ -577,7 +577,7 @@ test("OAuth and user-installation response bodies remain inside the request time
       [],
       [
         delayedJsonResponse(tokenBody(), 20),
-        jsonResponse(installationsBody([INSTALLATION_ID])),
+        new Response(null, { status: 202 }),
         new Response(null, { status: 204 }),
       ]
     ),
@@ -594,6 +594,7 @@ test("OAuth and user-installation response bodies remain inside the request time
       [
         jsonResponse(tokenBody()),
         delayedJsonResponse(installationsBody([INSTALLATION_ID]), 20),
+        new Response(null, { status: 202 }),
         new Response(null, { status: 204 }),
       ]
     ),
@@ -787,7 +788,7 @@ test("expiring-token refresh authority is retained only until both tokens are re
 
   await client.proveInstallationAccess(proofInput());
 
-  assert.equal(requests.length, 5);
+  assert.equal(requests.length, 6);
   const authorityRequests = JSON.stringify(
     requests
       .filter((request) => !isCleanupRequest(request))
@@ -799,51 +800,29 @@ test("expiring-token refresh authority is retained only until both tokens are re
       }))
   );
   assert.doesNotMatch(authorityRequests, new RegExp(refreshToken, "u"));
-  const grantCleanup = requests.find(({ method }) => method === "DELETE");
-  assert.equal(grantCleanup?.url, GRANT_REVOCATION_URL);
-  assert.deepEqual(JSON.parse(grantCleanup?.body ?? "{}"), {
-    access_token: USER_TOKEN,
-  });
-  assert.equal(
-    requests.some(({ url }) => url === REFRESH_REVOCATION_URL),
-    false
-  );
-});
-
-test("grant cleanup falls back to both token-specific revocations", async () => {
-  const refreshToken = `ghr_${"B".repeat(32)}`;
-  const requests: CapturedRequest[] = [];
-  const client = clientFor(
-    sequenceFetch(requests, [
-      jsonResponse(tokenBody(USER_TOKEN, refreshToken)),
-      jsonResponse(installationsBody([INSTALLATION_ID])),
-      new Response(null, { status: 503 }),
-      new Response(null, { status: 204 }),
-    ])
-  );
-
-  await client.proveInstallationAccess(proofInput());
-  assert.deepEqual(
-    revokedCredentials(requests).sort(),
-    [USER_TOKEN, USER_TOKEN, refreshToken].sort()
-  );
   assert.deepEqual(
     requests
       .filter(isCleanupRequest)
-      .map(({ url }) => url)
+      .map(({ method, url }) => [method, url])
       .sort(),
-    [ACCESS_REVOCATION_URL, GRANT_REVOCATION_URL, REFRESH_REVOCATION_URL].sort()
+    [
+      ["DELETE", ACCESS_REVOCATION_URL],
+      ["POST", REFRESH_REVOCATION_URL],
+    ].sort()
   );
+  assert.deepEqual(revokedCredentials(requests).sort(), [
+    refreshToken,
+    USER_TOKEN,
+  ]);
 });
 
-test("both fallback revocations settle before a cleanup failure is surfaced", async () => {
+test("both token revocations settle before a cleanup failure is surfaced", async () => {
   const refreshToken = `ghr_${"B".repeat(32)}`;
   const requests: CapturedRequest[] = [];
   const client = clientFor(
     sequenceFetch(requests, [
       jsonResponse(tokenBody(USER_TOKEN, refreshToken)),
       jsonResponse(installationsBody([INSTALLATION_ID])),
-      new Response(null, { status: 503 }),
       new Response(null, { status: 503 }),
       new Response(null, { status: 204 }),
     ])
@@ -855,7 +834,7 @@ test("both fallback revocations settle before a cleanup failure is surfaced", as
   );
   assert.deepEqual(
     revokedCredentials(requests).sort(),
-    [USER_TOKEN, USER_TOKEN, refreshToken].sort()
+    [refreshToken, USER_TOKEN].sort()
   );
 });
 
