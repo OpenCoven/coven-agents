@@ -80,7 +80,7 @@ test("the cutover attestation matches the exact preview receipt", () => {
   );
 
   assert.equal(receipt.schemaVersion, 1);
-  assert.equal(receipt.deployment.routeCount, 42);
+  assert.equal(receipt.deployment.staticGenerationCount, 42);
   assert.equal(receipt.containsCredentialMaterial, false);
   assert.equal(receipt.providerLifecycleCertified, false);
 
@@ -97,7 +97,10 @@ test("the cutover attestation matches the exact preview receipt", () => {
 
   assert.match(
     attestation,
-    new RegExp(`route count: \`${receipt.deployment.routeCount}\``, "u")
+    new RegExp(
+      `static-generation count: \`${receipt.deployment.staticGenerationCount}\``,
+      "u"
+    )
   );
   assert.match(attestation, /Credential material retained: `no`/u);
   assert.match(attestation, /Provider lifecycle certified: `no`/u);

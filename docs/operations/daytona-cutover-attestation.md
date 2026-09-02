@@ -110,7 +110,7 @@ retains the machine-readable relationships below:
 - deployment `dpl_83qug3pWqY3rHQRsJRcjYEABAaqo` built PR #183 merge commit
   `52fe9f8a28b5b06099ad70c25eb6504d70597ee4` with tree
   `28ec05d475ff8464a4fbe2f09e4416714fced78a`;
-- route count: `42`;
+- static-generation count: `42`;
 - required routes:
   `/api/internal/runner-resource-inventory` and
   `/api/internal/stripe-reconcile`.

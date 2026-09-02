@@ -5,7 +5,7 @@
     "id": "dpl_83qug3pWqY3rHQRsJRcjYEABAaqo",
     "sourceCommit": "52fe9f8a28b5b06099ad70c25eb6504d70597ee4",
     "sourceTree": "28ec05d475ff8464a4fbe2f09e4416714fced78a",
-    "routeCount": 42,
+    "staticGenerationCount": 42,
     "requiredRoutes": [
       "/api/internal/runner-resource-inventory",
       "/api/internal/stripe-reconcile"
