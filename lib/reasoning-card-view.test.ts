@@ -1,0 +1,63 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import test from "node:test";
+
+const source = readFileSync(
+  new URL("../components/chat/reasoning-card.tsx", import.meta.url),
+  "utf8"
+);
+
+test("reasoning card keeps disclosure, focus, and reduced-motion semantics", () => {
+  assert.match(source, /<section aria-label="Reasoning">/u);
+  assert.match(source, /data-testid="message-reasoning"/u);
+  assert.match(source, /<CollapsibleTrigger/u);
+  assert.match(source, /<CollapsibleContent/u);
+  assert.match(source, /focus-visible:outline/u);
+  assert.match(source, /motion-reduce:transition-none/u);
+  assert.match(source, /aria-hidden=\{!isOpen\}/u);
+  assert.match(source, /inert=\{!isOpen\}/u);
+  assert.match(source, /totalCollapsedCount/u);
+  assert.match(source, /Show \{totalCollapsedCount\} routine tool calls/u);
+  assert.doesNotMatch(
+    source,
+    /Show \{step\.collapsedCount\} routine tool calls/u
+  );
+  assert.match(source, /expandedFocusRef\.current\?\.focus\(\)/u);
+  assert.match(
+    source,
+    /const handleExpand = useCallback\(\(\) => \{\s*hasAutoClosedRef\.current = true;\s*setExpanded\(true\);\s*\}, \[\]\);/u
+  );
+  assert.match(source, /\}, \[expanded, isOpen, isStreaming\]\);/u);
+  assert.match(source, /useRef\(!isStreaming\)/u);
+  assert.match(
+    source,
+    /if \(!isOpen\) \{\s*hasAutoClosedRef\.current = true;\s*\}/u
+  );
+  assert.match(
+    source,
+    /if \(!\(next \|\| isStreaming\)\) \{\s*hasAutoClosedRef\.current = true;\s*\}/u
+  );
+  assert.match(source, /useReducedMotion\(\)/u);
+  assert.match(
+    source,
+    /reduceMotion\s*\?\s*\(\s*"live"\s*\)\s*:\s*\(\s*<Shimmer/u
+  );
+});
+
+test("reasoning card uses the exported OpenCoven surface tokens", () => {
+  for (const token of [
+    "--border-hairline",
+    "--bg-raised",
+    "--bg-hover",
+    "--text-primary",
+    "--text-secondary",
+    "--text-muted",
+    "--accent-presence",
+    "--color-danger",
+    "--color-warning",
+    "--ring-focus",
+    "--font-mono",
+  ]) {
+    assert.match(source, new RegExp(token, "u"));
+  }
+});
