@@ -131,7 +131,8 @@ resource-inventory evidence.
 
 The final live environment-name inventory removed the two remaining retired
 runtime entries: the Preview browser runner URL marker and the Production
-scoped identity-write toggle. Temporary branch-scoped preview variables and
+run-scoped identity-write toggle. The separate active credential AAD write gate
+was not classified as retired. Temporary branch-scoped preview variables and
 automation bypasses used during diagnosis were removed. No deployed credential
 value was copied into this record.
 

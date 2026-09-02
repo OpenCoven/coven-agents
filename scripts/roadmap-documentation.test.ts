@@ -189,6 +189,49 @@ test("the cutover attestation matches the exact preview receipt", () => {
   assert.deepEqual(attestationRows, expectedRows);
 });
 
+test("the verification matrix matches the hermetic certification receipt", () => {
+  const matrix = read("docs/roadmap/verification-matrix.md");
+  const receipt = JSON.parse(
+    read("docs/operations/p0-hermetic-receipt-2026-09-01.json")
+  );
+
+  assert.deepEqual(receipt, {
+    applicationBaseline: "3ad1232f061b5eaf4440b6fd3c7c13967a6c423f",
+    applicationTree: "e5696dd81ca6a5d6a6e6c9f80cd4af06d20c98f0",
+    capturedAt: "2026-09-01",
+    caseCount: 11,
+    command: "pnpm test:e2e:hermetic",
+    database: {
+      disposable: true,
+      engine: "PostgreSQL",
+      majorVersion: 16,
+      timezone: "UTC",
+    },
+    dbCheck: "passed",
+    groups: [
+      {
+        caseCount: 8,
+        file: "tests/e2e/subscriber-hermetic.test.ts",
+      },
+      {
+        caseCount: 1,
+        file: "tests/e2e/demo.test.ts",
+      },
+      {
+        caseCount: 2,
+        file: "tests/e2e/demo-adversarial.test.ts",
+      },
+    ],
+    repositoryHead: "7310bd65297417283e301141f3973a94b42d1de5",
+    result: "passed",
+    schemaVersion: 1,
+  });
+  assert.match(
+    matrix,
+    /p0-hermetic-receipt-2026-09-01\.json.*11 browser cases.*3ad1232f061b5eaf4440b6fd3c7c13967a6c423f/u
+  );
+});
+
 test("release readiness separates infrastructure cutover from product approval", () => {
   const readiness = read("docs/roadmap/release-readiness.md");
 
