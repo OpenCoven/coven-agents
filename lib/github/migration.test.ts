@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import test from "node:test";
+import { is } from "drizzle-orm";
+import { getTableConfig, PgDialect, PgTable } from "drizzle-orm/pg-core";
+// biome-ignore lint/performance/noNamespaceImport: the snapshot test must enumerate every exported table
+import * as schema from "../db/schema";
 
 const migrations = new URL("../db/migrations/", import.meta.url);
 
@@ -10,10 +14,72 @@ const GATEWAY_SNAPSHOT = "meta/0032_snapshot.json";
 const PROJECT_AUTHORITY_MIGRATION = "0035_spicy_hammerhead.sql";
 const PROJECT_AUTHORITY_TRIGGER_MIGRATION =
   "0036_project_authority_trigger.sql";
+// PostgreSQL rejects regex repetition counts above 255 (DUPMAX in regguts.h).
+const POSTGRES_REGEX_REPETITION_LIMIT = 255;
+// Regex operands only: `~ '…'`, `~* '…'`, `!~ '…'`, `!~* '…'`, and jsonpath `like_regex "…"`.
+const REGEX_OPERAND =
+  /!?~\*?\s*'((?:[^']|'')*)'|like_regex\s+"((?:[^"\\]|\\.)*)"/gu;
+const REGEX_BOUND = /\{(\d+)(?:,(\d*))?\}/gu;
+
+type RegexBoundEntry = Readonly<{ operand: string; bounds: readonly number[] }>;
+
+type Snapshot = Readonly<{
+  tables: Record<
+    string,
+    Readonly<{
+      checkConstraints?: Record<
+        string,
+        Readonly<{ name: string; value: string }>
+      >;
+    }>
+  >;
+}>;
+
+function regexRepetitionBounds(text: string): RegexBoundEntry[] {
+  const entries: RegexBoundEntry[] = [];
+  for (const match of text.matchAll(REGEX_OPERAND)) {
+    const operand = match[1] ?? match[2] ?? "";
+    const bounds = [...operand.matchAll(REGEX_BOUND)]
+      .flatMap((bound) => bound.slice(1))
+      .filter((bound): bound is string => bound !== undefined && bound !== "")
+      .map(Number);
+    if (bounds.length > 0) {
+      entries.push({ bounds, operand });
+    }
+  }
+  return entries;
+}
+
+function excessiveRegexBounds(text: string): RegexBoundEntry[] {
+  return regexRepetitionBounds(text).filter((entry) =>
+    entry.bounds.some((bound) => bound > POSTGRES_REGEX_REPETITION_LIMIT)
+  );
+}
+
+function snapshotCheckText(snapshot: Snapshot): string {
+  return Object.values(snapshot.tables)
+    .flatMap((table) => Object.values(table.checkConstraints ?? {}))
+    .map((check) => check.value)
+    .join("\n");
+}
+
+async function readSnapshot(name: string): Promise<Snapshot> {
+  return JSON.parse(
+    await readFile(new URL(name, migrations), "utf8")
+  ) as Snapshot;
+}
+
+async function latestSnapshotName(): Promise<string> {
+  const journal = JSON.parse(
+    await readFile(new URL("meta/_journal.json", migrations), "utf8")
+  ) as Readonly<{ entries: readonly Readonly<{ idx: number }>[] }>;
+  const last = journal.entries.at(-1);
+  assert.ok(last, "journal must record at least one migration");
+  return `meta/${String(last.idx).padStart(4, "0")}_snapshot.json`;
+}
 
 test("current main and the GitHub gateway form one migration lineage", async () => {
-  const migrationNames = (await import("node:fs/promises")).readdir(migrations);
-  const names = await migrationNames;
+  const names = await readdir(migrations);
   for (let index = 25; index <= 36; index += 1) {
     const prefix = `${String(index).padStart(4, "0")}_`;
     assert.equal(
@@ -160,6 +226,144 @@ test("0035 persists bounded Project proof bindings and exact operation Project i
     /NEW\."projectAuthorityBound" = false[\s\S]*RAISE EXCEPTION/u
   );
   assert.match(migration, /project\.item\.field\.update/u);
+});
+
+test("0035 bounds Project ids without exceeding the Postgres regex repetition limit", async () => {
+  const migration = await readFile(
+    new URL(PROJECT_AUTHORITY_MIGRATION, migrations),
+    "utf8"
+  );
+
+  assert.match(
+    migration,
+    /like_regex "\^\[A-Za-z0-9_=-\]\{1,255\}\[A-Za-z0-9_=-\]\?\$"/u
+  );
+  assert.match(
+    migration,
+    /strict \$\[\*\] \? \(@\.type\(\) != "string" \|\| !\(@ like_regex/u
+  );
+  assert.match(
+    migration,
+    /and \(coalesce\(\("RunnerGitHubConnection"\."userProjectManagementCurrent" and/u
+  );
+  assert.match(
+    migration,
+    /interval '15 minutes'\), false\) or \(not "RunnerGitHubConnection"\."userProjectManagementCurrent"/u
+  );
+  assert.match(
+    migration,
+    /"projectAuthorityBound" and "RunnerGitHubOperation"\."projectId" is not null and char_length\("RunnerGitHubOperation"\."projectId"\) between 1 and 256 and "RunnerGitHubOperation"\."projectId" ~ '\^\[A-Za-z0-9_=-\]\+\$'/u
+  );
+  assert.doesNotMatch(migration, /\{1,256\}/u);
+});
+
+test("the regex bound scanner reads only regex operands and every quantifier shape", () => {
+  assert.deepEqual(
+    regexRepetitionBounds(
+      `x ~ '^a{256,}$' and y ~* '^[a]{1,256}$' and z !~ '^b{255}$' and like_regex "^c{0,19}$"`
+    ).map((entry) => entry.bounds),
+    [[256], [1, 256], [255], [0, 19]]
+  );
+  assert.deepEqual(
+    regexRepetitionBounds(
+      `DEFAULT '{300,600}' -- limits {1,1000} '{}'::jsonb "a{4}"`
+    ),
+    []
+  );
+  assert.deepEqual(
+    excessiveRegexBounds(`a ~ '^x{256,}$'`).map((entry) => entry.operand),
+    ["^x{256,}$"]
+  );
+  assert.deepEqual(
+    excessiveRegexBounds(`a ~ '^x{255}$' and b ~ '^y{1,255}$'`),
+    []
+  );
+});
+
+test("no migration, snapshot, or schema regex uses a repetition bound Postgres rejects", async () => {
+  const [names, metaNames] = await Promise.all([
+    readdir(migrations),
+    readdir(new URL("meta/", migrations)),
+  ]);
+  const sources = await Promise.all([
+    ...names
+      .filter((name) => name.endsWith(".sql"))
+      .map((name) =>
+        readFile(new URL(name, migrations), "utf8").then((text) => ({
+          name,
+          text,
+        }))
+      ),
+    ...metaNames
+      .filter((name) => name.endsWith("_snapshot.json"))
+      .map((name) =>
+        readSnapshot(`meta/${name}`).then((snapshot) => ({
+          name: `meta/${name}`,
+          text: snapshotCheckText(snapshot),
+        }))
+      ),
+    readFile(new URL("../db/schema.ts", import.meta.url), "utf8").then(
+      (text) => ({ name: "schema.ts", text })
+    ),
+  ]);
+  assert.ok(sources.length > 30);
+  for (const { name, text } of sources) {
+    assert.deepEqual(
+      excessiveRegexBounds(text),
+      [],
+      `${name} uses a regex bound above ${POSTGRES_REGEX_REPETITION_LIMIT}`
+    );
+  }
+});
+
+test("0035 snapshots carry the exact CHECK text that 0035 applies", async () => {
+  const [migration, ...snapshots] = await Promise.all([
+    readFile(new URL(PROJECT_AUTHORITY_MIGRATION, migrations), "utf8"),
+    readSnapshot("meta/0035_snapshot.json"),
+    readSnapshot("meta/0036_snapshot.json"),
+  ]);
+  for (const snapshot of snapshots) {
+    for (const [tableName, constraintName] of [
+      ["RunnerGitHubConnection", "RGHConn_authority_valid"],
+      ["RunnerGitHubOperation", "RGHOp_connectionSnapshot_valid"],
+    ]) {
+      const value =
+        snapshot.tables[`public.${tableName}`]?.checkConstraints?.[
+          constraintName
+        ]?.value;
+      assert.ok(value, `${constraintName} must be recorded in the snapshot`);
+      assert.ok(
+        migration.includes(
+          `ALTER TABLE "${tableName}" ADD CONSTRAINT "${constraintName}" CHECK (${value});`
+        ),
+        `${constraintName} snapshot text must match the 0035 SQL`
+      );
+    }
+  }
+});
+
+test("schema.ts CHECK constraints render exactly as the latest snapshot records them", async () => {
+  const snapshot = await readSnapshot(await latestSnapshotName());
+  const dialect = new PgDialect();
+  let compared = 0;
+  for (const table of Object.values(schema)) {
+    if (!is(table, PgTable)) {
+      continue;
+    }
+    const config = getTableConfig(table);
+    for (const check of config.checks) {
+      const recorded =
+        snapshot.tables[`public.${config.name}`]?.checkConstraints?.[check.name]
+          ?.value;
+      assert.equal(
+        dialect.sqlToQuery(check.value).sql,
+        recorded,
+        `${config.name}.${check.name} drifted from the snapshot`
+      );
+      compared += 1;
+    }
+  }
+  assert.ok(compared >= 100, `expected many CHECKs, compared ${compared}`);
 });
 
 test("0036 reconstructs exact runner policy authority from the applied 0035 shape", async () => {
