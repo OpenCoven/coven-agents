@@ -25,7 +25,7 @@ const secretSafeStringSchema = z
     }
   );
 const PUBLIC_OPAQUE_IDENTIFIER =
-  /^(?:dpl_[A-Za-z0-9]{16,}|[a-f0-9]{40}|[a-f0-9]{64}|[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12})$/u;
+  /^(?:dpl_[A-Za-z0-9]{16,}|[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12})$/u;
 const DESCRIPTIVE_IDENTIFIER =
   /^(?:[a-z]{2,15}|\d{1,15}|v\d{1,8})(?:[-_.:/](?:[a-z]{2,15}|\d{1,15}|v\d{1,8}))+$/u;
 

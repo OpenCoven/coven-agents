@@ -228,6 +228,8 @@ test("rejects secret-shaped values in recognized fields and unsafe references", 
   const secret = `ghp_${"A1b2C3d4E5f6G7h8I9j0".repeat(2)}`;
   const opaqueSecret = "q7V9m2K4p8R1t6W3x5Y0z9A2b4C6d8E0";
   const separatedOpaqueSecret = "q7v9m2k4p8r1t6w3-x5y0z9a2b4c6d8e0";
+  const hexadecimalSecret =
+    "9f1e2d3c4b5a69788796a5b4c3d2e1f00123456789abcdef0123456789abcdef";
   const { manifestDigest: _manifestDigest, ...candidate } = receipt().candidate;
   assert.throws(() =>
     candidateManifestDigest({
@@ -239,6 +241,12 @@ test("rejects secret-shaped values in recognized fields and unsafe references", 
     candidateManifestDigest({
       ...candidate,
       appBuild: separatedOpaqueSecret,
+    })
+  );
+  assert.throws(() =>
+    candidateManifestDigest({
+      ...candidate,
+      appBuild: hexadecimalSecret,
     })
   );
   const unsafeBlocker = receipt();
