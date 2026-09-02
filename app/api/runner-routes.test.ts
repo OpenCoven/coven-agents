@@ -173,6 +173,22 @@ function service(overrides: Partial<RunnerService> = {}): RunnerService {
       terminalized: 0,
       terminalLeaseCleaned: 0,
     }),
+    repairResources: async () => ({
+      appOwnedMappings: 0,
+      batchCapped: false,
+      databaseCapped: false,
+      deferred: 0,
+      eligible: 0,
+      examined: 0,
+      failures: 0,
+      kind: "available",
+      providerCapped: false,
+      refused: 0,
+      repaired: 0,
+      status: "complete",
+      unchanged: 0,
+      version: 1,
+    }),
     startRun: async () => ({
       admission: "duplicate",
       kind: "accepted",
@@ -325,6 +341,7 @@ async function executeFixture(): Promise<void> {
     diagnostic,
     reconcile,
     inventory,
+    repair,
   ] = await Promise.all([
     import("./health/route"),
     import("./harnesses/route"),
@@ -338,6 +355,7 @@ async function executeFixture(): Promise<void> {
     import("./diagnostics/sandbox/route"),
     import("./internal/runner-reconcile/route"),
     import("./internal/runner-resource-inventory/route"),
+    import("./internal/runner-resource-repair/route"),
   ]);
 
   for (const route of [
@@ -353,6 +371,7 @@ async function executeFixture(): Promise<void> {
     diagnostic,
     reconcile,
     inventory,
+    repair,
   ]) {
     assertMetadata(route);
   }
@@ -695,6 +714,29 @@ async function executeFixture(): Promise<void> {
     states: { active: 0, archived: 0, other: 0, stopped: 0 },
     status: "complete",
     unowned: 0,
+    version: 1,
+  });
+
+  const repairResponse = await repair.POST(
+    new Request("https://app.test/api/internal/runner-resource-repair", {
+      method: "POST",
+    })
+  );
+  assert.equal(repairResponse.status, 200);
+  assert.equal(repairResponse.headers.get("cache-control"), "no-store");
+  assert.deepEqual(await repairResponse.json(), {
+    appOwnedMappings: 0,
+    batchCapped: false,
+    databaseCapped: false,
+    deferred: 0,
+    eligible: 0,
+    examined: 0,
+    failures: 0,
+    providerCapped: false,
+    refused: 0,
+    repaired: 0,
+    status: "complete",
+    unchanged: 0,
     version: 1,
   });
 

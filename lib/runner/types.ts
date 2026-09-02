@@ -85,6 +85,7 @@ export type RunnerSandboxLifecycle =
   | "provisioning"
   | "provisioning_ambiguous"
   | "ready"
+  | "resizing"
   | "resetting"
   | "decommissioning"
   | "decommission_failed";
@@ -303,6 +304,11 @@ export type DaytonaSandboxFence = {
   agentId: string;
   expectedGeneration: number;
   expectedVersion: number;
+};
+
+export type BeginDaytonaSandboxResizeInput = DaytonaSandboxFence & {
+  sandboxId: string;
+  tenant: string;
 };
 
 export type BeginDaytonaSandboxWarmInput = DaytonaSandboxFence;

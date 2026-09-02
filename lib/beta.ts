@@ -12,6 +12,7 @@
  *
  * `/api/internal/runner-reconcile`,
  * `/api/internal/runner-resource-inventory`, and
+ * `/api/internal/runner-resource-repair`, and
  * `/api/internal/stripe-reconcile` are machine-triggered routes that carry no
  * Auth.js cookie. Gating them would disable recovery or operator inventory
  * instead of closing the beta. Each authenticates itself with its
@@ -50,6 +51,7 @@ const EXEMPT_PATHS = new Set([
   "/api/internal/github-tool",
   "/api/internal/runner-reconcile",
   "/api/internal/runner-resource-inventory",
+  "/api/internal/runner-resource-repair",
   "/api/internal/stripe-reconcile",
 ]);
 

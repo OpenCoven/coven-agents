@@ -8,7 +8,7 @@ import {
   runnerResourceInventoryLimit,
 } from "../resource-lifecycle";
 import type { RunnerStore } from "../store";
-import type { RunnerOperator } from "../types";
+import type { RunnerAgentRecord, RunnerOperator } from "../types";
 import { daytonaSandboxLabels, daytonaSandboxName } from "./names";
 import {
   DAYTONA_CODE_TOOLBOX_LANGUAGE_LABEL,
@@ -140,7 +140,7 @@ function sameLabels(
 }
 
 function expectedLabels(
-  agent: InventoryMapping
+  agent: RunnerAgentRecord
 ): Readonly<Record<string, string>> {
   return {
     ...daytonaSandboxLabels(agent.tenant, agent.id),
@@ -148,9 +148,9 @@ function expectedLabels(
   };
 }
 
-function configurationDriftFields(
+export function daytonaSandboxConfigurationDrift(
   sandbox: DaytonaSandboxInventoryItem,
-  agent: InventoryMapping,
+  agent: RunnerAgentRecord,
   configuration: DaytonaSandboxConfiguration
 ): Readonly<
   {
@@ -360,7 +360,7 @@ export async function inventoryDaytonaSandboxes(
     ) {
       const resolved = hydratedByProviderId.get(sandbox.id);
       if (resolved) {
-        const driftFields = configurationDriftFields(
+        const driftFields = daytonaSandboxConfigurationDrift(
           resolved,
           mappingsForProviderId[0],
           dependencies.configuration

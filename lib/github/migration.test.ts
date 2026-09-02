@@ -61,10 +61,9 @@ test("0032 adds durable immutable and current repository user-authority ceilings
   const journal = JSON.parse(journalText) as {
     entries: Array<{ idx: number; tag: string; version: string }>;
   };
-  const latest = journal.entries.at(-1);
-  assert.equal(latest?.idx, 32);
-  assert.equal(latest?.tag, "0032_github_tool_gateway");
-  assert.equal(latest?.version, "7");
+  const gatewayEntry = journal.entries.find((entry) => entry.idx === 32);
+  assert.equal(gatewayEntry?.tag, "0032_github_tool_gateway");
+  assert.equal(gatewayEntry?.version, "7");
   const snapshot = JSON.parse(snapshotText) as {
     tables: Record<string, { columns: Record<string, unknown> }>;
   };

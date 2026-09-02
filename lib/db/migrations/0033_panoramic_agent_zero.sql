@@ -1,0 +1,4 @@
+ALTER TABLE "RunnerAgent" DROP CONSTRAINT "RunnerAgent_sandboxLifecycle_valid";--> statement-breakpoint
+DROP INDEX "RunnerAgent_sandbox_recovery_idx";--> statement-breakpoint
+CREATE INDEX "RunnerAgent_sandbox_recovery_idx" ON "RunnerAgent" USING btree ("sandboxLifecycle","sandboxUpdatedAt") WHERE "RunnerAgent"."sandboxLifecycle" in ('provisioning', 'provisioning_ambiguous', 'resizing', 'resetting', 'decommissioning');--> statement-breakpoint
+ALTER TABLE "RunnerAgent" ADD CONSTRAINT "RunnerAgent_sandboxLifecycle_valid" CHECK ("RunnerAgent"."sandboxLifecycle" in ('unprovisioned', 'provisioning', 'provisioning_ambiguous', 'ready', 'resizing', 'resetting', 'decommissioning', 'decommission_failed'));

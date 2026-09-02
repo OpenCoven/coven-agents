@@ -178,6 +178,22 @@ function service(overrides: Partial<RunnerService> = {}): RunnerService {
       terminal: true,
     }),
     reconcileAndDispatch: async () => counts(),
+    repairResources: async () => ({
+      appOwnedMappings: 0,
+      batchCapped: false,
+      databaseCapped: false,
+      deferred: 0,
+      eligible: 0,
+      examined: 0,
+      failures: 0,
+      kind: "available",
+      providerCapped: false,
+      refused: 0,
+      repaired: 0,
+      status: "complete",
+      unchanged: 0,
+      version: 1,
+    }),
     startRun: async () => ({
       admission: "created",
       kind: "accepted",
@@ -326,6 +342,12 @@ const operatorRouteCases: readonly {
       runnerHandlers.inventoryResources(request),
     name: "resource inventory",
   },
+  {
+    abuseRoute: "runner_reconcile",
+    invoke: (runnerHandlers, request) =>
+      runnerHandlers.repairResources(request),
+    name: "resource repair",
+  },
 ];
 
 function orderedOperatorRequest(events: string[]): Request {
@@ -392,6 +414,25 @@ function orderedOperatorHandlers(
     reconcileAndDispatch: () => {
       events.push("provider");
       return Promise.resolve(counts());
+    },
+    repairResources: () => {
+      events.push("provider");
+      return Promise.resolve({
+        appOwnedMappings: 0,
+        batchCapped: false,
+        databaseCapped: false,
+        deferred: 0,
+        eligible: 0,
+        examined: 0,
+        failures: 0,
+        kind: "available" as const,
+        providerCapped: false,
+        refused: 0,
+        repaired: 0,
+        status: "complete" as const,
+        unchanged: 0,
+        version: 1 as const,
+      });
     },
   });
 
@@ -2476,6 +2517,76 @@ test("resource inventory maps unavailable providers to the safe operator error",
     "provider_unavailable"
   );
   assert.equal(fixture.operatorRequests(), 1);
+});
+
+test("resource repair exposes only bounded aggregate counts with no-store", async () => {
+  const fixture = handlers({
+    service: service({
+      repairResources: async () => ({
+        appOwnedMappings: 4,
+        batchCapped: false,
+        databaseCapped: false,
+        deferred: 0,
+        eligible: 4,
+        examined: 4,
+        failures: 0,
+        kind: "available",
+        providerCapped: false,
+        refused: 0,
+        repaired: 4,
+        status: "complete",
+        unchanged: 0,
+        version: 1,
+      }),
+    }),
+  });
+
+  const response = await fixture.handlers.repairResources(
+    new Request("https://app.test/api/internal/runner-resource-repair", {
+      method: "POST",
+    })
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.deepEqual(await response.json(), {
+    appOwnedMappings: 4,
+    batchCapped: false,
+    databaseCapped: false,
+    deferred: 0,
+    eligible: 4,
+    examined: 4,
+    failures: 0,
+    providerCapped: false,
+    refused: 0,
+    repaired: 4,
+    status: "complete",
+    unchanged: 0,
+    version: 1,
+  });
+});
+
+test("resource repair maps unavailable providers to the safe operator error", async () => {
+  const fixture = handlers({
+    service: service({
+      repairResources: async () => ({
+        kind: "unavailable",
+        source: "provider",
+        version: 1,
+      }),
+    }),
+  });
+
+  const response = await fixture.handlers.repairResources(
+    new Request("https://app.test/api/internal/runner-resource-repair", {
+      method: "POST",
+    })
+  );
+  assert.equal(response.status, 503);
+  assert.equal(
+    ((await response.json()) as { error: { code: string } }).error.code,
+    "provider_unavailable"
+  );
 });
 
 test("unrecognized provider failures are absent from runner envelopes and logs", async () => {

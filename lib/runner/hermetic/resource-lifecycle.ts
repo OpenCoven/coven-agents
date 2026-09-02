@@ -4,6 +4,7 @@ import type {
   RunnerPersistentResourceLifecycle,
   RunnerResourceInventoryResult,
   RunnerResourceRecoveryResult,
+  RunnerResourceRepairResult,
 } from "../resource-lifecycle";
 import {
   observeRunnerResourceOperation,
@@ -47,6 +48,22 @@ const NO_HOSTED_RESOURCE_INVENTORY: RunnerResourceInventoryResult =
     unowned: 0,
     version: 1,
   });
+const NO_HOSTED_RESOURCE_REPAIR: RunnerResourceRepairResult = Object.freeze({
+  appOwnedMappings: 0,
+  batchCapped: false,
+  databaseCapped: false,
+  deferred: 0,
+  eligible: 0,
+  examined: 0,
+  failures: 0,
+  kind: "available",
+  providerCapped: false,
+  refused: 0,
+  repaired: 0,
+  status: "complete",
+  unchanged: 0,
+  version: 1,
+});
 
 /**
  * Hermetic certification has no hosted provider resource. It retains the
@@ -92,6 +109,13 @@ export function hermeticPersistentResourceLifecycle(
         outcome: "ready",
       });
       return Promise.resolve(NO_RESOURCE_RECOVERY);
+    },
+    repair: () => {
+      observeRunnerResourceOperation(observe, {
+        operation: "repair",
+        outcome: "ready",
+      });
+      return Promise.resolve(NO_HOSTED_RESOURCE_REPAIR);
     },
     reset: () => {
       observeRunnerResourceOperation(observe, {

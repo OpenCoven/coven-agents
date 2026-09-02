@@ -27,6 +27,24 @@ test("migration 0015 adds nullable fail-closed run authority without a default",
   );
 });
 
+test("migration 0033 adds only the durable resource resize lifecycle fence", () => {
+  const directory = new URL("../db/migrations/", import.meta.url);
+  const migrationName = readdirSync(directory).find((name) =>
+    name.startsWith("0033_")
+  );
+  assert.ok(migrationName, "migration 0033 must exist");
+  const migration = readFileSync(new URL(migrationName, directory), "utf8");
+
+  assert.match(migration, /RunnerAgent_sandboxLifecycle_valid/u);
+  assert.match(migration, /'resizing'/u);
+  assert.match(migration, /RunnerAgent_sandbox_recovery_idx/u);
+  assert.doesNotMatch(migration, /\bUPDATE\b|\bDELETE\b|\bINSERT\b/u);
+  assert.doesNotMatch(
+    migration,
+    /daytonaSandboxId|tenant|credential|secret|token/iu
+  );
+});
+
 test("migration 0028 remains schema-only and 0029 backfills only matching latest subscription override audits", () => {
   const directory = new URL("../db/migrations/", import.meta.url);
   const schemaMigrationName = readdirSync(directory).find((name) =>

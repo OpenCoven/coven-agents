@@ -583,6 +583,13 @@ async function startOrRecoverSandbox(
     );
     return;
   }
+  if (sandbox.state === SandboxState.RESIZING) {
+    await withLifecycleAbort(
+      () => sandbox.waitForResizeComplete(providerTimeoutSeconds(lifecycle)),
+      lifecycle
+    );
+    return startOrRecoverSandbox(sandbox, lifecycle);
+  }
   await withLifecycleAbort(
     () => sandbox.waitUntilStarted(providerTimeoutSeconds(lifecycle)),
     lifecycle
