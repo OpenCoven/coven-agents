@@ -747,6 +747,7 @@ test("the verification matrix matches the hermetic certification receipt", () =>
 
 test("release readiness separates infrastructure cutover from product approval", () => {
   const readiness = read("docs/roadmap/release-readiness.md");
+  const attestation = read("docs/operations/daytona-cutover-attestation.md");
 
   assert.match(
     readiness,
@@ -762,6 +763,12 @@ test("release readiness separates infrastructure cutover from product approval",
   );
   assert.match(readiness, /## Coordinated team execution/u);
   assert.match(readiness, /GitHub-capable steps fail closed/u);
+  assert.match(readiness, /pnpm staging:certify/u);
+  assert.match(readiness, /staging evidence collection only/iu);
+  assert.match(readiness, /does not make a final readiness decision/iu);
+  assert.match(attestation, /pnpm staging:certify/u);
+  assert.match(attestation, /does not certify subscriber lifecycle/iu);
+  assert.match(attestation, /does not certify persistent sandbox lifecycle/iu);
 });
 
 test("the implementation sequence records its authority freshness boundary", () => {
