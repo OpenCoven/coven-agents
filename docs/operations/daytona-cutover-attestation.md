@@ -3,7 +3,7 @@
 - Status: Daytona production control plane verified and superseded execution
   resources retired; full subscriber lifecycle exercise remains approval-gated
 - Prepared: 2026-08-29
-- Updated: 2026-09-01
+- Updated: 2026-09-02
 - Scope: same-origin browser access, Daytona lifecycle, durable recovery, and
   provider-resource disposition
 
@@ -33,6 +33,8 @@ credentials, private planning content, or unsanitized provider payloads.
 | [PR #184](https://github.com/OpenCoven/coven-agents/pull/184) | `3ad1232f061b5eaf4440b6fd3c7c13967a6c423f` | 2026-09-01 |
 | [PR #185](https://github.com/OpenCoven/coven-agents/pull/185) | `8d151e212fbc372c31ba46a4ca67650ac33a3fd2` | 2026-09-01 |
 | [PR #186](https://github.com/OpenCoven/coven-agents/pull/186) | `4bf89dc98667efa1c46b5131e10d4b14bf5f86c3` | 2026-09-01 |
+| [PR #198](https://github.com/OpenCoven/coven-agents/pull/198) | `80d787e2d2288141cd5fbcd5b9417edda74888f9` | 2026-09-02 |
+| [PR #200](https://github.com/OpenCoven/coven-agents/pull/200) | `dbe5ebbf70c5b943561612512fc03e5ae4542b3b` | 2026-09-02 |
 
 The fully gated PR #134 head and its squash-merge commit both have tree
 `a8bb0a82efb6ffb7f754d03519f0d381e72fb88e`. These artifacts and results prove
@@ -184,6 +186,38 @@ Diagnostic lifecycle certified: `yes`. Subscriber lifecycle certified: `no`.
 Persistent sandbox lifecycle certified: `no`. Resource disposition certified:
 `no`. Stripe checkout/webhook failure-retry certified: `no`. Observation
 window completed: `no`. Named approvals completed: `no`.
+
+### Production resource-floor repair evidence
+
+The
+[sanitized resource-repair receipt](p0-daytona-resource-repair-receipt-2026-09-02.json)
+records the manual repair implementation from PR #198, its definitive
+provider-rejection correction from PR #200, exact source trees, production
+deployments, aggregate repair results, repeated post-repair inventory, and the
+current default alias. It contains no credentials, tenant identifiers,
+provider resource identifiers, provider messages, or policy values.
+
+The bounded operator sequence established:
+
+- four application-owned mappings remain unique, stopped, and untruncated;
+- all four resources have only below-policy CPU, memory, and disk drift;
+- three database-eligible mappings entered exact durable resize fences;
+- Daytona returned HTTP 404 from its documented resize operation after exact
+  sandbox hydration succeeded;
+- the corrected recovery invocation reported 3 failures, 0 deferrals, and 0
+  repairs, releasing every active resize fence;
+- two consecutive inventories remained identical with 4 examined mappings, 4
+  configuration-drift ambiguities, 0 unowned resources, 0 duplicate or
+  multiple mappings, and 0 provider or database truncation;
+- no resource was deleted, recreated, or adopted; and
+- the default alias resolves to corrected deployment
+  `dpl_EERKkjtfpkT5SPRD7uxRKPutRLoy`.
+
+This is an exact blocker disposition, not resource-disposition certification.
+The remaining safe paths are provider-supported non-destructive resize or an
+explicitly approved migration that preserves each durable workspace before
+replacement. Deletion and recreation remain prohibited without that
+preservation authority.
 
 The subscriber exercise stopped at the existing authorization boundary:
 Auth.js accepted an isolated signed cookie, but protected application

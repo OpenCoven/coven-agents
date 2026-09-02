@@ -1,0 +1,167 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-09-02",
+  "repairImplementation": {
+    "pullRequest": 198,
+    "mergeCommit": "80d787e2d2288141cd5fbcd5b9417edda74888f9",
+    "sourceTree": "aafe5ceda5156fed8fa57d33175a57d372eca5fb",
+    "deploymentId": "dpl_EgN8t3QvMk4JEcGrprRXponHLPQe",
+    "requiredRoute": "/api/internal/runner-resource-repair"
+  },
+  "rejectionHandling": {
+    "pullRequest": 200,
+    "mergeCommit": "dbe5ebbf70c5b943561612512fc03e5ae4542b3b",
+    "sourceTree": "8c35b9f03410cbbff8370e99ab19ba07b544ce47",
+    "deploymentId": "dpl_EERKkjtfpkT5SPRD7uxRKPutRLoy"
+  },
+  "repairResults": [
+    {
+      "phase": "initial",
+      "appOwnedMappings": 4,
+      "batchCapped": false,
+      "databaseCapped": false,
+      "deferred": 3,
+      "eligible": 3,
+      "examined": 3,
+      "failures": 0,
+      "providerCapped": false,
+      "refused": 0,
+      "repaired": 0,
+      "status": "complete",
+      "unchanged": 0,
+      "version": 1
+    },
+    {
+      "phase": "definite-rejection-recovery",
+      "appOwnedMappings": 4,
+      "batchCapped": false,
+      "databaseCapped": false,
+      "deferred": 0,
+      "eligible": 3,
+      "examined": 3,
+      "failures": 3,
+      "providerCapped": false,
+      "refused": 0,
+      "repaired": 0,
+      "status": "complete",
+      "unchanged": 0,
+      "version": 1
+    }
+  ],
+  "providerDiagnostic": {
+    "deploymentId": "dpl_CBCCoEFaG68WqbcwbRJWHkajGf4Y",
+    "baseCommit": "80d787e2d2288141cd5fbcd5b9417edda74888f9",
+    "baseTree": "aafe5ceda5156fed8fa57d33175a57d372eca5fb",
+    "sourceClass": "temporary-sanitized-operator-diagnostic",
+    "exactSandboxHydrationSucceeded": true,
+    "resizeHttpStatus": 404,
+    "includedProviderMessage": false
+  },
+  "postRepairInventory": [
+    {
+      "sequence": 1,
+      "ambiguityReasons": {
+        "configurationDrift": 4,
+        "databaseBounded": 0,
+        "duplicateIdentity": 0,
+        "duplicateProviderId": 0,
+        "multipleMappings": 0,
+        "pendingLifecycle": 0,
+        "unresolved": 0
+      },
+      "ambiguous": 4,
+      "appOwnedMappings": 4,
+      "configurationDrift": [
+        {
+          "count": 4,
+          "field": "cpu",
+          "relation": "below"
+        },
+        {
+          "count": 4,
+          "field": "memory",
+          "relation": "below"
+        },
+        {
+          "count": 4,
+          "field": "disk",
+          "relation": "below"
+        }
+      ],
+      "databaseCapped": false,
+      "examined": 4,
+      "matched": 0,
+      "providerCapped": false,
+      "states": {
+        "active": 0,
+        "archived": 0,
+        "other": 0,
+        "stopped": 4
+      },
+      "status": "complete",
+      "unowned": 0,
+      "version": 1
+    },
+    {
+      "sequence": 2,
+      "ambiguityReasons": {
+        "configurationDrift": 4,
+        "databaseBounded": 0,
+        "duplicateIdentity": 0,
+        "duplicateProviderId": 0,
+        "multipleMappings": 0,
+        "pendingLifecycle": 0,
+        "unresolved": 0
+      },
+      "ambiguous": 4,
+      "appOwnedMappings": 4,
+      "configurationDrift": [
+        {
+          "count": 4,
+          "field": "cpu",
+          "relation": "below"
+        },
+        {
+          "count": 4,
+          "field": "memory",
+          "relation": "below"
+        },
+        {
+          "count": 4,
+          "field": "disk",
+          "relation": "below"
+        }
+      ],
+      "databaseCapped": false,
+      "examined": 4,
+      "matched": 0,
+      "providerCapped": false,
+      "states": {
+        "active": 0,
+        "archived": 0,
+        "other": 0,
+        "stopped": 4
+      },
+      "status": "complete",
+      "unowned": 0,
+      "version": 1
+    }
+  ],
+  "disposition": {
+    "providerBlocker": "resize_endpoint_not_found",
+    "providerResizeSupportedForObservedResources": false,
+    "durableResizeFencesRemaining": 0,
+    "resourcesDeleted": 0,
+    "resourcesRecreated": 0,
+    "resourcesAdopted": 0,
+    "resourceDispositionCertified": false
+  },
+  "productionAlias": {
+    "alias": "coven-agents-0xbuns.vercel.app",
+    "deploymentId": "dpl_EERKkjtfpkT5SPRD7uxRKPutRLoy",
+    "ready": true
+  },
+  "containsCredentialMaterial": false,
+  "containsProviderIdentifiers": false,
+  "containsTenantIdentifiers": false
+}
