@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { SandboxState } from "@daytona/sdk";
+import { DaytonaNotFoundError, SandboxState } from "@daytona/sdk";
 import type { RunnerAgentRecord } from "../types";
 import { daytonaSandboxLabels, daytonaSandboxName } from "./names";
 import {
@@ -388,6 +388,58 @@ test("resource repair re-verifies an accepted resize after the provider wait rej
     assert.equal(result.failures, 0);
     assert.equal(result.repaired, 1);
   }
+});
+
+test("resource repair releases its durable fence after a definite resize rejection", async () => {
+  const repairAgent = mapping(
+    "00000000-0000-4000-8000-000000000045",
+    "sandbox-resize-rejected",
+    { sandboxLifecycle: "resizing", version: 2 }
+  );
+  const below = repairItem(repairAgent, {
+    cpu: 1,
+    resize: () =>
+      Promise.reject(
+        new DaytonaNotFoundError("resize endpoint unavailable", 404)
+      ),
+  });
+  const baseStore = repairStore(() => Promise.resolve([repairAgent]));
+  let deferredFences = 0;
+  let finishedFences = 0;
+  let providerGets = 0;
+
+  const result = await repairDaytonaSandboxResourceFloors({
+    configuration,
+    daytona: {
+      get: () => {
+        providerGets += 1;
+        return Promise.resolve(below);
+      },
+    },
+    operator,
+    store: {
+      ...baseStore,
+      deferDaytonaSandboxResize: (...args) => {
+        deferredFences += 1;
+        return baseStore.deferDaytonaSandboxResize(...args);
+      },
+      finishDaytonaSandboxResize: (...args) => {
+        finishedFences += 1;
+        return baseStore.finishDaytonaSandboxResize(...args);
+      },
+    },
+  });
+
+  assert.equal(result.kind, "available");
+  if (result.kind === "available") {
+    assert.equal(result.deferred, 0);
+    assert.equal(result.eligible, 1);
+    assert.equal(result.failures, 1);
+    assert.equal(result.repaired, 0);
+  }
+  assert.equal(providerGets, 1);
+  assert.equal(deferredFences, 0);
+  assert.equal(finishedFences, 1);
 });
 
 test("resource repair resumes a durable resizing fence after a crashed operator", async () => {
