@@ -1,6 +1,6 @@
 import "server-only";
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   type AgentDefinition,
   agentDefinitionSchema,
@@ -222,7 +222,8 @@ export type RunnerWarmResult =
 export type RunnerService = Readonly<{
   createAgent: (
     principal: RunnerPrincipal,
-    input: unknown
+    input: unknown,
+    providerIdempotencyKey?: string
   ) => Promise<RunnerCreateAgentResult>;
   deleteAgent: (
     principal: RunnerPrincipal,
@@ -362,6 +363,37 @@ function parsedDefinition(input: unknown):
   };
 }
 
+function deterministicAgentId(providerIdempotencyKey: string): string {
+  if (!/^coven_[a-f0-9]{64}$/u.test(providerIdempotencyKey)) {
+    throw configuredError("idempotent agent creation");
+  }
+  const bytes = createHash("sha256")
+    .update(providerIdempotencyKey, "utf8")
+    .digest()
+    .subarray(0, 16);
+  bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x50;
+  bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(
+    12,
+    16
+  )}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function agentMatchesDefinition(
+  agent: RunnerAgentRecord,
+  definition: ReturnType<typeof parsedDefinition> & { kind: "ok" }
+): boolean {
+  return (
+    agent.description === definition.value.description &&
+    agent.instructions === definition.value.instructions &&
+    agent.model === definition.value.model &&
+    agent.name === definition.value.name &&
+    agent.runtime === definition.value.runtime &&
+    agent.workspace === (definition.value.workspace ?? null)
+  );
+}
+
 function requireSnapshot(snapshot: RunSnapshot): RunSnapshot {
   return runSnapshotSchema.parse(snapshot);
 }
@@ -445,12 +477,14 @@ export function createRunnerService(
   }
 
   return {
-    createAgent: async (principal, input) => {
+    createAgent: async (principal, input, providerIdempotencyKey) => {
       const parsed = parsedDefinition(input);
       if (parsed.kind !== "ok") {
         return parsed;
       }
-      const id = createId();
+      const id = providerIdempotencyKey
+        ? deterministicAgentId(providerIdempotencyKey)
+        : createId();
       if (!validId(id)) {
         throw configuredError("agent creation");
       }
@@ -467,8 +501,21 @@ export function createRunnerService(
       switch (created.kind) {
         case "created":
           return { agent: projectAgent(created.agent), kind: "created" };
-        case "conflict":
+        case "conflict": {
+          if (!providerIdempotencyKey) {
+            return { kind: "conflict" };
+          }
+          let existing: RunnerAgentRecord | null;
+          try {
+            existing = await dependencies.store.getAgent(principal, id);
+          } catch {
+            return { kind: "unavailable", source: "database" };
+          }
+          if (existing && agentMatchesDefinition(existing, parsed)) {
+            return { agent: projectAgent(existing), kind: "created" };
+          }
           return { kind: "conflict" };
+        }
         default:
           return unreachable(created, "agent creation");
       }

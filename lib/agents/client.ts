@@ -93,9 +93,10 @@ export class RunnerClient {
 
   createAgent(
     input: CreateAgentInput,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    idempotencyKey?: string
   ): Promise<AgentDefinition> {
-    return this.transport.createAgent(input, signal);
+    return this.transport.createAgent(input, signal, idempotencyKey);
   }
 
   prewarmTenant(signal?: AbortSignal): Promise<void> {

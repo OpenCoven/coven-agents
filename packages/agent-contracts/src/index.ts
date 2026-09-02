@@ -992,6 +992,19 @@ export const githubOperationReceiptSchema = z
 export const teamStepSchema = z
   .object({
     agentId: agentIdSchema,
+    approvalCapabilities: z
+      .array(
+        teamCapabilitySchema.refine(
+          (capability) =>
+            capability.startsWith("github.") && capability.endsWith(".write"),
+          "Only declared GitHub write capabilities may be approved."
+        )
+      )
+      .max(TEAM_LIMITS.maxSkillsPerMember)
+      .superRefine((capabilities, context) =>
+        distinctValues(capabilities, context, "Capabilities must be unique.")
+      )
+      .default([]),
     approvalStatus: teamApprovalStatusSchema,
     completedAt: datetimeSchema.nullable(),
     createdAt: datetimeSchema,

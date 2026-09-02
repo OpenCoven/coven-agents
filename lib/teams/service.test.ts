@@ -586,7 +586,33 @@ test("team run creation snapshots authenticated authority with stable run and st
 });
 
 test("team run reads are tenant-free and expose optimistic versions", async () => {
-  const teamService = createTeamService({ store: store() });
+  const record = teamRunRecord({
+    steps: teamRunRecord().steps.map((step, index) =>
+      index === 0
+        ? {
+            ...step,
+            skillSnapshots: [
+              {
+                description: "Applies a bounded approved issue update.",
+                id: SKILL_ID,
+                instructions: "Apply only the approved GitHub issue update.",
+                name: "Issue update",
+                requiredCapabilities: [
+                  "github.issues.read",
+                  "github.issues.write",
+                ],
+              },
+            ],
+          }
+        : step
+    ),
+  });
+  const teamService = createTeamService({
+    store: store({
+      getTeamRun: async () => record,
+      listTeamRuns: async () => [record],
+    }),
+  });
 
   const found = await teamService.getRun(principal, TEAM_RUN_ID);
   const listed = await teamService.listRuns(principal, TEAM_ID);
@@ -594,6 +620,10 @@ test("team run reads are tenant-free and expose optimistic versions", async () =
   assert.equal(found.kind, "found");
   assert.equal(found.kind === "found" && found.teamRun.version, 0);
   assert.equal(found.kind === "found" && found.teamRun.steps[0]?.version, 0);
+  assert.deepEqual(
+    found.kind === "found" ? found.teamRun.steps[0]?.approvalCapabilities : [],
+    ["github.issues.write"]
+  );
   assert.equal(listed.kind, "found");
   assert.equal(listed.kind === "found" && listed.teamRuns[0]?.id, TEAM_RUN_ID);
   assert.equal(listed.kind === "found" && listed.nextCursor, null);

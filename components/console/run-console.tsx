@@ -12,7 +12,7 @@ import {
   sanitizeEvidencePath,
   sanitizeEvidenceText,
 } from "@opencoven/agent-contracts";
-import { MoreHorizontal, Search } from "lucide-react";
+import { MoreHorizontal, Search, UsersRound } from "lucide-react";
 import Link from "next/link";
 import { useSession } from "next-auth/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -52,6 +52,7 @@ import {
   type as type_,
   well,
 } from "@/components/console/styles";
+import { TeamConsole } from "@/components/console/team-console";
 import { useSubscriptionAuthorityRefresh } from "@/hooks/use-subscription-authority-refresh";
 import { RunnerApiError, RunnerClient } from "@/lib/agents/client";
 import {
@@ -100,7 +101,13 @@ const CONNECTION_LABELS: Record<ApplicationRunnerStatusKind, string> = {
   unavailable: "unreachable",
 };
 
-type View = "analytics" | "composer" | "create" | "settings" | "thread";
+type View =
+  | "analytics"
+  | "composer"
+  | "create"
+  | "settings"
+  | "teams"
+  | "thread";
 
 /**
  * The run console.
@@ -186,6 +193,7 @@ export function RunConsole({
   const [draft, setDraft] = useState("");
   const [starting, setStarting] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [teamMutationBusy, setTeamMutationBusy] = useState(false);
 
   const [railCollapsed, setRailCollapsed] = useState(false);
   const [timelineCollapsed, setTimelineCollapsed] = useState(false);
@@ -351,6 +359,7 @@ export function RunConsole({
   const activeSessionIdentityRef = useRef("");
   const latestSessionIdentityRef = useRef(sessionIdentity);
   const prewarmedIdentitiesRef = useRef(new Set<string>());
+  const resolvedSessionIdentityRef = useRef<string | null>(null);
   const refreshGenerationRef = useRef(0);
   const sessionAbortRef = useRef<AbortController | null>(null);
   const sessionGenerationRef = useRef(0);
@@ -498,6 +507,12 @@ export function RunConsole({
     sessionGenerationRef.current += 1;
     refreshGenerationRef.current += 1;
     const generation = sessionGenerationRef.current;
+    const previousResolvedIdentity = resolvedSessionIdentityRef.current;
+    const resolvedIdentity =
+      session.status === "loading" ? null : sessionIdentity;
+    if (resolvedIdentity) {
+      resolvedSessionIdentityRef.current = resolvedIdentity;
+    }
     activeSessionIdentityRef.current = sessionIdentity;
     sessionAbortRef.current?.abort();
     const controller = new AbortController();
@@ -516,6 +531,13 @@ export function RunConsole({
     setRenaming(false);
     setRemoving(false);
     setSettingsOperationContext(null);
+    if (
+      previousResolvedIdentity &&
+      resolvedIdentity &&
+      previousResolvedIdentity !== resolvedIdentity
+    ) {
+      setView("composer");
+    }
 
     if (session.status === "loading") {
       setRunnerStatus("connecting");
@@ -1004,6 +1026,30 @@ export function RunConsole({
     }
   };
 
+  const createAgentForTeam = async (
+    input: CreateAgentInput,
+    idempotencyKey?: string
+  ): Promise<AgentDefinition> => {
+    const context = currentSessionContext();
+    if (!context) {
+      throw new Error("The current session is unavailable.");
+    }
+    const created = await client.createAgent(
+      input,
+      context.signal,
+      idempotencyKey
+    );
+    if (!isCurrentSession(context.generation, context.signal)) {
+      throw new Error("The current session changed.");
+    }
+    setAgents((current) =>
+      current.some(({ id }) => id === created.id)
+        ? current
+        : [...current, created]
+    );
+    return created;
+  };
+
   /**
    * Creates every member of a formation, one at a time.
    *
@@ -1232,7 +1278,7 @@ export function RunConsole({
     const onKey = (event: globalThis.KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
-        if (reportReader) {
+        if (reportReader || teamMutationBusy) {
           return;
         }
         setPaletteOpen((value) => !value);
@@ -1245,7 +1291,13 @@ export function RunConsole({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [reportReader]);
+  }, [reportReader, teamMutationBusy]);
+
+  useEffect(() => {
+    if (teamMutationBusy) {
+      setPaletteOpen(false);
+    }
+  }, [teamMutationBusy]);
 
   const paletteItems: PaletteItem[] = useMemo(() => {
     const items: PaletteItem[] = [
@@ -1375,20 +1427,29 @@ export function RunConsole({
               their own. The href keeps middle-click and copy-link honest;
               a plain click stays in the console instead of reloading it. */}
           <Link
+            aria-disabled={view === "teams" && teamMutationBusy}
             aria-label="Back to runs"
             className="oc-tint"
             href="/"
             onClick={(event) => {
               event.preventDefault();
+              if (view === "teams" && teamMutationBusy) {
+                return;
+              }
               setView("composer");
             }}
             style={{
               alignItems: "center",
               borderRadius: "var(--radius-control)",
               color: "inherit",
+              cursor:
+                view === "teams" && teamMutationBusy
+                  ? "not-allowed"
+                  : undefined,
               display: "flex",
               gap: 9,
               margin: "0 -6px",
+              opacity: view === "teams" && teamMutationBusy ? 0.55 : undefined,
               padding: "5px 6px",
               textDecoration: "none",
             }}
@@ -1405,7 +1466,9 @@ export function RunConsole({
               OpenCoven
             </span>
             <span className="oc-header-context">
-              <Eyebrow style={{ color: "var(--text-muted)" }}>Runs</Eyebrow>
+              <Eyebrow style={{ color: "var(--text-muted)" }}>
+                {view === "teams" ? "Teams" : "Runs"}
+              </Eyebrow>
             </span>
           </Link>
         </div>
@@ -1415,6 +1478,7 @@ export function RunConsole({
           aria-label="Search or run a command"
           className="oc-tint"
           data-console-search
+          disabled={teamMutationBusy}
           onClick={() => setPaletteOpen(true)}
           style={{
             alignItems: "center",
@@ -1466,6 +1530,17 @@ export function RunConsole({
           }}
         >
           <button
+            className="oc-tint oc-header-team-switch"
+            disabled={!isSubscriber || (view === "teams" && teamMutationBusy)}
+            onClick={() =>
+              setView((current) => (current === "teams" ? "composer" : "teams"))
+            }
+            type="button"
+          >
+            <UsersRound size={13} />
+            {view === "teams" ? "Runs" : "Teams"}
+          </button>
+          <button
             disabled
             style={{
               ...pill(
@@ -1489,7 +1564,15 @@ export function RunConsole({
         className="oc-console-body"
         style={{ display: "flex", flex: 1, minHeight: 0, position: "relative" }}
       >
-        {view === "analytics" ? (
+        {view === "teams" ? (
+          <TeamConsole
+            agents={agents}
+            key={`${sessionIdentity ?? "signed-out"}:${authorityRevision ?? ""}`}
+            onBusyChange={setTeamMutationBusy}
+            onCreateAgent={createAgentForTeam}
+            onExit={() => setView("composer")}
+          />
+        ) : view === "analytics" ? (
           <Analytics />
         ) : view === "settings" ? (
           <Settings

@@ -502,6 +502,18 @@ test("team run envelopes expose versions but reject internal authority", () => {
   });
 
   assert.deepEqual(teamRunEnvelopeSchema.parse({ teamRun }), { teamRun });
+  assert.equal(
+    teamRunSchema.safeParse({
+      ...teamRun,
+      steps: [
+        {
+          ...teamRun.steps[0],
+          approvalCapabilities: ["github.issues.read"],
+        },
+      ],
+    }).success,
+    false
+  );
   assert.deepEqual(
     teamRunsEnvelopeSchema.parse({ nextCursor: null, teamRuns: [teamRun] }),
     {

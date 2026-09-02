@@ -3,6 +3,7 @@ import "server-only";
 import { ipAddress } from "@vercel/functions";
 import { after } from "next/server";
 import { enforceAbusePolicy } from "@/lib/abuse/enforce";
+import type { IdempotencyStore } from "@/lib/abuse/idempotency";
 import { configuredApplicationOrigin } from "@/lib/auth/application-origin";
 import type { SessionLike } from "@/lib/auth/subscriber-access";
 import { createRunnerAuth } from "./auth";
@@ -15,6 +16,26 @@ function productionRuntime() {
 function productionDiagnostics() {
   return import("./diagnostics");
 }
+
+async function databaseIdempotencyStore(): Promise<IdempotencyStore> {
+  const queries = await import("@/lib/db/queries");
+  return queries.databaseIdempotencyStore;
+}
+
+const lazyDatabaseIdempotencyStore: IdempotencyStore = {
+  async claim(input) {
+    return (await databaseIdempotencyStore()).claim(input);
+  },
+  async cleanupExpired(input) {
+    return (await databaseIdempotencyStore()).cleanupExpired(input);
+  },
+  async complete(input) {
+    return (await databaseIdempotencyStore()).complete(input);
+  },
+  async release(input) {
+    return (await databaseIdempotencyStore()).release(input);
+  },
+};
 
 async function authenticate() {
   const authentication = await import("@/app/(auth)/auth");
@@ -58,6 +79,7 @@ export function productionRunnerHttpHandlers(): RunnerHttpHandlers {
       });
     },
     enforceAbuse: enforceAbusePolicy,
+    idempotencyStore: lazyDatabaseIdempotencyStore,
     ipAddress: (request) => ipAddress(request) ?? null,
   });
 }

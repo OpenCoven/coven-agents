@@ -1,6 +1,6 @@
 import "server-only";
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   AGENT_RUNNER_API_VERSION,
   AGENT_RUNNER_CAPABILITIES,
@@ -9,6 +9,7 @@ import {
   agentsEnvelopeSchema,
   createAgentInputSchema,
   okEnvelopeSchema,
+  runErrorEnvelopeSchema,
   runListEnvelopeSchema,
   runSnapshotEnvelopeSchema,
   startRunInputSchema,
@@ -22,6 +23,12 @@ import type {
   AbuseAdmission,
   AbuseEnforcementInput,
 } from "@/lib/abuse/enforce";
+import {
+  type IdempotencyResult,
+  type IdempotencyStore,
+  type JsonValue,
+  runIdempotentOperation,
+} from "@/lib/abuse/idempotency";
 import { admitAndScheduleRunnerRun } from "./admit-and-schedule";
 import type { RunnerReconciliationExecutionResult } from "./attempt-reconcile";
 import type {
@@ -115,6 +122,7 @@ const resourceInventoryResponseSchema = z
     version: z.literal(1),
   })
   .strict();
+const AGENT_CREATE_RETENTION_MS = 24 * 60 * 60_000;
 const resourceRepairResponseSchema = z
   .object({
     appOwnedMappings: z.number().int().nonnegative(),
@@ -157,6 +165,7 @@ export type RunnerHttpDependencies = Readonly<{
   ) => RunnerService | Promise<RunnerService>;
   diagnoseSandbox: (name: string) => Promise<RunnerDiagnosticResult>;
   enforceAbuse: (input: AbuseEnforcementInput) => Promise<AbuseAdmission>;
+  idempotencyStore?: IdempotencyStore;
   ipAddress: (request: Request) => string | null;
   logger?: RunnerHttpLogger;
 }>;
@@ -207,6 +216,48 @@ function providerRejected(dependencies: RunnerHttpDependencies): Response {
 
 function staleVersion(dependencies: RunnerHttpDependencies): Response {
   return runnerErrorResponse(dependencies, "stale_version");
+}
+
+function agentCreateOperation(tenant: string): string {
+  const tenantScope = createHash("sha256")
+    .update(tenant, "utf8")
+    .digest("hex")
+    .slice(0, 16);
+  return `runner_agent_create:${tenantScope}`;
+}
+
+function agentCreateIdempotencyResponse(
+  dependencies: RunnerHttpDependencies,
+  result: IdempotencyResult
+): Response {
+  if (result.kind !== "response") {
+    if (result.kind === "conflict") {
+      return runnerErrorResponse(dependencies, "operation_conflict");
+    }
+    if (result.kind === "in_progress") {
+      return runnerErrorResponse(dependencies, "runner_unavailable", {
+        message: "Agent creation is already in progress.",
+        retryable: true,
+      });
+    }
+    return invalidRequest(dependencies);
+  }
+
+  const headers = new Headers({ "cache-control": "no-store" });
+  if (result.replayed) {
+    headers.set("idempotency-replayed", "true");
+  }
+  return Response.json(result.response.body, {
+    headers,
+    status: result.response.status,
+  });
+}
+
+async function idempotencyResponseBody(response: Response): Promise<JsonValue> {
+  const body: unknown = await response.json();
+  return response.ok
+    ? agentEnvelopeSchema.parse(body)
+    : runErrorEnvelopeSchema.parse(body);
 }
 
 function subscriberFailure(
@@ -540,38 +591,67 @@ export function createRunnerHttpHandlers(
         if (body.kind !== "ok") {
           return body.response;
         }
-        const service = await dependencies.createService(context);
-        const created = await service.createAgent(
-          context.principal,
-          body.value
-        );
-        switch (created.kind) {
-          case "invalid":
-            return invalidRequest(dependencies);
-          case "unsupported_harness":
-            return runnerErrorResponse(dependencies, "harness_unsupported", {
-              message: `Daytona agents must select a supported harness runtime: ${SUPPORTED_HARNESS_IDS.join(", ")}.`,
-            });
-          case "conflict":
-            return runnerErrorResponse(dependencies, "operation_conflict");
-          case "unavailable":
-            return runnerUnavailable(dependencies);
-          case "created":
-            schedule(dependencies, async () => {
-              await warmAndReconcile(
-                service,
-                context.principal,
-                created.agent.id
+        const createAgentResponse = async (
+          providerIdempotencyKey?: string
+        ): Promise<Response> => {
+          const service = await dependencies.createService(context);
+          const created = await service.createAgent(
+            context.principal,
+            body.value,
+            providerIdempotencyKey
+          );
+          switch (created.kind) {
+            case "invalid":
+              return invalidRequest(dependencies);
+            case "unsupported_harness":
+              return runnerErrorResponse(dependencies, "harness_unsupported", {
+                message: `Daytona agents must select a supported harness runtime: ${SUPPORTED_HARNESS_IDS.join(", ")}.`,
+              });
+            case "conflict":
+              return runnerErrorResponse(dependencies, "operation_conflict");
+            case "unavailable":
+              return runnerUnavailable(dependencies);
+            case "created":
+              schedule(dependencies, async () => {
+                await warmAndReconcile(
+                  service,
+                  context.principal,
+                  created.agent.id
+                );
+              });
+              return runnerJsonResponse(
+                agentEnvelopeSchema,
+                { agent: created.agent },
+                { status: 201 }
               );
-            });
-            return runnerJsonResponse(
-              agentEnvelopeSchema,
-              { agent: created.agent },
-              { status: 201 }
-            );
-          default:
-            return unreachableResult(created);
+            default:
+              return unreachableResult(created);
+          }
+        };
+
+        const idempotencyKey = request.headers.get("idempotency-key");
+        if (idempotencyKey === null) {
+          return createAgentResponse();
         }
+        if (!dependencies.idempotencyStore) {
+          return runnerUnavailable(dependencies);
+        }
+        const result = await runIdempotentOperation({
+          idempotencyKey,
+          operation: agentCreateOperation(context.principal.tenant),
+          ownerId: context.userId,
+          perform: async ({ providerIdempotencyKey }) => {
+            const response = await createAgentResponse(providerIdempotencyKey);
+            return {
+              body: await idempotencyResponseBody(response),
+              status: response.status,
+            };
+          },
+          request: body.value,
+          retentionMs: AGENT_CREATE_RETENTION_MS,
+          store: dependencies.idempotencyStore,
+        });
+        return agentCreateIdempotencyResponse(dependencies, result);
       }),
 
     deleteAgent: (request, agentId) =>
