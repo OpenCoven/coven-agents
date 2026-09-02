@@ -34,6 +34,39 @@ test("team client uses same-origin reads", async () => {
   assert.equal(calls[0]?.init.redirect, "error");
 });
 
+test("team requests use the configured application base path", async () => {
+  const previous = process.env.NEXT_PUBLIC_BASE_PATH;
+  process.env.NEXT_PUBLIC_BASE_PATH = "/demo";
+  const paths: string[] = [];
+  try {
+    const client = new TeamClient((path) => {
+      paths.push(String(path));
+      return Promise.resolve(
+        Response.json(
+          {
+            error: {
+              code: "not_found",
+              message: "Not found.",
+              retryable: false,
+            },
+            requestId: "request-base-path",
+          },
+          { status: 404 }
+        )
+      );
+    });
+    await assert.rejects(client.listTeams(), TeamApiError);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.NEXT_PUBLIC_BASE_PATH;
+    } else {
+      process.env.NEXT_PUBLIC_BASE_PATH = previous;
+    }
+  }
+
+  assert.deepEqual(paths, ["/demo/api/teams"]);
+});
+
 test("team creation accepts a stable idempotency key and strict JSON body", async () => {
   const calls: Array<{ init: RequestInit; path: string }> = [];
   const client = new TeamClient((path, init = {}) => {

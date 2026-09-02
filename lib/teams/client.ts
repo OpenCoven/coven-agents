@@ -12,6 +12,7 @@ import {
   teamRunsEnvelopeSchema,
   teamsEnvelopeSchema,
 } from "@opencoven/agent-contracts";
+import { browserApplicationPath } from "@/lib/application-path";
 
 type FetchLike = typeof fetch;
 type MutationOptions = Readonly<{
@@ -157,7 +158,7 @@ export class TeamClient {
   }
 
   private async request(path: string, init: RequestInit): Promise<unknown> {
-    const response = await this.fetchImpl(path, {
+    const response = await this.fetchImpl(browserApplicationPath(path), {
       ...init,
       credentials: "same-origin",
       redirect: "error",
