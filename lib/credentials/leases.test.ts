@@ -41,6 +41,8 @@ function reservation(overrides: Partial<RunReservation> = {}): RunReservation {
     costUnits: 15,
     durationSeconds: null,
     expiresAt: new Date(NOW.getTime() + 300_000),
+    meteredAt: null,
+    meteringOutcome: null,
     periodDay: "2026-08-27",
     periodMonth: new Date("2026-08-01T00:00:00.000Z"),
     releasedAt: null,

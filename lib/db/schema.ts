@@ -317,6 +317,11 @@ export type RunUsage = InferSelectModel<typeof runUsage>;
  * which starts equal and is settled down to the whole minutes the run used
  * once terminal cleanup knows when it started and ended. Settlement can only
  * lower the charge — the check constraint makes that a database invariant.
+ *
+ * `meteredAt` and `meteringOutcome` record that the settled charge was handed
+ * to Stripe as a meter event (or deliberately not: demo tenants are never
+ * billable, and a complimentary grant has no Stripe Customer). A settled row
+ * with neither is pending usage reporting.
  */
 export const runReservation = pgTable(
   "RunReservation",
@@ -325,6 +330,11 @@ export const runReservation = pgTable(
     costUnits: integer("costUnits").notNull(),
     durationSeconds: integer("durationSeconds"),
     expiresAt: timestamp("expiresAt").notNull(),
+    meteredAt: timestamp("meteredAt"),
+    meteringOutcome: varchar("meteringOutcome", {
+      enum: ["reported", "no_customer", "not_billable"],
+      length: 16,
+    }),
     periodDay: date("periodDay").notNull(),
     periodMonth: timestamp("periodMonth").notNull(),
     releasedAt: timestamp("releasedAt"),
@@ -355,6 +365,11 @@ export const runReservation = pgTable(
     index("RunReservation_reserved_expiry_idx")
       .on(table.expiresAt)
       .where(sql`${table.state} = 'reserved'`),
+    index("RunReservation_unmetered_idx")
+      .on(table.settledAt)
+      .where(
+        sql`${table.state} = 'consumed' and ${table.settledAt} is not null and ${table.meteredAt} is null`
+      ),
     check("RunReservation_costUnits_positive", sql`${table.costUnits} > 0`),
     check(
       "RunReservation_costUnits_within_reserved",
@@ -363,6 +378,10 @@ export const runReservation = pgTable(
     check(
       "RunReservation_settlement_valid",
       sql`(${table.settledAt} is null and ${table.durationSeconds} is null) or (${table.settledAt} is not null and ${table.durationSeconds} is not null and ${table.durationSeconds} >= 0)`
+    ),
+    check(
+      "RunReservation_metering_valid",
+      sql`(${table.meteredAt} is null and ${table.meteringOutcome} is null) or (${table.meteredAt} is not null and ${table.meteringOutcome} in ('reported', 'no_customer', 'not_billable') and ${table.settledAt} is not null)`
     ),
     check(
       "RunReservation_state_valid",

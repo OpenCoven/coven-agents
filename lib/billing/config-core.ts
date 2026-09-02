@@ -2,6 +2,8 @@ const STRIPE_VARIABLES = [
   "STRIPE_SECRET_KEY",
   "STRIPE_WEBHOOK_SECRET",
   "STRIPE_PRICE_ID",
+  "STRIPE_METERED_PRICE_ID",
+  "STRIPE_METER_EVENT_NAME",
 ] as const;
 
 type SubscriptionCheckoutState = { enabled: false } | { enabled: true };

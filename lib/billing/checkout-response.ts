@@ -684,10 +684,16 @@ export async function checkoutResponse(
                   integration_identifier: stableIntegrationIdentifier(
                     providerIdempotencyKey
                   ),
-                  line_items: [{ price: enabledConfig.priceId, quantity: 1 }],
+                  // The metered Price takes no quantity: Stripe bills it from the
+                  // run-minute meter events reported after each run settles.
+                  line_items: [
+                    { price: enabledConfig.priceId, quantity: 1 },
+                    { price: enabledConfig.meteredPriceId },
+                  ],
                   metadata: {
                     [CHECKOUT_ATTEMPT_METADATA_KEY]: attemptId,
                     checkoutFlowVersion: CHECKOUT_FLOW_VERSION,
+                    meteredPriceId: enabledConfig.meteredPriceId,
                     priceId: enabledConfig.priceId,
                     userId: decision.userId,
                   },

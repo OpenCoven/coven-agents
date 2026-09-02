@@ -1218,19 +1218,20 @@ export function SubscriptionCard({
         <p className="oc-subscription-card__eyebrow">Monthly contract</p>
         <h2 id={titleId}>Subscriber access</h2>
         <p>
-          One subscription provides {MONTHLY_MINUTE_CAP} minutes of agent run
-          time each month. A run holds its full time limit when it starts and
-          settles to the minutes it actually used when it ends.
+          One subscription is a monthly base fee plus a charge for each minute
+          of agent run time, up to {MONTHLY_MINUTE_CAP} minutes each month. A
+          run holds its full time limit when it starts and is billed for the
+          minutes it actually used when it ends.
         </p>
       </div>
 
       <div
-        aria-label={`Monthly allowance: ${MONTHLY_MINUTE_CAP} minutes of agent run time`}
+        aria-label={`Monthly ceiling: ${MONTHLY_MINUTE_CAP} minutes of agent run time`}
         className="oc-subscription-ledger"
         role="img"
       >
         <div className="oc-subscription-ledger__heading">
-          <span>Run time allowance</span>
+          <span>Run time ceiling</span>
           <span>Monthly</span>
         </div>
         <div className="oc-subscription-ledger__value">

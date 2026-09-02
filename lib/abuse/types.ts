@@ -37,6 +37,7 @@ export const ABUSE_ROUTES = Object.freeze([
   // Stripe authenticates the payload; abuse admission still limits its source.
   "stripe_webhook",
   "stripe_reconcile",
+  "stripe_usage",
   "run_start",
   "internal_credential",
   "runner_public_read",

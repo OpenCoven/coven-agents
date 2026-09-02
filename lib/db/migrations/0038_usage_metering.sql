@@ -1,0 +1,4 @@
+ALTER TABLE "RunReservation" ADD COLUMN "meteredAt" timestamp;--> statement-breakpoint
+ALTER TABLE "RunReservation" ADD COLUMN "meteringOutcome" varchar(16);--> statement-breakpoint
+CREATE INDEX "RunReservation_unmetered_idx" ON "RunReservation" USING btree ("settledAt") WHERE "RunReservation"."state" = 'consumed' and "RunReservation"."settledAt" is not null and "RunReservation"."meteredAt" is null;--> statement-breakpoint
+ALTER TABLE "RunReservation" ADD CONSTRAINT "RunReservation_metering_valid" CHECK (("RunReservation"."meteredAt" is null and "RunReservation"."meteringOutcome" is null) or ("RunReservation"."meteredAt" is not null and "RunReservation"."meteringOutcome" in ('reported', 'no_customer', 'not_billable') and "RunReservation"."settledAt" is not null));

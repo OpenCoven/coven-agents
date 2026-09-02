@@ -92,8 +92,8 @@ export function UsageMeter() {
 
       <p className="text-[12px] text-muted-foreground">
         {resets
-          ? `Resets ${resets}. A run holds its full time limit while it runs and settles to the minutes it used when it ends.`
-          : "A run holds its full time limit while it runs and settles to the minutes it used when it ends."}
+          ? `Resets ${resets}. A run holds its full time limit while it runs and is billed for the minutes it used when it ends.`
+          : "A run holds its full time limit while it runs and is billed for the minutes it used when it ends."}
       </p>
     </div>
   );

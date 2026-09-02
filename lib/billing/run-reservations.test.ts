@@ -986,6 +986,11 @@ test("RunReservation has the required key, indexes, and integrity checks", () =>
   assert.ok(checkNames.includes("RunReservation_costUnits_positive"));
   assert.ok(checkNames.includes("RunReservation_costUnits_within_reserved"));
   assert.ok(checkNames.includes("RunReservation_settlement_valid"));
+  assert.ok(checkNames.includes("RunReservation_metering_valid"));
+  const unmeteredIndex = config.indexes.find(
+    (entry) => entry.config.name === "RunReservation_unmetered_idx"
+  );
+  assert.ok(unmeteredIndex?.config.where);
   assert.ok(checkNames.includes("RunReservation_state_valid"));
   assert.ok(checkNames.includes("RunReservation_state_timestamps_valid"));
   assert.ok(checkNames.includes("RunReservation_expiry_valid"));

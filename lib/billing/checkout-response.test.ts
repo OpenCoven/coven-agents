@@ -168,6 +168,8 @@ test("enabled checkout preserves the required operation order", async () => {
       return {
         apiKey: "sk_test_checkout",
         enabled: true,
+        meterEventName: "run_minutes",
+        meteredPriceId: "price_metered",
         priceId: "price_configured",
         webhookSecret: "whsec_configured",
       };
@@ -1968,6 +1970,8 @@ test("a same-key retry does not replay a successful URL after the configured Pri
     getCheckoutConfig: () => ({
       apiKey: "sk_test_checkout",
       enabled: true,
+      meterEventName: "run_minutes",
+      meteredPriceId: "price_metered",
       priceId: configuredPrice,
       webhookSecret: "whsec_configured",
     }),
@@ -2036,6 +2040,8 @@ test("a recovered attempt uses a new Session key after the configured Price chan
     getCheckoutConfig: () => ({
       apiKey: "sk_test_checkout",
       enabled: true,
+      meterEventName: "run_minutes",
+      meteredPriceId: "price_metered",
       priceId: configuredPrice,
       webhookSecret: "whsec_configured",
     }),
@@ -3919,10 +3925,14 @@ test("Checkout carries the user, configured Price, and account return URLs", asy
     client_reference_id: USER_ID,
     customer: "cus_new",
     integration_identifier: checkoutInput.value.integration_identifier,
-    line_items: [{ price: "price_configured", quantity: 1 }],
+    line_items: [
+      { price: "price_configured", quantity: 1 },
+      { price: "price_metered" },
+    ],
     metadata: {
       checkoutAttemptId: "attempt-1",
       checkoutFlowVersion: "1",
+      meteredPriceId: "price_metered",
       priceId: "price_configured",
       userId: USER_ID,
     },
@@ -4148,6 +4158,8 @@ function dependenciesFor(
     getCheckoutConfig: () => ({
       apiKey: "sk_test_checkout",
       enabled: true,
+      meterEventName: "run_minutes",
+      meteredPriceId: "price_metered",
       priceId: "price_configured",
       webhookSecret: "whsec_configured",
     }),

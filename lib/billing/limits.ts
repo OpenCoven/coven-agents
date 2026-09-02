@@ -1,16 +1,19 @@
 /**
- * Minutes of agent run time included in a billing period.
+ * Ceiling on minutes of agent run time in one billing period.
  *
  * One constant, read by the pricing copy, the usage endpoint and the
  * enforcement point. A cap quoted in three places that can disagree is worse
  * than no cap, because two of them will be a lie.
  *
- * 1,500 minutes is about 50 minutes a day. A minute of the default sandbox
+ * Minutes are not included in the base price: the subscription is a monthly
+ * base fee plus a metered per-minute charge, both configured in Stripe. This
+ * ceiling is a spend guard, not an allowance. A minute of the default sandbox
  * profile (2 vCPU, 4 GiB, 20 GiB) costs roughly $0.0028 at Daytona list
- * pricing, so a fully utilised 1,500 minutes is about $4.20 of raw container
- * cost against a $30 price. Margin survives payment fees by a wide margin
- * while the cap stays high enough that a daily user never has to think about
- * it.
+ * pricing, so at the intended $0.10 per minute the metered charge covers the
+ * container many times over; the base fee covers the sandbox's idle time and
+ * stopped disk. 1,500 minutes is about 50 minutes a day, high enough that a
+ * daily user never has to think about it and low enough that a runaway agent
+ * cannot produce a surprise invoice.
  */
 export const MONTHLY_MINUTE_CAP = 1500;
 

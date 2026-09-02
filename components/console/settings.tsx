@@ -996,7 +996,7 @@ export function Settings({
             {selectedTab === "usage" ? (
               <>
                 <Heading
-                  blurb="Minutes of agent run time. A run holds its full time limit when it starts and settles to what it used when it ends, whether it succeeds or not."
+                  blurb="Minutes of agent run time, billed per minute on top of the monthly base. A run holds its full time limit when it starts and settles to what it used when it ends, whether it succeeds or not."
                   title="Usage"
                 />
                 {usage ? (

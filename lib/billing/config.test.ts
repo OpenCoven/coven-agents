@@ -61,6 +61,8 @@ test("enabled checkout returns nonblank Stripe configuration", () => {
   assert.deepEqual(
     subscriptionCheckoutConfig(
       environment({
+        STRIPE_METER_EVENT_NAME: " run_minutes ",
+        STRIPE_METERED_PRICE_ID: " price_metered ",
         STRIPE_PRICE_ID: " price_test ",
         STRIPE_SECRET_KEY: " sk_test ",
         STRIPE_WEBHOOK_SECRET: " whsec_test ",
@@ -70,6 +72,8 @@ test("enabled checkout returns nonblank Stripe configuration", () => {
     {
       apiKey: "sk_test",
       enabled: true,
+      meterEventName: "run_minutes",
+      meteredPriceId: "price_metered",
       priceId: "price_test",
       webhookSecret: "whsec_test",
     }
@@ -88,7 +92,7 @@ test("enabled checkout names every missing Stripe variable", () => {
         })
       ),
     new Error(
-      "Subscription Checkout requires nonblank environment variables: STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, STRIPE_PRICE_ID."
+      "Subscription Checkout requires nonblank environment variables: STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, STRIPE_PRICE_ID, STRIPE_METERED_PRICE_ID, STRIPE_METER_EVENT_NAME."
     )
   );
 });

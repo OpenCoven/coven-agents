@@ -397,6 +397,8 @@ export async function reserveRun(
       costUnits,
       durationSeconds: null,
       expiresAt: new Date(now.getTime() + reservationTtlMs),
+      meteredAt: null,
+      meteringOutcome: null,
       periodDay,
       periodMonth: input.periodStart,
       releasedAt: null,

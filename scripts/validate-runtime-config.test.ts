@@ -45,6 +45,8 @@ const VALID_ENV: Partial<NodeJS.ProcessEnv> = {
   RUNNER_MANUAL_RECONCILE_SECRET: "subprocess-test-manual-reconcile-secret",
 };
 const VALID_STRIPE_ENV: Partial<NodeJS.ProcessEnv> = {
+  STRIPE_METER_EVENT_NAME: "run_minutes",
+  STRIPE_METERED_PRICE_ID: "price_metered",
   STRIPE_PRICE_ID: "price_test",
   STRIPE_SECRET_KEY: "sk_test",
   STRIPE_WEBHOOK_SECRET: "whsec_test",
@@ -604,7 +606,7 @@ test("enabled production and release validation names missing Stripe variables",
 
     assertRejectedWithMessage(
       result,
-      "Subscription Checkout requires nonblank environment variables: STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, STRIPE_PRICE_ID."
+      "Subscription Checkout requires nonblank environment variables: STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, STRIPE_PRICE_ID, STRIPE_METERED_PRICE_ID, STRIPE_METER_EVENT_NAME."
     );
   }
 });
@@ -621,7 +623,7 @@ test("non-production runtime validation names missing Stripe variables", () => {
 
     assertRejectedWithMessage(
       result,
-      "Subscription Checkout requires nonblank environment variables: STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, STRIPE_PRICE_ID."
+      "Subscription Checkout requires nonblank environment variables: STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, STRIPE_PRICE_ID, STRIPE_METERED_PRICE_ID, STRIPE_METER_EVENT_NAME."
     );
   }
 });

@@ -263,8 +263,11 @@ Repository build evidence does not prove a deployment occurred.
 Before enabling new subscription Checkout:
 
 1. Keep `SUBSCRIPTION_CHECKOUT_ENABLED=off` during deployment and migration.
-2. Confirm `STRIPE_PRICE_ID` identifies the intended live recurring Price,
-   interval, currency, amount, and Product.
+2. Confirm `STRIPE_PRICE_ID` identifies the intended live recurring base
+   Price, interval, currency, amount, and Product, and that
+   `STRIPE_METERED_PRICE_ID` is a usage-based Price on the same Product whose
+   Billing Meter has the `event_name` in `STRIPE_METER_EVENT_NAME`, sums the
+   `value` payload, and maps customers by `stripe_customer_id`.
 3. Use a test-mode restricted key to complete the documented Customer,
    subscription, Checkout Session, invoice-line, and recovery paths. Then
    create a separate live-mode restricted key with the same reviewed

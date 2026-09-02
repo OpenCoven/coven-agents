@@ -308,10 +308,10 @@ test.describe("Subscriber checkout", () => {
     const accountCard = page.locator(".oc-subscription-card");
     await expect(accountCard).toContainText(`${MONTHLY_MINUTE_CAP} minutes`);
     await expect(
-      accountCard.getByRole("img", { name: "Monthly allowance" })
+      accountCard.getByRole("img", { name: "Monthly ceiling" })
     ).toHaveAttribute(
       "aria-label",
-      `Monthly allowance: ${MONTHLY_MINUTE_CAP} minutes of agent run time`
+      `Monthly ceiling: ${MONTHLY_MINUTE_CAP} minutes of agent run time`
     );
     await expect(accountCard).toContainText("each month");
     await expect(accountCard).toContainText(

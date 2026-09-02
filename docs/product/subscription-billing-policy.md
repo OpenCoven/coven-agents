@@ -12,16 +12,22 @@ separate operator evidence.
 
 ## Product policy
 
-The application offers one configured Stripe subscription price at a time.
-`app/api/checkout/route.ts` creates a hosted subscription Checkout Session with
-one `STRIPE_PRICE_ID` line item. The repository does not encode or verify the
-price amount or recurring interval, so reviewers must confirm those values in
-Stripe before promotion.
+The application offers one configured Stripe subscription at a time: a
+recurring base price plus a metered per-minute price on the same Product.
+`app/api/checkout/route.ts` creates a hosted subscription Checkout Session
+with two line items, the `STRIPE_PRICE_ID` base price (quantity one) and the
+`STRIPE_METERED_PRICE_ID` usage price (no quantity). Entitlement is decided
+from the base price alone; the metered price only bills reported minutes. The
+repository does not encode or verify the price amounts or recurring interval,
+so reviewers must confirm those values in Stripe before promotion. The
+intended amounts are USD 25 per month plus USD 0.10 per minute of agent run
+time.
 
 There is no application-granted free trial. A failed initial invoice grants no
-authority. Guest replay is the non-paying evaluation path. Metered overage,
-seats, plan changes, add-ons, automatic tax collection, and proration are not
-implemented here.
+authority. Guest replay is the non-paying evaluation path. Seats, plan
+changes, add-ons, automatic tax collection, and proration are not implemented
+here. Metered usage is implemented only as the per-minute charge described
+under "Metered usage reporting" below.
 
 Customer Portal and self-service cancellation are also deferred. An active
 subscriber can see current status and the paid-through boundary, but this
@@ -29,13 +35,13 @@ release does not expose plan changes, payment-method management, invoice
 history, or cancellation controls. Operators must not imply that those
 features are available.
 
-The included monthly allowance is `MONTHLY_MINUTE_CAP = 1500` minutes of
-agent run time, defined in `lib/billing/limits.ts`. That constant is the
-current source read by admission, usage responses, and analytics. Any
-subscription offer must disclose the cap before purchase; the account usage
-surfaces must continue to report the same value rather than maintain a
-separate copy. The intended price is USD 30 per month, but the repository does
-not encode it; see the Stripe verification note above.
+No minutes are included in the base price. `MONTHLY_MINUTE_CAP = 1500` in
+`lib/billing/limits.ts` is a per-billing-period ceiling on billable minutes,
+a spend guard against a runaway agent rather than an allowance. That constant
+is the current source read by admission, usage responses, and analytics. Any
+subscription offer must disclose the ceiling and the per-minute charge before
+purchase; the account usage surfaces must continue to report the same value
+rather than maintain a separate copy, and they never display an amount.
 
 Each admitted run reserves `RUN_MINUTE_RESERVATION = 15` minutes, the runner's
 execution time limit, and is settled to the whole minutes it actually held
@@ -499,6 +505,41 @@ one-unit charge and are never settled.
 remaining, and reset information from the same reservation accounting used by
 admission. If account period state is absent, remaining allowance is zero. If
 the accounting read fails, the endpoint returns `capacity_unavailable`.
+
+## Metered usage reporting
+
+Settled run minutes are billed through a Stripe Billing Meter. The reporter
+in `lib/billing/usage-metering.ts` runs from `GET /api/internal/stripe-usage`
+on a schedule with the same bearer `CRON_SECRET`, admission policy, and empty
+body contract as Stripe reconciliation, and independently of whether Checkout
+is enabled, because existing subscribers keep accruing usage while purchases
+are paused.
+
+Each invocation locks batches of consumed, settled, unreported
+`RunReservation` rows with `FOR UPDATE SKIP LOCKED`, oldest settlement first,
+and for each row either creates one meter event or records why it never
+will. The event carries `event_name = STRIPE_METER_EVENT_NAME`, the owner's
+`stripe_customer_id`, `value` equal to the settled `costUnits`, the
+settlement time as `timestamp` (or the current time when the settlement is
+older than Stripe's 35-day window), and `identifier = run:<runId>`. The row
+is marked with `meteredAt` and a `meteringOutcome` in the same transaction:
+`reported`, `no_customer` when the owner has no Stripe Customer (a
+complimentary grant), or `not_billable` when the usage receipt names a demo
+tenant or nothing. Only settled runs are ever billed; a run whose duration
+could not be measured keeps its reservation against the ceiling but is never
+reported.
+
+A crash between Stripe accepting an event and the mark committing is
+repaired on retry by Stripe's identifier deduplication. A provider failure
+commits the rows already marked and stops the invocation; the rest stay
+pending. A 401 or 403 from Stripe returns `billing_provider_unauthorized`
+so the operator learns the restricted key lacks meter event write. The
+response carries only aggregate counts.
+
+Operators must create the meter (sum aggregation over `value`, customer
+mapping by `stripe_customer_id`) and a usage-based Price on the subscription
+Product before enabling Checkout, and confirm on a test-mode subscription
+that reported minutes appear on the next invoice.
 
 ## Failure and recovery
 
