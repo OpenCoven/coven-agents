@@ -118,12 +118,12 @@ retains the machine-readable relationships below:
   `/api/internal/runner-resource-inventory` and
   `/api/internal/stripe-reconcile`.
 
-| Route | HTTP status | Outcome | Request ID | Retryable |
+| Route | HTTP status | Observed result | Request ID | Retryable |
 | --- | ---: | --- | --- | --- |
-| `/api/health` | 200 | `cloud_health_v1` | n/a | n/a |
-| `/api/agents` | 401 | `unauthorized` | `e155ed8b-13eb-46b3-aa55-b9edb3044414` | no |
-| `/api/diagnostics/sandbox` | 503 | `diagnostic_unavailable` | `2be60f00-5882-4909-af1d-8f1de5c40695` | yes |
-| `/api/internal/runner-resource-inventory` | 503 | `reconcile_unavailable` | `b091ba86-b3df-4cb0-be21-e13df7e0de45` | yes |
+| `/api/health` | 200 | `apiVersion=1.0; mode=cloud; minimumClientVersion=1.0.0; capabilities=7` | n/a | n/a |
+| `/api/agents` | 401 | `apiVersion=1.0; error=unauthorized` | `e155ed8b-13eb-46b3-aa55-b9edb3044414` | no |
+| `/api/diagnostics/sandbox` | 503 | `apiVersion=1.0; error=diagnostic_unavailable` | `2be60f00-5882-4909-af1d-8f1de5c40695` | yes |
+| `/api/internal/runner-resource-inventory` | 503 | `apiVersion=1.0; error=reconcile_unavailable` | `b091ba86-b3df-4cb0-be21-e13df7e0de45` | yes |
 
 Credential material retained: `no`. Provider lifecycle certified: `no`. The
 two HTTP 503 results are safe failures, not successful provider lifecycle or

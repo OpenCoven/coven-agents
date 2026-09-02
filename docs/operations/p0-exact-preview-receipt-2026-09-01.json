@@ -15,11 +15,23 @@
     {
       "route": "/api/health",
       "status": 200,
-      "outcome": "cloud_health_v1"
+      "apiVersion": "1.0",
+      "mode": "cloud",
+      "minimumClientVersion": "1.0.0",
+      "capabilities": [
+        "agent-profiles",
+        "async-runs",
+        "idempotent-runs",
+        "run-events",
+        "run-cancel",
+        "command-evidence",
+        "file-evidence"
+      ]
     },
     {
       "route": "/api/agents",
       "status": 401,
+      "apiVersion": "1.0",
       "outcome": "unauthorized",
       "requestId": "e155ed8b-13eb-46b3-aa55-b9edb3044414",
       "retryable": false
@@ -27,6 +39,7 @@
     {
       "route": "/api/diagnostics/sandbox",
       "status": 503,
+      "apiVersion": "1.0",
       "outcome": "diagnostic_unavailable",
       "requestId": "2be60f00-5882-4909-af1d-8f1de5c40695",
       "retryable": true
@@ -34,6 +47,7 @@
     {
       "route": "/api/internal/runner-resource-inventory",
       "status": 503,
+      "apiVersion": "1.0",
       "outcome": "reconcile_unavailable",
       "requestId": "b091ba86-b3df-4cb0-be21-e13df7e0de45",
       "retryable": true

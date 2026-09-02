@@ -87,11 +87,23 @@ test("the cutover attestation matches the exact preview receipt", () => {
     capturedAt: "2026-09-01",
     checks: [
       {
-        outcome: "cloud_health_v1",
+        apiVersion: "1.0",
+        capabilities: [
+          "agent-profiles",
+          "async-runs",
+          "idempotent-runs",
+          "run-events",
+          "run-cancel",
+          "command-evidence",
+          "file-evidence",
+        ],
+        minimumClientVersion: "1.0.0",
+        mode: "cloud",
         route: "/api/health",
         status: 200,
       },
       {
+        apiVersion: "1.0",
         outcome: "unauthorized",
         requestId: "e155ed8b-13eb-46b3-aa55-b9edb3044414",
         retryable: false,
@@ -99,6 +111,7 @@ test("the cutover attestation matches the exact preview receipt", () => {
         status: 401,
       },
       {
+        apiVersion: "1.0",
         outcome: "diagnostic_unavailable",
         requestId: "2be60f00-5882-4909-af1d-8f1de5c40695",
         retryable: true,
@@ -106,6 +119,7 @@ test("the cutover attestation matches the exact preview receipt", () => {
         status: 503,
       },
       {
+        apiVersion: "1.0",
         outcome: "reconcile_unavailable",
         requestId: "b091ba86-b3df-4cb0-be21-e13df7e0de45",
         retryable: true,
@@ -150,7 +164,11 @@ test("the cutover attestation matches the exact preview receipt", () => {
   assert.match(attestation, /Provider lifecycle certified: `no`/u);
 
   const checks = receipt.checks as {
-    outcome: string;
+    apiVersion: string;
+    capabilities?: string[];
+    minimumClientVersion?: string;
+    mode?: string;
+    outcome?: string;
     requestId?: string;
     retryable?: boolean;
     route: string;
@@ -160,7 +178,10 @@ test("the cutover attestation matches the exact preview receipt", () => {
     const requestId = check.requestId ? `\`${check.requestId}\`` : "n/a";
     const retryable =
       check.retryable === undefined ? "n/a" : check.retryable ? "yes" : "no";
-    return `| \`${check.route}\` | ${check.status} | \`${check.outcome}\` | ${requestId} | ${retryable} |`;
+    const result = check.outcome
+      ? `apiVersion=${check.apiVersion}; error=${check.outcome}`
+      : `apiVersion=${check.apiVersion}; mode=${check.mode}; minimumClientVersion=${check.minimumClientVersion}; capabilities=${check.capabilities?.length}`;
+    return `| \`${check.route}\` | ${check.status} | \`${result}\` | ${requestId} | ${retryable} |`;
   });
   const attestationRows = attestation
     .split("\n")
