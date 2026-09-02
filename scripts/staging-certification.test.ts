@@ -300,6 +300,26 @@ test("treats a wrong credential accepted by another operator channel as a bounde
   assert.equal(receipt.checks.credentialIsolation[0]?.status, 200);
 });
 
+test("does not certify a diagnostic when JSON has a failure status", async () => {
+  const { collectStagingCertification, parseStagingCertificationArguments } =
+    await subject();
+  const handlers = successfulHandlers();
+  handlers[2] = json({ exitCode: 0, ok: true, output: "coven-agents" }, 503);
+
+  const receipt = await collectStagingCertification(
+    parseStagingCertificationArguments(options()),
+    environment,
+    {
+      fetch: queuedFetch(handlers),
+      now: () => fixedNow,
+    }
+  );
+
+  assert.equal(receipt.checks.sandboxDiagnostic.outcome, "unexpected_response");
+  assert.equal(receipt.checks.sandboxDiagnostic.status, 503);
+  assert.equal(receipt.evidenceFlags.diagnosticLifecycleCertified, false);
+});
+
 test("categorizes malformed, oversized, and timed-out responses without raw output", async () => {
   const {
     collectStagingCertification,
@@ -533,6 +553,40 @@ test("requires the CLI's independently preapproved staging origin before request
 
   assert.equal(code, 2);
   assert.equal(requests, 0);
+});
+
+test("writes a receipt when the CLI origin matches its preapproved origin", async () => {
+  const { runStagingCertificationCli } = await subject();
+  const directory = mkdtempSync(
+    join(process.cwd(), ".staging-certification-cli-test-")
+  );
+  const outputPath = join(directory, "receipt.json");
+  const stdout: string[] = [];
+
+  try {
+    const code = await runStagingCertificationCli(
+      options(outputPath),
+      {
+        ...environment,
+        STAGING_CERTIFICATION_ORIGIN: origin,
+      },
+      {
+        fetch: queuedFetch(successfulHandlers()),
+        now: () => fixedNow,
+        stderr: () => undefined,
+        stdout: (message: string) => stdout.push(message),
+      }
+    );
+
+    assert.equal(code, 0);
+    assert.deepEqual(stdout, ["Staging certification evidence collected.\n"]);
+    const serialized = readFileSync(outputPath, "utf8");
+    for (const credential of Object.values(environment)) {
+      assert.doesNotMatch(serialized, new RegExp(credential, "u"));
+    }
+  } finally {
+    rmSync(directory, { force: true, recursive: true });
+  }
 });
 
 test("writes a mode-0600 receipt atomically and refuses to overwrite", async () => {

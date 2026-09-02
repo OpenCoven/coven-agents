@@ -477,7 +477,7 @@ async function readJsonResponse(
     }
     return {
       body: JSON.parse(text) as unknown,
-      outcome: "passed",
+      outcome: response.ok ? "passed" : "unexpected_response",
       status: response.status,
     };
   } catch {
@@ -598,7 +598,7 @@ function parseResponse<T>(
   response: SafeResponse,
   schema: z.ZodType<T>
 ): T | null {
-  if (response.outcome !== "passed") {
+  if (response.body === null) {
     return null;
   }
   const result = schema.safeParse(response.body);
@@ -907,9 +907,11 @@ function receiptContainsCredentialMaterial(
   return (
     scanText("staging-certification-receipt.json", serialized).length > 0 ||
     containsOpaqueSecret(serialized) ||
-    Object.values(environment).some(
-      (value) =>
-        value !== undefined && value !== "" && serialized.includes(value)
+    CREDENTIAL_NAMES.some(
+      (name) =>
+        environment[name] !== undefined &&
+        environment[name] !== "" &&
+        serialized.includes(environment[name])
     )
   );
 }
