@@ -118,7 +118,7 @@ retains the machine-readable relationships below:
 | Route | HTTP status | Outcome | Request ID | Retryable |
 | --- | ---: | --- | --- | --- |
 | `/api/health` | 200 | `cloud_health_v1` | n/a | n/a |
-| `/api/agents` | 401 | `unauthorized` | n/a | n/a |
+| `/api/agents` | 401 | `unauthorized` | `e155ed8b-13eb-46b3-aa55-b9edb3044414` | no |
 | `/api/diagnostics/sandbox` | 503 | `diagnostic_unavailable` | `2be60f00-5882-4909-af1d-8f1de5c40695` | yes |
 | `/api/internal/runner-resource-inventory` | 503 | `reconcile_unavailable` | `b091ba86-b3df-4cb0-be21-e13df7e0de45` | yes |
 

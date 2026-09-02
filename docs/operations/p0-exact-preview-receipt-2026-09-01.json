@@ -20,7 +20,9 @@
     {
       "route": "/api/agents",
       "status": 401,
-      "outcome": "unauthorized"
+      "outcome": "unauthorized",
+      "requestId": "e155ed8b-13eb-46b3-aa55-b9edb3044414",
+      "retryable": false
     },
     {
       "route": "/api/diagnostics/sandbox",

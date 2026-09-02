@@ -102,21 +102,33 @@ test("the cutover attestation matches the exact preview receipt", () => {
   assert.match(attestation, /Credential material retained: `no`/u);
   assert.match(attestation, /Provider lifecycle certified: `no`/u);
 
-  for (const check of receipt.checks as {
+  const checks = receipt.checks as {
     outcome: string;
     requestId?: string;
     retryable?: boolean;
     route: string;
     status: number;
-  }[]) {
+  }[];
+  assert.deepEqual(
+    checks.map((check) => check.route),
+    [
+      "/api/health",
+      "/api/agents",
+      "/api/diagnostics/sandbox",
+      "/api/internal/runner-resource-inventory",
+    ]
+  );
+
+  const expectedRows = checks.map((check) => {
     const requestId = check.requestId ? `\`${check.requestId}\`` : "n/a";
-    const retryable = check.retryable ? "yes" : "n/a";
-    assert.ok(
-      attestation.includes(
-        `| \`${check.route}\` | ${check.status} | \`${check.outcome}\` | ${requestId} | ${retryable} |`
-      )
-    );
-  }
+    const retryable =
+      check.retryable === undefined ? "n/a" : check.retryable ? "yes" : "no";
+    return `| \`${check.route}\` | ${check.status} | \`${check.outcome}\` | ${requestId} | ${retryable} |`;
+  });
+  const attestationRows = attestation
+    .split("\n")
+    .filter((line) => line.startsWith("| `/api/"));
+  assert.deepEqual(attestationRows, expectedRows);
 });
 
 test("release readiness separates infrastructure cutover from product approval", () => {
