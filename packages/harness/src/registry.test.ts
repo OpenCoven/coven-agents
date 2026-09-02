@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   HARNESS_SPECS,
   harnessAuthHint,
+  harnessInstallSpecifier,
   harnessSpec,
   harnessStatus,
   isRunnableHarness,
@@ -74,5 +75,19 @@ test("an uninstalled harness reports the package that provides it", () => {
   assert.ok(spec);
   const status = harnessStatus(spec, { installed: false, version: null });
   assert.equal(status.installed, false);
-  assert.ok(status.detail.includes("@github/copilot"));
+  assert.ok(status.detail.includes("@github/copilot@1.0.80"));
+});
+
+test("every harness carries an exact version pin", () => {
+  for (const spec of HARNESS_SPECS) {
+    assert.match(
+      spec.installVersion,
+      /^\d+\.\d+\.\d+$/u,
+      `${spec.id} must pin an exact version, never a range or a tag`
+    );
+    assert.equal(
+      harnessInstallSpecifier(spec),
+      `${spec.installPackage}@${spec.installVersion}`
+    );
+  }
 });

@@ -136,6 +136,61 @@ was not classified as retired. Temporary branch-scoped preview variables and
 automation bypasses used during diagnosis were removed. No deployed credential
 value was copied into this record.
 
+### Production-configuration operator evidence
+
+The
+[sanitized Production-config receipt](p0-production-config-receipt-2026-09-01.json)
+records a later exact archive deployment of commit
+`a2c11ff408caf8f97af8dbbe37903a13e928f255`, tree
+`46df1be994b882c19fbcedd0bdecbba9c76ff299`, as deployment
+`dpl_F4EXbTYZTvscUjrBUPZYjjSuDWB1`. The Production-target build generated `42`
+static pages and inherited the encrypted Production database, Daytona, and
+Stripe configuration without exporting credential values.
+
+The retained operator results are:
+
+- `GET /api/health` returned HTTP 200 with API v1 in cloud mode;
+- a signed-out `GET /agents` returned HTTP 307 to `/login?beta=1`;
+- the bounded `POST /api/diagnostics/sandbox` Daytona diagnostic returned HTTP
+  200, exit code zero, and the
+  fixed sanitized output `coven-agents`;
+- scheduled `GET /api/internal/stripe-reconcile` returned HTTP 200 with
+  `execution=executed` and zero scanned, changed, deferred, conflicting, or
+  failed candidates;
+- two consecutive manual `POST /api/internal/runner-reconcile` requests
+  returned HTTP 200 with `execution=executed` and every work and failure
+  aggregate equal to zero;
+- bounded `GET /api/internal/runner-resource-inventory` results before and after
+  reconciliation each examined 4 application-owned mappings without
+  provider or database truncation. All four stopped resources remain ambiguous
+  and were neither adopted nor deleted;
+- diagnostic, scheduled-reconciliation, and manual-reconciliation credentials
+  each returned HTTP 401 when presented to a different operator channel:
+
+| Attempted credential | Intended channel | Request | HTTP status | Request ID |
+| --- | --- | --- | ---: | --- |
+| Diagnostic | Scheduled reconciliation | `GET /api/internal/runner-resource-inventory` | 401 | `8069c025-0add-454a-9b5e-4f5ccdc9a23b` |
+| Manual reconciliation | Diagnostic | `POST /api/diagnostics/sandbox` | 401 | `2dd79a06-62a7-4396-86e6-00971899024e` |
+| Scheduled reconciliation | Manual reconciliation | `POST /api/internal/runner-reconcile` | 401 | `14389c8a-5db2-4c96-a784-e7b8f4985808` |
+
+The default project alias was restored to the receipt deployment after an
+isolated subscriber-session investigation:
+`dpl_F4EXbTYZTvscUjrBUPZYjjSuDWB1`. 3 temporary subscriber deployments were
+removed and the pre-existing empty Production admin allowlist placeholder was
+restored. No Auth.js secret, operator credential, database configuration,
+provider payload, tenant identifier, or account identifier is retained.
+
+Diagnostic lifecycle certified: `yes`. Subscriber lifecycle certified: `no`.
+Persistent sandbox lifecycle certified: `no`. Resource disposition certified:
+`no`. Stripe checkout/webhook failure-retry certified: `no`. Observation
+window completed: `no`. Named approvals completed: `no`.
+
+The subscriber exercise stopped at the existing authorization boundary:
+Auth.js accepted an isolated signed cookie, but protected application
+authorization correctly required a matching durable user and current
+`authVersion`. The operator did not add a production-only bypass, copy another
+user's identity or credential, or weaken database revalidation.
+
 ## Accepted credential materialization policy
 
 This is a repository policy ratification, not a claim of a new deployed
@@ -348,9 +403,10 @@ for removal of the superseded provider.
   Persistent sandbox TTL is fixed at zero and auto-delete at negative one;
   public previews, volumes, linked/forked resources, and warm pools are not
   configured.
-- This is repository behavior, not a new deployed inventory or offboarding
-  receipt. Execute and retain a sanitized operator result before treating a
-  production resource-offboarding exercise as evidenced.
+- The Production-config receipt now retains the bounded deployed inventory:
+  four stopped observations were ambiguous before and after reconciliation,
+  with no truncation, adoption, or deletion. This proves the non-destructive
+  operator path but does not prove ownership or disposition.
 - [ ] Inventory account-wide Daytona API keys, roles, and administrative
       resources through the Daytona control plane; encrypted deployment
       credentials cannot be exported for local inspection.

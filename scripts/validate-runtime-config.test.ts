@@ -158,10 +158,21 @@ function assertRejectedWithMessage(
   assert.equal(result.stderr.trim(), message);
 }
 
+function emptyEnvironmentDirectory(): string {
+  return mkdtempSync(join(repositoryRoot, ".validate-runtime-config-test-"));
+}
+
+/**
+ * Release validation calls `loadEnvConfig(process.cwd())`, which reads the
+ * `.env` files of whatever directory it runs in. Running it at the repository
+ * root would let a contributor's untracked `.env.local` overwrite the keys
+ * this harness deliberately clears, so a release run without an explicit
+ * working directory gets an empty one and is decided by `env` alone.
+ */
 function runValidator(
   overrides: Partial<NodeJS.ProcessEnv> = {},
   arguments_: string[] = [],
-  cwd = repositoryRoot
+  cwd?: string
 ) {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
@@ -175,24 +186,37 @@ function runValidator(
   };
   Object.assign(env, overrides);
 
-  return spawnSync(
-    process.execPath,
-    ["--import", "tsx", validatorPath, ...arguments_],
-    {
-      cwd,
-      encoding: "utf8",
-      env,
-    }
-  );
+  const spawnIn = (directory: string) =>
+    spawnSync(
+      process.execPath,
+      ["--import", "tsx", validatorPath, ...arguments_],
+      {
+        cwd: directory,
+        encoding: "utf8",
+        env,
+      }
+    );
+
+  if (cwd !== undefined) {
+    return spawnIn(cwd);
+  }
+  if (!arguments_.includes("--release")) {
+    return spawnIn(repositoryRoot);
+  }
+
+  const isolated = emptyEnvironmentDirectory();
+  try {
+    return spawnIn(isolated);
+  } finally {
+    rmSync(isolated, { force: true, recursive: true });
+  }
 }
 
 function runReleaseValidatorFromFiles(
   files: Record<string, string>,
   overrides: Partial<NodeJS.ProcessEnv> = {}
 ) {
-  const cwd = mkdtempSync(
-    join(repositoryRoot, ".validate-runtime-config-test-")
-  );
+  const cwd = emptyEnvironmentDirectory();
 
   try {
     for (const [name, contents] of Object.entries(files)) {
@@ -1061,6 +1085,24 @@ test("the explicit release preflight enforces outside production markers", () =>
     result.stderr,
     /RELEASE_AUDIENCE must be exactly "closed-beta" or "public"/
   );
+});
+
+test("an env file in the working directory supplies keys the harness cleared", () => {
+  const result = runReleaseValidatorFromFiles({
+    ".env.local":
+      'RELEASE_AUDIENCE=public\nBETA_MODE=off\nGLOBAL_DAILY_RUN_CAP=""\n',
+  });
+
+  assertRejectedWithMessage(
+    result,
+    "GLOBAL_DAILY_RUN_CAP must be a positive integer."
+  );
+});
+
+test("release validation is decided by the environment, not by repository env files", () => {
+  const result = runValidator({}, ["--release"]);
+
+  assert.equal(result.status, 0, result.stderr);
 });
 
 test(".env.production.local takes precedence over .env.local", () => {

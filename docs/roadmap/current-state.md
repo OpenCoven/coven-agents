@@ -1,17 +1,20 @@
 # Current Repository State
 
 - Snapshot date: 2026-09-01
-- Application baseline: `4bf89dc98667efa1c46b5131e10d4b14bf5f86c3`
+- Application baseline: `a2c11ff408caf8f97af8dbbe37903a13e928f255`
 - Evidence class: verified repository and local contract evidence, retained
-  infrastructure cutover evidence, and a public exact-build guest replay
+  infrastructure cutover and Production-config operator evidence, and a public
+  exact-build guest replay
 
 This snapshot includes merged P0 repository certification through PR #183, the
 replay-timeline correction in PR #184, the public exact-build guest replay
-recorded by PR #185, and unreachable UI removal in PR #186. It distinguishes
-those completed boundaries from pending deployed Daytona lifecycle,
-observation-window, and full product release approval. Private planning
-reconciliation remains pending and is not inferred from repository or Project
-evidence.
+recorded by PR #185, unreachable UI removal in PR #186, retained exact-preview
+and hermetic receipts in PR #187, and the subscriber launch runbook in PR #188.
+It distinguishes those completed boundaries and the successful
+Production-config operator checks from pending persistent Daytona lifecycle,
+subscriber certification, observation-window, and full product release
+approval. Private planning reconciliation remains pending and is not inferred
+from repository or Project evidence.
 
 ## Implemented surfaces
 
@@ -68,22 +71,30 @@ evidence.
 - [PR #185](https://github.com/OpenCoven/coven-agents/pull/185) recorded the
   credential-free public exact-build guest replay.
 - [PR #186](https://github.com/OpenCoven/coven-agents/pull/186) removed
-  unreachable UI and orphaned dependency residue and is the current repository
-  baseline.
+  unreachable UI and orphaned dependency residue.
+- [PR #187](https://github.com/OpenCoven/coven-agents/pull/187) retained the
+  exact-preview and 11-case hermetic PostgreSQL receipts.
+- [PR #188](https://github.com/OpenCoven/coven-agents/pull/188) added the
+  subscriber launch runbook and is the current repository baseline.
 
 The application baseline also includes the merged console, billing,
 deployment-policy, branding, runner-reliability, coordinated-team, dependency,
 subscriber-surface, credential-lifecycle, and session-path corrections plus
 the P0 repository certification through
-`4bf89dc98667efa1c46b5131e10d4b14bf5f86c3`. The
+`a2c11ff408caf8f97af8dbbe37903a13e928f255`. The
 [cutover attestation](../operations/daytona-cutover-attestation.md) records
-infrastructure production evidence and exact application-preview results while
-preserving the remaining product certification and approval gates.
+infrastructure production evidence, exact application-preview results, and the
+[Production-config operator receipt](../operations/p0-production-config-receipt-2026-09-01.json)
+while preserving the remaining product certification and approval gates.
 
 ## Known gaps
 
 - No retained full subscriber create, standalone and coordinated run, stream,
   stop, delete, and cross-tenant production-equivalent artifact exists.
+- Production-config diagnostics, Stripe reconciliation, runner reconciliation,
+  closed-beta refusal, and operator credential separation succeeded. Four
+  stopped Daytona resources remain ambiguous and cannot be adopted or deleted
+  without exact durable mapping or control-plane disposition evidence.
 - Complete outbound policy evidence remains open.
 - Deployed evidence redaction, provider restart recovery, retention, export,
   and deletion require release-equivalent certification; local cross-surface

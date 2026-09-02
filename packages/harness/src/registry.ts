@@ -12,14 +12,26 @@ export interface HarnessSpec {
   readonly id: HarnessId;
   /** npm package that provides `command`, used to build the container image. */
   readonly installPackage: string;
+  /**
+   * Exact published version of `installPackage`. This is the single source of
+   * truth for the pin: the Daytona image derives its install command from it
+   * and harness discovery reports it, so there is one place to bump and no
+   * second copy to drift from.
+   *
+   * A bump here is not sufficient on its own. Snapshots are immutable and
+   * `provisionDaytonaSnapshot` refuses to recreate a name, so the running
+   * snapshot keeps whatever CLI it was built with until a new generation is
+   * provisioned. Bump `DAYTONA_COPILOT_SNAPSHOT_NAME` in the same change.
+   */
+  readonly installVersion: string;
   readonly label: string;
   /**
    * Model ids the pinned CLI accepts for `--model`, with `auto` first.
    *
    * `auto` means no flag is passed and the harness chooses. The rest are
-   * passed through verbatim, so this list must mirror what the pinned CLI
-   * version actually accepts — it is maintained alongside the Daytona
-   * snapshot definition, and a stale entry fails a run at the harness rather
+   * passed through verbatim, so this list must mirror what `installVersion`
+   * actually accepts — it is maintained alongside the pin in this same spec,
+   * and a stale entry fails a run at the harness rather
    * than anywhere recoverable. The console offers exactly this list
    * and nothing free-typed, because a typo here used to be a failed run with
    * a model error the user had no reason to expect.
@@ -38,6 +50,7 @@ export const HARNESS_SPECS: readonly HarnessSpec[] = [
     command: "copilot",
     id: "copilot",
     installPackage: "@github/copilot",
+    installVersion: "1.0.80",
     label: "GitHub Copilot CLI",
     models: ["auto", "claude-sonnet-4.5", "gpt-5", "gpt-5-mini"],
     streams: true,
@@ -49,6 +62,7 @@ export const HARNESS_SPECS: readonly HarnessSpec[] = [
     command: "codex",
     id: "codex",
     installPackage: "@openai/codex",
+    installVersion: "0.152.1",
     label: "Codex CLI",
     models: ["auto"],
     streams: false,
@@ -60,6 +74,7 @@ export const HARNESS_SPECS: readonly HarnessSpec[] = [
     command: "claude",
     id: "claude",
     installPackage: "@anthropic-ai/claude-code",
+    installVersion: "2.1.258",
     label: "Claude Code",
     models: ["auto"],
     streams: false,
@@ -67,6 +82,15 @@ export const HARNESS_SPECS: readonly HarnessSpec[] = [
     versionArgs: ["--version"],
   },
 ];
+
+/**
+ * The exact `package@version` argument used to install this harness. Every
+ * installation site builds its command from this, so the image, the reported
+ * version, and the install hint can never disagree.
+ */
+export function harnessInstallSpecifier(spec: HarnessSpec): string {
+  return `${spec.installPackage}@${spec.installVersion}`;
+}
 
 export function harnessSpec(id: string): HarnessSpec | null {
   return HARNESS_SPECS.find((spec) => spec.id === id) ?? null;
@@ -85,9 +109,16 @@ export function isRunnableHarness(id: string): id is HarnessId {
   return HARNESS_SPECS.some((spec) => spec.id === id && spec.supported);
 }
 
-export const SUPPORTED_HARNESS_IDS: readonly HarnessId[] = HARNESS_SPECS.filter(
-  (spec) => spec.supported
-).map((spec) => spec.id);
+/**
+ * The specs baked into the container image, in registry order. Deriving the
+ * image from this rather than from a hand-written list means enabling a
+ * harness cannot leave the image behind.
+ */
+export const SUPPORTED_HARNESS_SPECS: readonly HarnessSpec[] =
+  HARNESS_SPECS.filter((spec) => spec.supported);
+
+export const SUPPORTED_HARNESS_IDS: readonly HarnessId[] =
+  SUPPORTED_HARNESS_SPECS.map((spec) => spec.id);
 
 export const UNSUPPORTED_HARNESS_RUN_ERROR = Object.freeze({
   code: "harness_unsupported" as const,
@@ -124,7 +155,7 @@ export function harnessStatus(
 ): HarnessStatus {
   let detail: string;
   if (!probe.installed) {
-    detail = `\`${spec.command}\` was not found on PATH. Install \`${spec.installPackage}\`.`;
+    detail = `\`${spec.command}\` was not found on PATH. Install \`${harnessInstallSpecifier(spec)}\`.`;
   } else if (spec.supported) {
     detail = "Installed and driven through its own CLI sign-in.";
   } else {

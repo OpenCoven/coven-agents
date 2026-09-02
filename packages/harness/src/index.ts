@@ -24,12 +24,14 @@ export {
   HARNESS_SPECS,
   type HarnessSpec,
   harnessAuthHint,
+  harnessInstallSpecifier,
   harnessSpec,
   harnessStatus,
   isHarnessId,
   isRunnableHarness,
   resolveHarnessAuth,
   SUPPORTED_HARNESS_IDS,
+  SUPPORTED_HARNESS_SPECS,
   UNSUPPORTED_HARNESS_RUN_ERROR,
 } from "./registry";
 export {
