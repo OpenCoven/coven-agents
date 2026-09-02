@@ -21,8 +21,8 @@ next-env.d.ts
 tsconfig.tsbuildinfo
 .dev.vars
 .opencoven/
-
 .worktrees/
+.config/opencoven/coven-agents-staging-certify.env*
 
 # Private Beads planning data
 .beads/
@@ -38,5 +38,7 @@ tsconfig.tsbuildinfo
 # already tracked, so the rule above does not hide it today -- gitignore does
 # not apply to tracked files -- but it would be skipped the moment anyone
 # removed and re-added it, which is exactly when nobody is looking.
+
 .env*
+*.env
 !.env.example
