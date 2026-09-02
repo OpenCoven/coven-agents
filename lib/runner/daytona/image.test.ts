@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { DaytonaNotFoundError, SnapshotState } from "@daytona/sdk";
 import {
-  COPILOT_CLI_VERSION,
   createDaytonaBuildLogSanitizer,
   createDaytonaCopilotImage,
   createDaytonaSnapshotDefinition,
@@ -15,6 +14,7 @@ import {
   type DaytonaSnapshotConfiguration,
   type DaytonaSnapshotService,
   daytonaClientConfiguration,
+  daytonaHarnessInstallSpecifiers,
   daytonaSnapshotConfiguration,
   PNPM_VERSION,
   provisionDaytonaSnapshot,
@@ -55,7 +55,7 @@ test("defines the pinned Copilot CLI snapshot image exactly", () => {
     image.dockerfile,
     [
       `FROM ${DAYTONA_COPILOT_IMAGE_BASE}`,
-      `RUN npm install --global pnpm@${PNPM_VERSION} @github/copilot@${COPILOT_CLI_VERSION}`,
+      `RUN npm install --global pnpm@${PNPM_VERSION} ${daytonaHarnessInstallSpecifiers().join(" ")}`,
       `RUN mkdir --parents ${WORKSPACE_DIRECTORY}`,
       `WORKDIR ${WORKSPACE_DIRECTORY}`,
       "",
@@ -65,6 +65,26 @@ test("defines the pinned Copilot CLI snapshot image exactly", () => {
   assert.equal(definition.name, DAYTONA_COPILOT_SNAPSHOT_NAME);
   assert.equal(definition.image.dockerfile, image.dockerfile);
   assert.equal(image.dockerfile.includes("apt-get"), false);
+});
+
+/**
+ * Snapshots are immutable and `provisionDaytonaSnapshot` refuses to recreate
+ * an existing name, so a pin bump that reuses the generation leaves the old
+ * CLI baked into the snapshot while discovery reports the new version. This
+ * pairs both halves in one literal: change either and this fails, and the fix
+ * is to bump the generation and provision a new snapshot.
+ */
+test("pins the harness versions to the snapshot generation", () => {
+  assert.deepEqual(
+    {
+      harnesses: daytonaHarnessInstallSpecifiers(),
+      snapshot: DAYTONA_COPILOT_SNAPSHOT_NAME,
+    },
+    {
+      harnesses: ["@github/copilot@1.0.80"],
+      snapshot: "coven-agents-copilot-1",
+    }
+  );
 });
 
 test("validates Daytona snapshot configuration and passes API URL, key, and target", () => {

@@ -6,7 +6,10 @@ import {
   Image,
   SnapshotState,
 } from "@daytona/sdk";
-import { COPILOT_CLI_VERSION as PINNED_COPILOT_CLI_VERSION } from "../copilot-version";
+import {
+  harnessInstallSpecifier,
+  SUPPORTED_HARNESS_SPECS,
+} from "@opencoven/harness";
 import type { DaytonaSnapshotConfiguration } from "./config";
 
 export {
@@ -17,8 +20,12 @@ export {
 } from "./config";
 
 export const DAYTONA_COPILOT_IMAGE_BASE = "node:22-bookworm-slim";
+/**
+ * Snapshots are immutable and are never recreated under an existing name, so
+ * this generation counter is part of the pin: bumping any harness
+ * `installVersion` without bumping this leaves the old CLI running.
+ */
 export const DAYTONA_COPILOT_SNAPSHOT_NAME = "coven-agents-copilot-1";
-export { COPILOT_CLI_VERSION } from "../copilot-version";
 export const PNPM_VERSION = "10.32.1";
 export const WORKSPACE_DIRECTORY = "/workspace";
 
@@ -101,10 +108,20 @@ export function daytonaClientConfiguration(
   };
 }
 
+/**
+ * The `package@version` arguments for every harness baked into the snapshot,
+ * in registry order. Derived from the registry pins, so the image can never
+ * install a version other than the one harness discovery reports.
+ */
+export function daytonaHarnessInstallSpecifiers(): readonly string[] {
+  return SUPPORTED_HARNESS_SPECS.map((spec) => harnessInstallSpecifier(spec));
+}
+
 export function createDaytonaCopilotImage(): Image {
+  const harnesses = daytonaHarnessInstallSpecifiers().join(" ");
   return Image.base(DAYTONA_COPILOT_IMAGE_BASE)
     .runCommands(
-      `npm install --global pnpm@${PNPM_VERSION} @github/copilot@${PINNED_COPILOT_CLI_VERSION}`,
+      `npm install --global pnpm@${PNPM_VERSION} ${harnesses}`,
       `mkdir --parents ${WORKSPACE_DIRECTORY}`
     )
     .workdir(WORKSPACE_DIRECTORY);
