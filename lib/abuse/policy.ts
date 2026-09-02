@@ -29,6 +29,7 @@ const CREDENTIAL_DEVICE_POLL = rateClass(90, 60, 1200, 3600);
 // Stripe retries and renewal batches can legitimately share an egress IP.
 // This route still has its own IP-only budget and a bounded 256 KiB reader.
 const WEBHOOK_WRITE = rateClass(600, 60, 10_000, 3600);
+const GITHUB_TOOL_IP = rateClass(600, 60, 10_000, 3600);
 
 const POLICIES = Object.freeze({
   analytics_read: closedPolicy(["ip", "user"], 0, EXPENSIVE_READ),
@@ -61,6 +62,15 @@ const POLICIES = Object.freeze({
   document_delete: closedPolicy(["ip", "user"], 0, DESTRUCTIVE_WRITE),
   document_read: closedPolicy(["ip", "user"], 0, STANDARD_READ),
   document_write: closedPolicy(["ip", "user"], 262_144, STANDARD_WRITE),
+  github_callback: closedPolicy(["ip", "user"], 0, rateClass(10, 60, 40, 3600)),
+  github_connection_delete: closedPolicy(
+    ["ip", "tenant"],
+    0,
+    DESTRUCTIVE_WRITE
+  ),
+  github_connection_read: closedPolicy(["ip", "user"], 0, SENSITIVE_READ),
+  github_install: closedPolicy(["ip", "user"], 0, rateClass(2, 300, 5, 3600)),
+  github_tool: closedPolicy(["ip"], 524_288, GITHUB_TOOL_IP),
   history_delete: closedPolicy(["ip", "user"], 0, DESTRUCTIVE_WRITE),
   history_read: closedPolicy(["ip", "user"], 0, STANDARD_READ),
   internal_credential: closedPolicy(

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { daytonaSandboxLabels } from "./daytona/names";
 import type { DaytonaSandboxInventoryItem } from "./daytona/resource-inventory";
 import { daytonaPersistentResourceLifecycle } from "./daytona/resource-lifecycle";
 import { hermeticSandboxId } from "./hermetic/executor";
@@ -82,6 +83,7 @@ function run(): RunnerRunRecord {
     executionPermission: "unrestricted",
     executionProvenance: null,
     fileEvidence: [],
+    githubBrokerPolicy: null,
     id: runId,
     logCursor: 0,
     operationId: "00000000-0000-4000-8000-000000000005",
@@ -91,6 +93,7 @@ function run(): RunnerRunRecord {
     startedAt: null,
     status: "queued",
     task: "task",
+    teamStepId: null,
     tenant: principal.tenant,
     version: 1,
   };
@@ -160,6 +163,11 @@ resourceLifecycleContract("Daytona-shaped fake", () => {
   const sandbox = {
     delete: () => Promise.resolve(),
     id: "daytona-sandbox",
+    labels: {
+      ...daytonaSandboxLabels(principal.tenant, agentId),
+      configurationId: "test-configuration",
+      sandboxGeneration: "1",
+    },
     state: "started",
   };
 
@@ -168,6 +176,7 @@ resourceLifecycleContract("Daytona-shaped fake", () => {
       autoArchiveInterval: 10_080,
       autoDeleteInterval: -1,
       autoStopInterval: 15,
+      configurationId: "test-configuration",
       resources: { cpu: 2, disk: 20, memory: 4 },
       snapshotName: "coven-agents-copilot-1",
       target: "us",

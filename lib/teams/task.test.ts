@@ -103,9 +103,13 @@ test("states GitHub capability and approval scope for all modes", () => {
 
   assert.match(none, /Scope: none/u);
   assert.match(none, /Approval: no GitHub operation is approved/u);
+  assert.doesNotMatch(none, /CovenGitHub/u);
   assert.match(read, /Scope: read-only/u);
   assert.match(read, /Approval: GitHub reads are approved; writes are not/u);
+  assert.match(read, /CovenGitHub/u);
+  assert.match(read, /operationId/u);
   assert.match(write, /Scope: read and write/u);
+  assert.match(write, /CovenGitHub/u);
   assert.match(
     write,
     /GitHub writes require explicit actor-attributed approval before execution/u

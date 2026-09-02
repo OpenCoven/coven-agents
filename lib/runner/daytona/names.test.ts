@@ -4,6 +4,7 @@ import {
   daytonaProbeSessionName,
   daytonaRunCredentialPath,
   daytonaRunSessionName,
+  daytonaRunWorkingDirectory,
   daytonaSandboxLabels,
   daytonaSandboxName,
   daytonaSessionName,
@@ -35,12 +36,24 @@ test("Daytona process names are deterministic, legal, and attempt-scoped", () =>
     daytonaRunCredentialPath(runId, attemptA),
     `/tmp/${sessionA}.credential`
   );
+  assert.equal(
+    daytonaRunWorkingDirectory(runId, attemptA),
+    `/run/coven-agents/${sessionA}/work`
+  );
   assert.throws(
     () => daytonaRunSessionName("../unsafe", attemptA),
     /UUID run id/u
   );
   assert.throws(
     () => daytonaRunSessionName(runId, "../unsafe"),
+    /UUID attempt id/u
+  );
+  assert.throws(
+    () => daytonaRunSessionName(runId.toUpperCase(), attemptA),
+    /UUID run id/u
+  );
+  assert.throws(
+    () => daytonaRunSessionName(runId, attemptA.toUpperCase()),
     /UUID attempt id/u
   );
 });

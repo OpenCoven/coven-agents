@@ -339,8 +339,10 @@ export function parseHarnessLog(
 }
 
 export function buildHarnessCommand(input: {
+  attemptDirectory?: string;
   configDirectory?: string;
   executionPermission?: HarnessExecutionPermission;
+  githubTool?: boolean;
   harness: HarnessId;
   instructions: string;
   model: string;
@@ -349,8 +351,10 @@ export function buildHarnessCommand(input: {
 }): string {
   return toShellCommand(
     buildInvocation({
+      attemptDir: input.attemptDirectory,
       configDir: input.configDirectory,
       cwd: input.workspace,
+      githubTool: input.githubTool ?? false,
       harness: input.harness,
       instructions: input.instructions,
       model: input.model,

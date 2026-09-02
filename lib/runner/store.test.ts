@@ -1,3 +1,4 @@
+// biome-ignore-all lint/suspicious/noShadow: Isolated nested fixtures intentionally reuse conventional record names.
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -95,6 +96,7 @@ function run(overrides: Partial<RunnerRunRecord> = {}): RunnerRunRecord {
     executionPermission: "unrestricted",
     executionProvenance: null,
     fileEvidence: [],
+    githubBrokerPolicy: null,
     id: "00000000-0000-4000-8000-000000000002",
     logCursor: 3,
     operationId: "00000000-0000-4000-8000-000000000003",
@@ -104,6 +106,7 @@ function run(overrides: Partial<RunnerRunRecord> = {}): RunnerRunRecord {
     startedAt: null,
     status: "queued",
     task: "test task",
+    teamStepId: null,
     tenant: "tenant_a",
     version: 7,
     ...overrides,
@@ -626,6 +629,150 @@ test("duplicate starts return the immutable matching request", async () => {
   assert.equal(existing.authVersion, 4);
 });
 
+test("broker policy duplicate equality ignores JSON object key order but preserves array order", async () => {
+  const teamStepId = "10000000-0000-4000-8000-000000000001";
+  const repositories = [
+    {
+      accountId: "123",
+      accountLogin: "OpenCoven",
+      accountType: "Organization" as const,
+      appIssuesPermission: "write" as const,
+      appOrganizationProjectsPermission: "write" as const,
+      appPullRequestsPermission: "write" as const,
+      connectionId: "10000000-0000-4000-8000-000000000002",
+      githubUserId: "112233",
+      githubUserLogin: "BunsDev",
+      installationId: "456",
+      repository: "opencoven/a-repository",
+      repositoryId: "789",
+      repositoryName: "a-repository",
+      repositoryNodeId: "R_a",
+      repositoryOwner: "OpenCoven",
+      userPermissionCeiling: "write" as const,
+      userPermissionCurrent: "write" as const,
+      userProjectManagementCeiling: false,
+      userProjectManagementCurrent: false,
+    },
+    {
+      accountId: "123",
+      accountLogin: "OpenCoven",
+      accountType: "Organization" as const,
+      appIssuesPermission: "write" as const,
+      appOrganizationProjectsPermission: "write" as const,
+      appPullRequestsPermission: "write" as const,
+      connectionId: "10000000-0000-4000-8000-000000000003",
+      githubUserId: "112233",
+      githubUserLogin: "BunsDev",
+      installationId: "456",
+      repository: "opencoven/z-repository",
+      repositoryId: "790",
+      repositoryName: "z-repository",
+      repositoryNodeId: "R_z",
+      repositoryOwner: "OpenCoven",
+      userPermissionCeiling: "write" as const,
+      userPermissionCurrent: "write" as const,
+      userProjectManagementCeiling: false,
+      userProjectManagementCurrent: false,
+    },
+  ];
+  const policy = {
+    actorUserId: "9c858901-8a57-4791-81fe-4c455b099bc9",
+    allowedCapabilities: ["github.issues.read" as const],
+    approvedCapabilities: [],
+    authVersion: 8,
+    connectionGeneration: 3,
+    declaredCapabilities: ["github.issues.read" as const],
+    maxCallCount: 32,
+    repositories,
+    teamRunId: "10000000-0000-4000-8000-000000000004",
+    teamStepId,
+    version: 1 as const,
+  };
+  const reorderedFromJsonb = {
+    actorUserId: policy.actorUserId,
+    allowedCapabilities: ["github.issues.read" as const],
+    approvedCapabilities: [],
+    authVersion: 8,
+    connectionGeneration: 3,
+    declaredCapabilities: ["github.issues.read" as const],
+    maxCallCount: 32,
+    repositories: repositories.map((repository) => ({
+      accountId: repository.accountId,
+      accountLogin: repository.accountLogin,
+      accountType: repository.accountType,
+      appIssuesPermission: repository.appIssuesPermission,
+      appOrganizationProjectsPermission:
+        repository.appOrganizationProjectsPermission,
+      appPullRequestsPermission: repository.appPullRequestsPermission,
+      connectionId: repository.connectionId,
+      githubUserId: repository.githubUserId,
+      githubUserLogin: repository.githubUserLogin,
+      installationId: repository.installationId,
+      repository: repository.repository,
+      repositoryId: repository.repositoryId,
+      repositoryName: repository.repositoryName,
+      repositoryNodeId: repository.repositoryNodeId,
+      repositoryOwner: repository.repositoryOwner,
+      userPermissionCeiling: repository.userPermissionCeiling,
+      userPermissionCurrent: repository.userPermissionCurrent,
+      userProjectManagementCeiling: repository.userProjectManagementCeiling,
+      userProjectManagementCurrent: repository.userProjectManagementCurrent,
+    })),
+    teamRunId: policy.teamRunId,
+    teamStepId,
+    version: 1 as const,
+  };
+  const existing = run({
+    authVersion: 8,
+    executionPermission: "github_only",
+    githubBrokerPolicy: reorderedFromJsonb,
+    teamStepId,
+  });
+  const start = async (githubBrokerPolicy: typeof policy) => {
+    const fixture = scripted(
+      [
+        agent({
+          id: existing.agentId,
+          sandboxLifecycle: "ready",
+          sandboxTrust: "restricted",
+        }),
+      ],
+      [existing]
+    );
+    return await fixture.store.startRun(principal, {
+      agentId: existing.agentId,
+      authVersion: 8,
+      executionPermission: "github_only",
+      githubBrokerPolicy,
+      id: existing.id,
+      operationId: existing.operationId,
+      requestHash: existing.requestHash,
+      task: existing.task,
+      teamStepId,
+    });
+  };
+
+  assert.equal((await start(policy)).kind, "duplicate");
+  assert.equal(
+    (
+      await start({
+        ...policy,
+        connectionGeneration: policy.connectionGeneration + 1,
+      })
+    ).kind,
+    "conflict"
+  );
+  assert.equal(
+    (
+      await start({
+        ...policy,
+        repositories: [...policy.repositories].reverse(),
+      })
+    ).kind,
+    "conflict"
+  );
+});
+
 test("duplicate starts conflict when execution permission differs", async () => {
   const existing = run({ executionPermission: "workspace_read" });
   const { store } = scripted(
@@ -830,6 +977,113 @@ test("new restricted runs persist the exact execution permission", async () => {
     operationId: inserted.operationId,
     requestHash: inserted.requestHash,
     task: inserted.task,
+  });
+
+  test("team child runs persist exact step linkage and immutable broker policy", async () => {
+    const teamStepId = "10000000-0000-4000-8000-000000000001";
+    const brokerPolicy = {
+      actorUserId: "9c858901-8a57-4791-81fe-4c455b099bc9",
+      allowedCapabilities: ["github.issues.read" as const],
+      approvedCapabilities: [],
+      authVersion: 8,
+      connectionGeneration: 3,
+      declaredCapabilities: ["github.issues.read" as const],
+      maxCallCount: 32,
+      repositories: [
+        {
+          accountId: "123",
+          accountLogin: "OpenCoven",
+          accountType: "Organization" as const,
+          appIssuesPermission: "write" as const,
+          appOrganizationProjectsPermission: "write" as const,
+          appPullRequestsPermission: "write" as const,
+          connectionId: "10000000-0000-4000-8000-000000000002",
+          githubUserId: "112233",
+          githubUserLogin: "BunsDev",
+          installationId: "456",
+          repository: "opencoven/coven-agents",
+          repositoryId: "789",
+          repositoryName: "coven-agents",
+          repositoryNodeId: "R_kgDOExample",
+          repositoryOwner: "OpenCoven",
+          userPermissionCeiling: "write" as const,
+          userPermissionCurrent: "write" as const,
+          userProjectManagementCeiling: false,
+          userProjectManagementCurrent: false,
+        },
+      ],
+      teamRunId: "10000000-0000-4000-8000-000000000003",
+      teamStepId,
+      version: 1 as const,
+    };
+    const inserted = run({
+      authVersion: 8,
+      executionPermission: "github_only",
+      githubBrokerPolicy: brokerPolicy,
+      teamStepId,
+    });
+    const accepted = {
+      createdAt: inserted.createdAt,
+      event: {},
+      eventId: 1,
+      runId: inserted.id,
+    };
+    const creation = scripted(
+      [agent({ id: inserted.agentId, sandboxLifecycle: "ready" })],
+      [],
+      [],
+      [inserted],
+      [accepted],
+      [{ ...inserted, logCursor: 1, version: inserted.version + 1 }]
+    );
+
+    const result = await creation.store.startRun(principal, {
+      agentId: inserted.agentId,
+      authVersion: 8,
+      executionPermission: "github_only",
+      githubBrokerPolicy: brokerPolicy,
+      id: inserted.id,
+      operationId: inserted.operationId,
+      requestHash: inserted.requestHash,
+      task: inserted.task,
+      teamStepId,
+    });
+
+    assert.equal(result.kind, "created");
+    const insert = creation.statements.find(
+      (statement) => statement.name === "insert-run"
+    );
+    assert.equal(insert?.args.teamStepId, teamStepId);
+    assert.deepEqual(insert?.args.githubBrokerPolicy, brokerPolicy);
+    assert.match(
+      queryText(insert as RunnerStoreStatement),
+      /"teamStepId"[\s\S]*"githubBrokerPolicy"/u
+    );
+
+    const changedPolicy = {
+      ...brokerPolicy,
+      connectionGeneration: 4,
+    };
+    const duplicate = scripted(
+      [agent({ id: inserted.agentId, sandboxLifecycle: "ready" })],
+      [inserted]
+    );
+    assert.equal(
+      (
+        await duplicate.store.startRun(principal, {
+          agentId: inserted.agentId,
+          authVersion: 8,
+          executionPermission: "github_only",
+          githubBrokerPolicy: changedPolicy,
+          id: inserted.id,
+          operationId: inserted.operationId,
+          requestHash: inserted.requestHash,
+          task: inserted.task,
+          teamStepId,
+        })
+      ).kind,
+      "conflict"
+    );
   });
 
   assert.equal(result.kind, "created");
@@ -3738,6 +3992,73 @@ test("sandbox generation reservation locks and fences the stored ID", async () =
   assert.match(query, /"sandboxGeneration" = "sandboxGeneration" \+ 1/u);
   assert.match(query, /"sandboxLifecycle" = 'provisioning'/u);
   assert.match(query, /"daytonaSandboxId" IS NOT DISTINCT FROM/u);
+});
+
+test("stale sandbox cleanup claims resetting before provider deletion and finishes the exact new generation", async () => {
+  const current = agent({
+    sandboxGeneration: 4,
+    sandboxLifecycle: "provisioning_ambiguous",
+    version: 8,
+  });
+  const resetting = agent({
+    ...current,
+    sandboxGeneration: 5,
+    sandboxLifecycle: "resetting",
+    version: 9,
+  });
+  const cleared = agent({
+    ...resetting,
+    sandboxLifecycle: "unprovisioned",
+    version: 10,
+  });
+  const begin = scripted([resetting]);
+  const finish = scripted([cleared]);
+
+  assert.equal(
+    (
+      await begin.store.beginDaytonaSandboxReset(principal, {
+        agentId: current.id,
+        expectedGeneration: current.sandboxGeneration,
+        expectedVersion: current.version,
+      })
+    ).kind,
+    "updated"
+  );
+  assert.equal(
+    (
+      await finish.store.finishDaytonaSandboxReset(principal, {
+        agentId: resetting.id,
+        expectedGeneration: resetting.sandboxGeneration,
+        expectedVersion: resetting.version,
+      })
+    ).kind,
+    "updated"
+  );
+  const beginQuery = queryText(begin.statements[0] as RunnerStoreStatement);
+  assert.match(beginQuery, /"sandboxGeneration" = "sandboxGeneration" \+ 1/u);
+  assert.match(beginQuery, /"sandboxLifecycle" = 'resetting'/u);
+  assert.match(beginQuery, /'provisioning_ambiguous'/u);
+  assert.match(beginQuery, /"tenant" = \$/u);
+  const finishQuery = queryText(finish.statements[0] as RunnerStoreStatement);
+  assert.match(finishQuery, /"sandboxLifecycle" = 'unprovisioned'/u);
+  assert.match(finishQuery, /"sandboxLifecycle" = 'resetting'/u);
+  assert.match(finishQuery, /"sandboxGeneration" = \$/u);
+
+  const recovery = scripted([resetting]);
+  assert.equal(
+    (
+      await recovery.store.beginDaytonaSandboxResetForRecovery(operator, {
+        agentId: current.id,
+        expectedGeneration: current.sandboxGeneration,
+        expectedVersion: current.version,
+      })
+    ).kind,
+    "updated"
+  );
+  assert.match(
+    queryText(recovery.statements[0] as RunnerStoreStatement),
+    /"sandboxLifecycle" = 'resetting'/u
+  );
 });
 
 test("warm and decommission transitions retain generation and version fences", async () => {

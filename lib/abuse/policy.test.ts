@@ -32,6 +32,11 @@ const EXPECTED_ROUTES = [
   "credential_delete",
   "credential_device_start",
   "credential_device_poll",
+  "github_install",
+  "github_callback",
+  "github_connection_read",
+  "github_connection_delete",
+  "github_tool",
   "usage_read",
   "analytics_read",
   "model_list",
@@ -85,6 +90,18 @@ const EXPECTED_POLICIES = {
   document_delete: expectedPolicy(["ip", "user"], 0, 5, 60, 20, 3600),
   document_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
   document_write: expectedPolicy(["ip", "user"], 262_144, 20, 60, 100, 3600),
+  github_callback: expectedPolicy(["ip", "user"], 0, 10, 60, 40, 3600),
+  github_connection_delete: expectedPolicy(
+    ["ip", "tenant"],
+    0,
+    5,
+    60,
+    20,
+    3600
+  ),
+  github_connection_read: expectedPolicy(["ip", "user"], 0, 30, 60, 200, 3600),
+  github_install: expectedPolicy(["ip", "user"], 0, 2, 300, 5, 3600),
+  github_tool: expectedPolicy(["ip"], 524_288, 600, 60, 10_000, 3600),
   history_delete: expectedPolicy(["ip", "user"], 0, 5, 60, 20, 3600),
   history_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
   internal_credential: expectedPolicy(["ip", "tenant"], 8192, 10, 60, 60, 3600),
@@ -143,6 +160,13 @@ test("Stripe webhook admission is IP-only and preserves the registered budget", 
   assert.deepEqual(
     abusePolicyFor("stripe_webhook"),
     expectedPolicy(["ip"], 262_144, 600, 60, 10_000, 3600)
+  );
+});
+
+test("the internal GitHub tool uses a high-headroom IP-only pre-database budget", () => {
+  assert.deepEqual(
+    abusePolicyFor("github_tool"),
+    expectedPolicy(["ip"], 524_288, 600, 60, 10_000, 3600)
   );
 });
 

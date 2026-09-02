@@ -167,6 +167,22 @@ test("production reconciliation wires durable team projection and claim hooks", 
   assert.match(runtime, /dispatchClaim/u);
 });
 
+test("production dispatch issues hash-only GitHub step capabilities from persisted broker policy", () => {
+  const composition = readFileSync(
+    new URL("./daytona/composition.ts", import.meta.url),
+    "utf8"
+  );
+  assert.match(composition, /issueGitHubStepCapability/u);
+  assert.match(composition, /createGitHubGatewayStore/u);
+  assert.match(composition, /githubBrokerPolicy/u);
+  assert.match(composition, /revokeCapability/u);
+  assert.match(composition, /api\/internal\/github-tool/u);
+  assert.doesNotMatch(
+    composition,
+    /COPILOT_GITHUB_TOKEN.*github|github.*COPILOT_GITHUB_TOKEN/iu
+  );
+});
+
 test("concurrent leased reconciliation skips before reconciliation work", async () => {
   const { runLeasedReconciliation } = await import("./runtime");
   let activeLease: RunnerReconciliationLease | null = null;

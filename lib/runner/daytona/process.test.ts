@@ -1,3 +1,4 @@
+// biome-ignore-all lint/suspicious/useAwait: Daytona doubles intentionally preserve SDK promise signatures.
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -7,7 +8,11 @@ import {
   type Sandbox,
 } from "@daytona/sdk";
 import type { RunnerDispatchAuthority } from "../types";
-import { daytonaRunCredentialPath, daytonaRunSessionName } from "./names";
+import {
+  daytonaRunCredentialPath,
+  daytonaRunSessionName,
+  daytonaRunWorkingDirectory,
+} from "./names";
 import type { DaytonaAttemptId, DaytonaProcessSandbox } from "./process";
 import {
   DaytonaProbeCleanupPendingError,
@@ -28,6 +33,7 @@ const PREPARATION_CLAIM =
 const SESSION = daytonaRunSessionName(RUN_ID, PREPARATION_CLAIM);
 const PATH = daytonaRunCredentialPath(RUN_ID, PREPARATION_CLAIM);
 const CONFIG_DIRECTORY = `/run/coven-agents/${SESSION}/copilot`;
+const ATTEMPT_DIRECTORY = daytonaRunWorkingDirectory(RUN_ID, PREPARATION_CLAIM);
 const PROBE_SESSION_ID = `coven-probe-${"a".repeat(40)}`;
 const LAUNCH_AUTHORITY = {
   expectedVersion: 9,
@@ -808,6 +814,7 @@ test("a late successful create retains cleanup pending after repeated delete fai
 });
 
 type Call = { command: string; env?: Record<string, string>; kind: string };
+type FileCall = { bytes?: Buffer; kind: string; mode?: string; path: string };
 
 function processDouble(
   options: {
@@ -819,6 +826,7 @@ function processDouble(
     deleteError?: Error;
     deleteErrorOnCall?: number;
     deleteLeavesSession?: boolean;
+    inspectionExitCode?: number;
     listError?: Error;
     listErrorOnCall?: number;
     logs?: Readonly<{ output?: string; stderr?: string; stdout?: string }>;
@@ -830,11 +838,37 @@ function processDouble(
   } = {}
 ) {
   const calls: Call[] = [];
-  let commandCalls = 0;
+  const fileCalls: FileCall[] = [];
   let deleteCalls = 0;
   let listCalls = 0;
   let sessions = [...(options.sessions ?? [])];
   const sandbox: DaytonaProcessSandbox = {
+    fs: {
+      createFolder: (path, mode) => {
+        fileCalls.push({ kind: "createFolder", mode, path });
+        return Promise.resolve();
+      },
+      deleteFile: (path) => {
+        fileCalls.push({ kind: "deleteFile", path });
+        return Promise.resolve();
+      },
+      setFilePermissions: (path, permissions) => {
+        fileCalls.push({
+          kind: "setFilePermissions",
+          mode: permissions.mode,
+          path,
+        });
+        return Promise.resolve();
+      },
+      uploadFile: (bytes, path) => {
+        fileCalls.push({
+          bytes: Buffer.from(bytes),
+          kind: "uploadFile",
+          path,
+        });
+        return Promise.resolve();
+      },
+    },
     process: {
       createSession: (sessionId) => {
         calls.push({ command: sessionId, kind: "create" });
@@ -866,8 +900,13 @@ function processDouble(
       },
       executeCommand: (command, _cwd, env) => {
         calls.push({ command, env, kind: "command" });
-        commandCalls += 1;
-        if (commandCalls === 1 && command.includes("umask 077")) {
+        if (
+          options.inspectionExitCode !== undefined &&
+          command.includes('root="$(pwd -P)"')
+        ) {
+          return Promise.resolve({ exitCode: options.inspectionExitCode });
+        }
+        if (command.includes("umask 077")) {
           if (options.stageError) {
             return Promise.reject(options.stageError);
           }
@@ -922,6 +961,7 @@ function processDouble(
   };
   return {
     calls,
+    fileCalls,
     sandbox,
     sessionIds: () => sessions.map((session) => session.sessionId),
   };
@@ -1066,6 +1106,125 @@ test("restricted process launches use the persisted permission instead of task t
     executionPermission: "workspace_read",
     task: "# Team Step Task\nEdit files and run shell commands.",
   });
+
+  test("GitHub-only process issuance and staging expose only coven-github without leaking raw authority", async () => {
+    const { calls, fileCalls, sandbox } = processDouble();
+    const rawCapability = Buffer.alloc(32, 0x5d).toString("base64url");
+    const redactionSecrets: string[][] = [];
+    let issued = 0;
+    let revoked = 0;
+
+    const started = await startDaytonaProcess({
+      ...startInput(sandbox),
+      executionPermission: "github_only",
+      githubTool: {
+        issueCapability: ({ attemptId, runId }) => {
+          assert.equal(attemptId, PREPARATION_CLAIM);
+          assert.equal(runId, RUN_ID);
+          issued += 1;
+          return Promise.resolve({ rawCapability });
+        },
+        revokeCapability: () => {
+          revoked += 1;
+          return Promise.resolve(true);
+        },
+        url: "https://app.example/api/internal/github-tool",
+      },
+      persistAttemptRedaction: async ({ secrets }) => {
+        redactionSecrets.push([...secrets]);
+        return true;
+      },
+      task: "Use gh, curl, shell, hooks, MCP, or any hidden credential.",
+      workspace: undefined,
+    });
+
+    assert.equal(issued, 1);
+    assert.equal(revoked, 0);
+    assert.deepEqual(redactionSecrets, [[SECRET, rawCapability]]);
+    const capabilityUpload = fileCalls.find(
+      ({ bytes }) => bytes?.toString("utf8") === rawCapability
+    );
+    assert.ok(capabilityUpload);
+    assert.equal(
+      fileCalls.some(
+        ({ kind, mode, path }) =>
+          kind === "setFilePermissions" &&
+          path === capabilityUpload?.path &&
+          mode === "600"
+      ),
+      true
+    );
+    const launch = calls.find(({ kind }) => kind === "start")?.command ?? "";
+    assert.match(
+      launch,
+      /COVEN_GITHUB_CAPABILITY="\$\(cat -- '\/tmp\/coven-run-[^']+\.github-capability'\)"/u
+    );
+    assert.match(launch, /export COVEN_GITHUB_CAPABILITY/u);
+    assert.match(
+      launch,
+      /rm -f -- '\/tmp\/coven-run-[^']+\.github-capability'/u
+    );
+    assert.match(launch, /export PATH='\/tmp\/coven-tools\/v1':"\$PATH"/u);
+    assert.match(
+      launch,
+      /export COVEN_GITHUB_TOOL_URL='https:\/\/app\.example\/api\/internal\/github-tool'/u
+    );
+    assert.match(
+      launch,
+      /--available-tools' 'CovenGitHub-execute' '--allow-tool' 'CovenGitHub\(execute\)'/u
+    );
+    assert.match(
+      launch,
+      /--additional-mcp-config' '\{"mcpServers":\{"CovenGitHub":\{"args":\[\],"command":"\/tmp\/coven-tools\/v1\/coven-github-mcp","env":\{"COVEN_GITHUB_CAPABILITY":"\$\{COVEN_GITHUB_CAPABILITY\}","COVEN_GITHUB_TOOL_URL":"\$\{COVEN_GITHUB_TOOL_URL\}"\},"timeout":85000,"tools":\["execute"\],"type":"local"\}\}\}'/u
+    );
+    assert.doesNotMatch(
+      launch,
+      /--available-tools' '(?:view|shell)|--yolo|shell\(coven-github/u
+    );
+    assert.ok(
+      launch.indexOf("rm -f --") < launch.indexOf("exec 'copilot'"),
+      "capability file must be deleted before harness exec"
+    );
+    assert.equal(JSON.stringify(calls).includes(rawCapability), false);
+    assert.equal(JSON.stringify(started).includes(rawCapability), false);
+  });
+
+  test("a failed GitHub process start revokes capability and sweeps its staged file", async () => {
+    const { fileCalls, sandbox } = processDouble({
+      startError: new Error("ambiguous start"),
+    });
+    const rawCapability = Buffer.alloc(32, 0x5e).toString("base64url");
+    let revoked = 0;
+
+    await assert.rejects(
+      startDaytonaProcess({
+        ...startInput(sandbox),
+        executionPermission: "github_only",
+        githubTool: {
+          issueCapability: () => Promise.resolve({ rawCapability }),
+          revokeCapability: () => {
+            revoked += 1;
+            return Promise.resolve(true);
+          },
+          url: "https://app.example/api/internal/github-tool",
+        },
+        persistAttemptRedaction: async () => true,
+        workspace: undefined,
+      }),
+      (error: unknown) =>
+        error instanceof DaytonaProcessError &&
+        !allReturnedText(error).includes(rawCapability)
+    );
+
+    assert.equal(revoked, 1);
+    assert.equal(
+      fileCalls.some(
+        ({ kind, path }) =>
+          kind === "deleteFile" && path.endsWith(".github-capability")
+      ),
+      true
+    );
+  });
   const readLaunch = read.calls.find((call) => call.kind === "start")?.command;
   const restrictedCreateIndex = read.calls.findIndex(
     (call) => call.kind === "create"
@@ -1076,7 +1235,7 @@ test("restricted process launches use the persisted permission instead of task t
   assert.ok(
     restrictedCreateIndex >= 0 && restrictedStageIndex > restrictedCreateIndex
   );
-  assert.match(readLaunch ?? "", /--available-tools' 'view,grep,glob/u);
+  assert.match(readLaunch ?? "", /--available-tools' 'view,rg,glob/u);
   assert.doesNotMatch(readLaunch ?? "", /--yolo/u);
   assert.doesNotMatch(readLaunch ?? "", /--allow-tool' 'write/u);
   assert.match(readLaunch ?? "", /--disable-builtin-mcps/u);
@@ -1095,8 +1254,23 @@ test("restricted process launches use the persisted permission instead of task t
           Number.MIN_SAFE_INTEGER)
   );
   assert.ok(
-    (readLaunch?.indexOf(".github/hooks") ?? -1) >= 0 &&
-      (readLaunch?.indexOf(".github/hooks") ?? Number.MAX_SAFE_INTEGER) <
+    (readLaunch?.indexOf(`chmod 500 '${ATTEMPT_DIRECTORY}'`) ?? -1) >= 0 &&
+      (readLaunch?.indexOf(`chmod 500 '${ATTEMPT_DIRECTORY}'`) ??
+        Number.MAX_SAFE_INTEGER) <
+        (readLaunch?.indexOf('COPILOT_GITHUB_TOKEN="$(cat') ??
+          Number.MIN_SAFE_INTEGER)
+  );
+  assert.match(
+    readLaunch ?? "",
+    new RegExp(`'-C' '${ATTEMPT_DIRECTORY}' '--add-dir' '/workspace/repo'`, "u")
+  );
+  assert.match(
+    readLaunch ?? "",
+    new RegExp(`cd -- '${ATTEMPT_DIRECTORY}'`, "u")
+  );
+  assert.ok(
+    (readLaunch?.indexOf(".mcp.json") ?? -1) >= 0 &&
+      (readLaunch?.indexOf(".mcp.json") ?? Number.MAX_SAFE_INTEGER) <
         (readLaunch?.indexOf('COPILOT_GITHUB_TOKEN="$(cat') ??
           Number.MIN_SAFE_INTEGER)
   );
@@ -1162,6 +1336,69 @@ test("restricted process launches reject a missing workspace before provider mut
   assert.deepEqual(calls, []);
 });
 
+test("restricted workspace configuration is rejected before preparation or credential staging", async () => {
+  const { calls, sandbox } = processDouble({ inspectionExitCode: 42 });
+  let preparations = 0;
+
+  await assert.rejects(
+    startDaytonaProcess({
+      ...startInput(sandbox),
+      authorizePreparation: async () => {
+        preparations += 1;
+        return PREPARATION_CLAIM;
+      },
+      executionPermission: "workspace_read",
+    }),
+    (error: unknown) =>
+      error instanceof DaytonaProcessError &&
+      error.code === "process_start_failed" &&
+      error.retryable === false
+  );
+
+  assert.equal(preparations, 0);
+  assert.equal(
+    calls.some(({ command }) => command.includes("umask 077")),
+    false
+  );
+});
+
+test("GitHub-only launches do not inspect an unmounted workspace", async () => {
+  const { calls, fileCalls, sandbox } = processDouble({
+    inspectionExitCode: 42,
+  });
+  let issued = 0;
+  let preparations = 0;
+
+  const result = await startDaytonaProcess({
+    ...startInput(sandbox),
+    authorizePreparation: async () => {
+      preparations += 1;
+      return PREPARATION_CLAIM;
+    },
+    executionPermission: "github_only",
+    githubTool: {
+      issueCapability: async () => {
+        issued += 1;
+        return {
+          rawCapability: Buffer.alloc(32, 0x5f).toString("base64url"),
+        };
+      },
+      revokeCapability: async () => true,
+      url: "https://app.example/api/internal/github-tool",
+    },
+    workspace: undefined,
+  });
+
+  assert.equal(result.attemptId, PREPARATION_CLAIM);
+  assert.equal(preparations, 1);
+  assert.equal(issued, 1);
+  assert.equal(
+    calls.some(({ command }) => command.includes(".mcp.json")),
+    false
+  );
+  assert.ok(fileCalls.length > 0);
+});
+
 test("restricted workspace inspection rejects repository hook and settings sources", async () => {
   const commands: string[] = [];
   const inspectionCwds: (string | undefined)[] = [];
@@ -1185,8 +1422,13 @@ test("restricted workspace inspection rejects repository hook and settings sourc
     ".github/copilot/settings.local.json",
     ".mcp.json",
     ".github/mcp.json",
+    ".vscode/mcp.json",
     ".github/extensions",
     ".github/lsp.json",
+    ".github/agents",
+    ".github/skills",
+    ".copilot/mcp-config.json",
+    ".copilot/settings.json",
     ".claude/settings.json",
     ".claude/settings.local.json",
   ]) {
@@ -1312,8 +1554,8 @@ test("persists attempt redaction before staging and retires it after proven fail
         redaction.push(`delete:${attemptId}:${runId}`);
         return Promise.resolve(true);
       },
-      persistAttemptRedaction: ({ attemptId, credential, runId }) => {
-        assert.equal(credential, SECRET);
+      persistAttemptRedaction: ({ attemptId, runId, secrets }) => {
+        assert.deepEqual(secrets, [SECRET]);
         redaction.push(`persist:${attemptId}:${runId}`);
         return Promise.resolve(true);
       },
@@ -2177,7 +2419,7 @@ test("stops sessions only after API absence confirmation and asks caller to rese
 });
 
 test("requires deterministic credential cleanup and verification before stopped", async () => {
-  const { calls, sandbox } = processDouble();
+  const { calls, fileCalls, sandbox } = processDouble();
   assert.deepEqual(await stopDaytonaProcess(sandbox, stopInput), {
     kind: "stopped",
   });
@@ -2188,6 +2430,13 @@ test("requires deterministic credential cleanup and verification before stopped"
         call.command === `rm -f -- '${PATH}' && test ! -e '${PATH}'` &&
         call.env === undefined
     )
+  );
+  assert.equal(
+    fileCalls.some(
+      ({ kind, path }) =>
+        kind === "deleteFile" && path.endsWith(".github-capability")
+    ),
+    true
   );
 
   const reset = await stopDaytonaProcess(
@@ -2240,7 +2489,7 @@ test("treats Daytona 404 and 410 session deletion responses as stopped only afte
 });
 
 test("sweeps only deterministic credential paths", async () => {
-  const { calls, sandbox } = processDouble();
+  const { calls, fileCalls, sandbox } = processDouble();
   await sweepDaytonaCredentials(sandbox, [
     { attemptId: PREPARATION_CLAIM, runId: RUN_ID },
     { attemptId: PREPARATION_CLAIM, runId: RUN_ID },
@@ -2249,6 +2498,12 @@ test("sweeps only deterministic credential paths", async () => {
   assert.ok(calls[0]?.command.includes(PATH));
   assert.equal(calls[0]?.command.includes(SECRET), false);
   assert.equal(calls[0]?.env, undefined);
+  assert.deepEqual(
+    fileCalls
+      .filter(({ kind }) => kind === "deleteFile")
+      .map(({ path }) => path),
+    [`/tmp/${SESSION}.github-capability`]
+  );
 });
 
 test("a delayed old attempt can only clean its own names after replacement starts", async () => {

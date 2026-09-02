@@ -25,6 +25,7 @@ import {
   truncateUtf8,
 } from "./evidence";
 import type { RunEvent, RunSummary } from "./harness";
+import { decodeRunnerAttemptRedactionSecrets } from "./redaction-secrets";
 import type {
   RunnerPersistentResourceLifecycle,
   RunnerResourceResetResult,
@@ -490,7 +491,7 @@ function attemptEvidenceRedactions(
   credential: string | null
 ): EvidenceRedactionInput {
   return exactEvidenceRedactions(
-    credential,
+    ...(credential ? decodeRunnerAttemptRedactionSecrets(credential) : []),
     run.daytonaAttemptId,
     run.daytonaSessionId,
     run.daytonaCommandId

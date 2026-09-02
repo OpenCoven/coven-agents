@@ -35,6 +35,14 @@ export const compareAgentTimestamps = (left: string, right: string) =>
 export const agentRunnerApiVersionSchema = z.literal(AGENT_RUNNER_API_VERSION);
 const boundedString = (max: number) => z.string().trim().min(1).max(max);
 const datetimeSchema = z.string().datetime();
+export const CANONICAL_UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+export const canonicalUuidSchema = z
+  .string()
+  .regex(CANONICAL_UUID_PATTERN, "UUID must use canonical lowercase form.");
+export function isCanonicalUuid(value: unknown): value is string {
+  return typeof value === "string" && CANONICAL_UUID_PATTERN.test(value);
+}
 
 export const TEAM_LIMITS = Object.freeze({
   maxDescriptionLength: AGENT_RUNNER_LIMITS.maxDescriptionLength,
@@ -47,6 +55,20 @@ export const TEAM_LIMITS = Object.freeze({
   maxTeamRunsPerPage: 10,
   maxTotalHandoffLength: 49_152,
 });
+
+export const GITHUB_TOOL_LIMITS = Object.freeze({
+  bodyBytes: 60_000,
+  branchBytes: 200,
+  maxAssignees: 10,
+  maxLabels: 10,
+  maxSearchResults: 30,
+  queryBytes: 256,
+  resultBodyBytes: 8192,
+  resultTitleBytes: 512,
+  textFieldBytes: 8192,
+  titleBytes: 256,
+});
+export const GITHUB_TOOL_SERVER_DEADLINE_MS = 60_000;
 
 export const DEMO_TRANSCRIPT_LIMITS = Object.freeze({
   maxEvents: 256,
@@ -62,7 +84,7 @@ export const DEMO_TRANSCRIPT_LIMITS = Object.freeze({
 export const backendSchema = z.literal("cloud");
 export const runtimeSchema = z.enum(["codex", "claude", "copilot"]);
 export const agentStatusSchema = z.enum(["idle", "running", "error"]);
-export const agentIdSchema = z.string().uuid();
+export const agentIdSchema = canonicalUuidSchema;
 
 export const agentRunnerCapabilitySchema = z.enum(AGENT_RUNNER_CAPABILITIES);
 export const agentRunnerCapabilitiesSchema = z
@@ -180,10 +202,10 @@ export const teamStepStatusSchema = z.enum([
   "cancelled",
   "skipped",
 ]);
-export const skillIdSchema = z.string().uuid();
-export const teamIdSchema = z.string().uuid();
-export const teamRunIdSchema = z.string().uuid();
-export const teamStepIdSchema = z.string().uuid();
+export const skillIdSchema = canonicalUuidSchema;
+export const teamIdSchema = canonicalUuidSchema;
+export const teamRunIdSchema = canonicalUuidSchema;
+export const teamStepIdSchema = canonicalUuidSchema;
 
 const distinctValues = <T>(
   values: readonly T[],
@@ -281,7 +303,7 @@ export const updateTeamInputSchema = createTeamInputSchema
   .strict();
 
 export const teamMemberSchema = createTeamMemberInputSchema.extend({
-  id: z.string().uuid(),
+  id: canonicalUuidSchema,
   position: z.number().int().nonnegative(),
 });
 
@@ -435,7 +457,7 @@ export const runAgentInputSchema = z.object({
 
 export const startRunInputSchema = z
   .object({
-    operationId: z.string().uuid(),
+    operationId: canonicalUuidSchema,
     task: z.string().trim().min(1).max(AGENT_RUNNER_LIMITS.maxTaskLength),
   })
   .strict();
@@ -500,8 +522,8 @@ export const runSnapshotSchema = z
     fileEvidence: z
       .array(fileEvidenceSchema)
       .max(AGENT_RUNNER_LIMITS.maxFileOperations),
-    id: z.string().uuid(),
-    operationId: z.string().uuid(),
+    id: canonicalUuidSchema,
+    operationId: canonicalUuidSchema,
     output: z.string().max(AGENT_RUNNER_LIMITS.maxEventOutputLength),
     startedAt: datetimeSchema.nullable().default(null),
     status: runStatusSchema,
@@ -534,9 +556,369 @@ export const githubOperationStatusSchema = z.enum([
   "failed",
 ]);
 
+const githubRepositoryPartSchema = z
+  .string()
+  .min(1)
+  .max(100)
+  .regex(/^[A-Za-z0-9_.-]+$/u);
+const githubDecimalSchema = z.string().regex(/^[1-9][0-9]{0,19}$/u);
+const githubNodeIdSchema = z
+  .string()
+  .min(1)
+  .max(256)
+  .regex(/^[A-Za-z0-9_=-]+$/u);
+const githubTextSchema = (maxBytes: number, maxLength = maxBytes) =>
+  z
+    .string()
+    .min(1)
+    .max(maxLength)
+    .refine(
+      (value) => new TextEncoder().encode(value).byteLength <= maxBytes,
+      `Text must not exceed ${maxBytes} UTF-8 bytes.`
+    );
+const githubOptionalTextSchema = (maxBytes: number, maxLength = maxBytes) =>
+  z
+    .string()
+    .max(maxLength)
+    .refine(
+      (value) => new TextEncoder().encode(value).byteLength <= maxBytes,
+      `Text must not exceed ${maxBytes} UTF-8 bytes.`
+    );
+const githubBranchSchema = githubTextSchema(
+  GITHUB_TOOL_LIMITS.branchBytes
+).refine(
+  (value) =>
+    /^[A-Za-z0-9][A-Za-z0-9._/-]*$/u.test(value) &&
+    !value.includes("..") &&
+    !value.includes("//") &&
+    !value.includes("@{") &&
+    !value.endsWith(".") &&
+    !value.endsWith("/") &&
+    !value.endsWith(".lock") &&
+    !value.startsWith("refs/"),
+  "Branch must be a canonical repository-relative ref."
+);
+const githubLabelSchema = githubTextSchema(100, 100);
+const githubLoginSchema = z
+  .string()
+  .min(1)
+  .max(100)
+  .regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,98}[A-Za-z0-9])?$/u);
+const githubRepositoryOperationShape = {
+  owner: githubRepositoryPartSchema,
+  repo: githubRepositoryPartSchema,
+};
+const issueGetOperationSchema = z
+  .object({
+    issueNumber: githubDecimalSchema,
+    kind: z.literal("issue.get"),
+    ...githubRepositoryOperationShape,
+  })
+  .strict();
+const issueSearchOperationSchema = z
+  .object({
+    kind: z.literal("issue.search"),
+    limit: z.number().int().min(1).max(GITHUB_TOOL_LIMITS.maxSearchResults),
+    ...githubRepositoryOperationShape,
+    query: githubTextSchema(GITHUB_TOOL_LIMITS.queryBytes),
+    state: z.enum(["all", "closed", "open"]),
+  })
+  .strict();
+const issueCreateOperationSchema = z
+  .object({
+    assignees: z
+      .array(githubLoginSchema)
+      .max(GITHUB_TOOL_LIMITS.maxAssignees)
+      .superRefine((values, context) =>
+        distinctValues(values, context, "Assignees must be unique.")
+      ),
+    body: githubOptionalTextSchema(GITHUB_TOOL_LIMITS.bodyBytes),
+    kind: z.literal("issue.create"),
+    labels: z
+      .array(githubLabelSchema)
+      .max(GITHUB_TOOL_LIMITS.maxLabels)
+      .superRefine((values, context) =>
+        distinctValues(values, context, "Labels must be unique.")
+      ),
+    ...githubRepositoryOperationShape,
+    title: githubTextSchema(GITHUB_TOOL_LIMITS.titleBytes),
+  })
+  .strict();
+const issueCommentOperationSchema = z
+  .object({
+    body: githubTextSchema(GITHUB_TOOL_LIMITS.bodyBytes),
+    issueNumber: githubDecimalSchema,
+    kind: z.literal("issue.comment"),
+    ...githubRepositoryOperationShape,
+  })
+  .strict();
+const pullGetOperationSchema = z
+  .object({
+    kind: z.literal("pull.get"),
+    ...githubRepositoryOperationShape,
+    pullNumber: githubDecimalSchema,
+  })
+  .strict();
+const pullCreateOperationSchema = z
+  .object({
+    base: githubBranchSchema,
+    body: githubOptionalTextSchema(GITHUB_TOOL_LIMITS.bodyBytes),
+    draft: z.boolean(),
+    head: githubBranchSchema,
+    kind: z.literal("pull.create"),
+    ...githubRepositoryOperationShape,
+    title: githubTextSchema(GITHUB_TOOL_LIMITS.titleBytes),
+  })
+  .strict()
+  .refine((value) => value.base !== value.head, {
+    message: "Pull request base and head must differ.",
+    path: ["head"],
+  });
+const pullCommentOperationSchema = z
+  .object({
+    body: githubTextSchema(GITHUB_TOOL_LIMITS.bodyBytes),
+    kind: z.literal("pull.comment"),
+    ...githubRepositoryOperationShape,
+    pullNumber: githubDecimalSchema,
+  })
+  .strict();
+const pullReviewOperationSchema = z
+  .object({
+    body: githubOptionalTextSchema(GITHUB_TOOL_LIMITS.bodyBytes),
+    event: z.enum(["approve", "comment", "request_changes"]),
+    kind: z.literal("pull.review"),
+    ...githubRepositoryOperationShape,
+    pullNumber: githubDecimalSchema,
+  })
+  .strict()
+  .refine(
+    (value) =>
+      value.event !== "request_changes" || value.body.trim().length > 0,
+    {
+      message: "Requested changes require a review body.",
+      path: ["body"],
+    }
+  );
+const projectItemAddOperationSchema = z
+  .object({
+    contentId: githubNodeIdSchema,
+    contentType: z.enum(["issue", "pull"]),
+    kind: z.literal("project.item.add"),
+    ...githubRepositoryOperationShape,
+    projectId: githubNodeIdSchema,
+  })
+  .strict();
+const githubProjectFieldValueSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("clear") }).strict(),
+  z
+    .object({
+      date: z
+        .string()
+        .regex(/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/u)
+        .refine(
+          (value) =>
+            new Date(`${value}T00:00:00.000Z`).toISOString().slice(0, 10) ===
+            value,
+          "Date must be a real calendar date."
+        ),
+      kind: z.literal("date"),
+    })
+    .strict(),
+  z
+    .object({
+      iterationId: githubNodeIdSchema,
+      kind: z.literal("iteration"),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("number"),
+      number: z
+        .number()
+        .finite()
+        .min(-1_000_000_000_000)
+        .max(1_000_000_000_000),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("single_select"),
+      optionId: githubNodeIdSchema,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("text"),
+      text: githubOptionalTextSchema(GITHUB_TOOL_LIMITS.textFieldBytes),
+    })
+    .strict(),
+]);
+const projectItemFieldUpdateOperationSchema = z
+  .object({
+    contentId: githubNodeIdSchema,
+    contentType: z.enum(["issue", "pull"]),
+    fieldId: githubNodeIdSchema,
+    itemId: githubNodeIdSchema,
+    kind: z.literal("project.item.field.update"),
+    ...githubRepositoryOperationShape,
+    projectId: githubNodeIdSchema,
+    value: githubProjectFieldValueSchema,
+  })
+  .strict();
+
+export const githubToolOperationSchema = z.discriminatedUnion("kind", [
+  issueGetOperationSchema,
+  issueSearchOperationSchema,
+  issueCreateOperationSchema,
+  issueCommentOperationSchema,
+  pullGetOperationSchema,
+  pullCreateOperationSchema,
+  pullCommentOperationSchema,
+  pullReviewOperationSchema,
+  projectItemAddOperationSchema,
+  projectItemFieldUpdateOperationSchema,
+]);
+
+export const githubToolRequestSchema = z
+  .object({
+    operation: githubToolOperationSchema,
+    operationId: canonicalUuidSchema,
+  })
+  .strict();
+
+const githubResultRepositorySchema = z
+  .string()
+  .min(3)
+  .max(201)
+  .regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u);
+const githubResultUrlSchema = z
+  .url()
+  .max(2048)
+  .refine((value) => {
+    try {
+      const parsed = new URL(value);
+      return (
+        parsed.protocol === "https:" &&
+        parsed.hostname === "github.com" &&
+        !parsed.username &&
+        !parsed.password
+      );
+    } catch {
+      return false;
+    }
+  }, "Result URL must be a public github.com URL.");
+const githubResultBodySchema = githubOptionalTextSchema(
+  GITHUB_TOOL_LIMITS.resultBodyBytes
+);
+const githubIssueSummarySchema = z
+  .object({
+    nodeId: githubNodeIdSchema,
+    number: githubDecimalSchema,
+    state: z.enum(["closed", "open"]),
+    title: githubTextSchema(GITHUB_TOOL_LIMITS.resultTitleBytes),
+    url: githubResultUrlSchema,
+  })
+  .strict();
+const githubIssueResultSchema = githubIssueSummarySchema.extend({
+  body: githubResultBodySchema,
+});
+const githubPullResultSchema = githubIssueResultSchema.extend({
+  base: githubBranchSchema,
+  draft: z.boolean(),
+  head: githubBranchSchema,
+  merged: z.boolean(),
+});
+const githubCommentResultSchema = z
+  .object({
+    nodeId: githubNodeIdSchema,
+    url: githubResultUrlSchema,
+  })
+  .strict();
+const githubReviewResultSchema = githubCommentResultSchema.extend({
+  state: z.enum(["approved", "commented", "changes_requested"]),
+});
+
+export const githubToolResultSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      issue: githubIssueResultSchema,
+      kind: z.literal("issue.get"),
+      repository: githubResultRepositorySchema,
+    })
+    .strict(),
+  z
+    .object({
+      items: z
+        .array(githubIssueSummarySchema)
+        .max(GITHUB_TOOL_LIMITS.maxSearchResults),
+      kind: z.literal("issue.search"),
+      repository: githubResultRepositorySchema,
+    })
+    .strict(),
+  z
+    .object({
+      issue: githubIssueResultSchema,
+      kind: z.literal("issue.create"),
+      repository: githubResultRepositorySchema,
+    })
+    .strict(),
+  z
+    .object({
+      comment: githubCommentResultSchema,
+      kind: z.literal("issue.comment"),
+      repository: githubResultRepositorySchema,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("pull.get"),
+      pull: githubPullResultSchema,
+      repository: githubResultRepositorySchema,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("pull.create"),
+      pull: githubPullResultSchema,
+      repository: githubResultRepositorySchema,
+    })
+    .strict(),
+  z
+    .object({
+      comment: githubCommentResultSchema,
+      kind: z.literal("pull.comment"),
+      repository: githubResultRepositorySchema,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("pull.review"),
+      repository: githubResultRepositorySchema,
+      review: githubReviewResultSchema,
+    })
+    .strict(),
+  z
+    .object({
+      itemId: githubNodeIdSchema,
+      kind: z.literal("project.item.add"),
+      projectId: githubNodeIdSchema,
+      repository: githubResultRepositorySchema,
+    })
+    .strict(),
+  z
+    .object({
+      fieldId: githubNodeIdSchema,
+      itemId: githubNodeIdSchema,
+      kind: z.literal("project.item.field.update"),
+      projectId: githubNodeIdSchema,
+      repository: githubResultRepositorySchema,
+    })
+    .strict(),
+]);
+
 export const createTeamRunInputSchema = z
   .object({
-    operationId: z.string().uuid(),
+    operationId: canonicalUuidSchema,
     task: boundedString(TEAM_LIMITS.maxMissionLength),
   })
   .strict();
@@ -595,7 +977,7 @@ export const teamHandoffSchema = z
 export const githubOperationReceiptSchema = z
   .object({
     completedAt: datetimeSchema.nullable(),
-    id: z.string().uuid(),
+    id: canonicalUuidSchema,
     kind: githubOperationKindSchema,
     providerRequestId: z.string().trim().max(256).nullable(),
     requestHash: z.string().regex(/^[a-f0-9]{64}$/u),
@@ -619,7 +1001,7 @@ export const teamStepSchema = z
     position: z.number().int().nonnegative(),
     required: z.boolean(),
     responsibility: boundedString(AGENT_RUNNER_LIMITS.maxInstructionsLength),
-    runnerRunId: z.string().uuid().nullable(),
+    runnerRunId: canonicalUuidSchema.nullable(),
     skillIds: z
       .array(skillIdSchema)
       .max(TEAM_LIMITS.maxSkillsPerMember)
@@ -641,7 +1023,7 @@ export const teamRunSchema = z
     error: runErrorSchema.nullable(),
     id: teamRunIdSchema,
     mission: boundedString(TEAM_LIMITS.maxMissionLength),
-    operationId: z.string().uuid(),
+    operationId: canonicalUuidSchema,
     startedAt: datetimeSchema.nullable(),
     status: teamRunStatusSchema,
     steps: z
@@ -687,8 +1069,8 @@ export const runEventSchema = z.discriminatedUnion("type", [
   z
     .object({
       ...runEventBaseSchema,
-      operationId: z.string().uuid(),
-      runId: z.string().uuid(),
+      operationId: canonicalUuidSchema,
+      runId: canonicalUuidSchema,
       type: z.literal("accepted"),
     })
     .strict(),
@@ -809,7 +1191,7 @@ export const runResultSchema = z.object({
   fileOperations: z
     .array(fileOperationSchema)
     .max(AGENT_RUNNER_LIMITS.maxFileOperations),
-  id: z.string().uuid(),
+  id: canonicalUuidSchema,
   output: z.string(),
   startedAt: datetimeSchema,
   status: z.enum(["completed", "failed"]),
@@ -1104,6 +1486,12 @@ export type GitHubOperationReceipt = z.output<
   typeof githubOperationReceiptSchema
 >;
 export type GitHubOperationStatus = z.infer<typeof githubOperationStatusSchema>;
+export type GitHubProjectFieldValue = z.infer<
+  typeof githubProjectFieldValueSchema
+>;
+export type GitHubToolOperation = z.infer<typeof githubToolOperationSchema>;
+export type GitHubToolRequest = z.infer<typeof githubToolRequestSchema>;
+export type GitHubToolResult = z.infer<typeof githubToolResultSchema>;
 export type SkillDefinition = z.output<typeof skillDefinitionSchema>;
 export type SkillResource = z.output<typeof skillResourceSchema>;
 export type TeamApprovalStatus = z.infer<typeof teamApprovalStatusSchema>;

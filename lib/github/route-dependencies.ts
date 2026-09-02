@@ -1,0 +1,68 @@
+import "server-only";
+
+import { sql } from "drizzle-orm";
+import { auth } from "@/app/(auth)/auth";
+import { configuredApplicationBasePath } from "@/lib/application-path";
+import { configuredApplicationOrigin } from "@/lib/auth/application-origin";
+import { authorizeSubscriberAccess } from "@/lib/auth/subscriber-authorization.server";
+import { databaseFor } from "@/lib/db/access";
+import { databaseIdempotencyStore } from "@/lib/db/queries";
+import { createRunnerAuth } from "@/lib/runner/auth";
+import { createTeamStore, drizzleTeamStoreDatabase } from "@/lib/teams/store";
+import { createGitHubAppClient, GitHubProviderError } from "./app-auth";
+import { validateGitHubEnvironment } from "./config";
+import {
+  createGitHubConnectionHandlers,
+  type GitHubConnectionHandlers,
+} from "./connection";
+import { createGitHubUserAuthorizationClient } from "./user-auth";
+
+export function productionGitHubConnectionHandlers(): GitHubConnectionHandlers {
+  return createGitHubConnectionHandlers({
+    appBasePath: () => configuredApplicationBasePath(process.env),
+    appOrigin: () => configuredApplicationOrigin(process.env),
+    auth: createRunnerAuth({
+      authenticate: auth,
+      authorizeSubscriberAccess,
+    }),
+    createProvider: (config) =>
+      createGitHubAppClient({
+        appId: config.appId,
+        appSlug: config.appSlug,
+        privateKey: config.privateKey,
+      }),
+    createStore: (subscriber) =>
+      createTeamStore(
+        drizzleTeamStoreDatabase(databaseFor(subscriber.session))
+      ),
+    createUserAuthorizationClient: (config) =>
+      createGitHubUserAuthorizationClient({
+        appId: config.appId,
+        appSlug: config.appSlug,
+        clientId: config.clientId,
+        clientSecret: config.clientSecret,
+      }),
+    enforceAbuse: async (input) => {
+      const abuse = await import("@/lib/abuse/enforce");
+      return abuse.enforceAbusePolicy(input);
+    },
+    getConfig: () => validateGitHubEnvironment(process.env),
+    idempotencyStore: databaseIdempotencyStore,
+    serializeUserAuthorization: async (subscriber, operation) =>
+      databaseFor(subscriber.session).transaction(async (transaction) => {
+        const [lock] = await transaction.execute(
+          sql<{ acquired: boolean }>`SELECT pg_try_advisory_xact_lock(
+            1129270855,
+            1431194708
+          ) AS "acquired"`
+        );
+        if (lock?.acquired !== true) {
+          throw new GitHubProviderError("github_provider_unavailable", {
+            retryable: true,
+            status: 503,
+          });
+        }
+        return operation();
+      }),
+  });
+}

@@ -1,5 +1,6 @@
 import "server-only";
 
+import { isCanonicalUuid } from "@opencoven/agent-contracts";
 import {
   type CredentialEnvelopeV2,
   decryptCredential,
@@ -11,8 +12,6 @@ import {
   credentialKekRingFromEnvironment,
 } from "@/lib/credentials/key-ring";
 
-const RUNNER_ID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const TENANT_PATTERN = /^[A-Za-z0-9_]{1,64}$/u;
 
 export type RunnerAttemptRedactionEnvelope = CredentialEnvelopeV2;
@@ -25,8 +24,8 @@ export type RunnerAttemptRedactionScope = Readonly<{
 
 function assertScope(scope: RunnerAttemptRedactionScope): void {
   if (
-    !RUNNER_ID_PATTERN.test(scope.attemptId) ||
-    !RUNNER_ID_PATTERN.test(scope.runId) ||
+    !isCanonicalUuid(scope.attemptId) ||
+    !isCanonicalUuid(scope.runId) ||
     !TENANT_PATTERN.test(scope.tenant)
   ) {
     throw new Error("Runner attempt redaction scope is invalid.");

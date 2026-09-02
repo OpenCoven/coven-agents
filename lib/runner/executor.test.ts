@@ -365,3 +365,37 @@ test("Daytona adapter treats only proven ambiguous sandbox lifecycle errors as c
     false
   );
 });
+
+test("Daytona adapter forwards GitHub broker callbacks only at the process start boundary", async () => {
+  const sandbox = processSandbox();
+  const githubTool = {
+    issueCapability: async () => ({ rawCapability: "opaque-capability" }),
+    revokeCapability: async () => true,
+    url: "https://app.example/api/internal/github-tool",
+  };
+  let forwardedGitHubTool: unknown;
+  const executor = daytonaRunnerExecutor({
+    ensureContext: async () => ({ agent: agent(), sandbox }),
+    executionProvenance: daytonaProvenance,
+    inspectWorkspace: async () => ({ kind: "safe" }),
+    startProcess: (input) => {
+      forwardedGitHubTool = input.githubTool;
+      return Promise.resolve({
+        attemptId: dispatchAuthority.attemptId as RunnerDaytonaAttemptId,
+        commandId: "command",
+        credentialPath: "/credential",
+        dispatchAuthority,
+        sessionId: "session",
+        workspace: "/workspace/repository",
+      });
+    },
+  });
+  const { context } = await executor.ensureExecutionContext(authority);
+
+  await executor.start({
+    ...startInput(context),
+    githubTool,
+  } as RunnerExecutorStartInput);
+
+  assert.equal(forwardedGitHubTool, githubTool);
+});

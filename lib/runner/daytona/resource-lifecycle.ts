@@ -151,6 +151,7 @@ export function daytonaPersistentResourceLifecycle(
         daytona: dependencies.daytona(),
         operator: dependencies.operator,
         providerConcurrency: dependencies.providerConcurrency,
+        sandboxConfiguration: dependencies.configuration(),
         store: dependencies.store,
       });
       observeRunnerResourceOperation(dependencies.observe, {

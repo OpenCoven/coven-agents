@@ -1,7 +1,9 @@
 import "server-only";
 
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import type { Daytona } from "@daytona/sdk";
+import { configuredApplicationBasePath } from "@/lib/application-path";
+import { configuredApplicationOrigin } from "@/lib/auth/application-origin";
 import type { RunnerAdmissionLimits, RunnerDispatchResult } from "../admission";
 import type { RunnerPersistentResourceLifecycle } from "../resource-lifecycle";
 import type { RunnerResourceOperationObserver } from "../resource-observability";
@@ -77,11 +79,26 @@ function configuredClaimDispatcher(
   observe?: RunnerResourceOperationObserver
 ): (claimed: RunnerClaimedDispatch) => Promise<RunnerDispatchResult> {
   return async (claimed) => {
-    const [admission, credentials, executor, sandbox] = await Promise.all([
+    const [
+      admission,
+      credentials,
+      executor,
+      githubApp,
+      githubCapability,
+      githubConfig,
+      githubConnection,
+      sandbox,
+      teamStore,
+    ] = await Promise.all([
       import("../admission"),
       import("@/lib/credentials/runner-credential"),
       import("./executor"),
+      import("@/lib/github/app-auth"),
+      import("@/lib/github/capability"),
+      import("@/lib/github/config"),
+      import("@/lib/github/connection"),
       import("./sandbox"),
+      import("@/lib/teams/store"),
     ]);
     const resolvedLimits = limits ?? admission.admissionLimitsFromEnvironment();
     return dispatchProductionClaim(claimed, {
@@ -89,6 +106,7 @@ function configuredClaimDispatcher(
         let currentContext = context;
         const credentialDependencies =
           credentials.drizzleRunnerCredentialDependencies(database);
+        const toolEndpoint = githubToolEndpoint();
         const dependencies = executor.daytonaRunnerDispatchDependencies({
           credentialDependencies,
           credentialInput: (run, _agent) => ({
@@ -110,6 +128,110 @@ function configuredClaimDispatcher(
           sandboxConfiguration: sandbox.daytonaSandboxConfiguration(),
           sandboxDependencies: { daytona, observe },
           store,
+          ...(toolEndpoint
+            ? {
+                githubTool: {
+                  issueCapability: async ({ attemptId, run }) => {
+                    const policy = run.githubBrokerPolicy;
+                    if (!policy) {
+                      throw new Error(
+                        "GitHub capability issuance requires persisted policy."
+                      );
+                    }
+                    const now = new Date();
+                    const dispatchDeadline =
+                      run.dispatchLeaseExpiresAt?.getTime();
+                    if (
+                      !dispatchDeadline ||
+                      dispatchDeadline - now.getTime() <= 5000
+                    ) {
+                      throw new Error(
+                        "GitHub capability issuance requires a live dispatch lease."
+                      );
+                    }
+                    const deadlineAt = Math.min(
+                      dispatchDeadline - 5000,
+                      now.getTime() +
+                        githubCapability.MAX_GITHUB_CAPABILITY_ISSUANCE_MS
+                    );
+                    const authorityStore = teamStore.createTeamStore(
+                      teamStore.drizzleTeamStoreDatabase(database)
+                    );
+                    const issued =
+                      await githubCapability.issueGitHubStepCapability(
+                        {
+                          attemptId,
+                          capabilityId: randomUUID(),
+                          deadlineAt,
+                          expiresAt: new Date(
+                            now.getTime() +
+                              githubCapability.MAX_GITHUB_CAPABILITY_LIFETIME_MS
+                          ),
+                          now,
+                          policy,
+                          runnerRunId: run.id,
+                          tenant: run.tenant,
+                          userId: policy.actorUserId,
+                        },
+                        {
+                          refreshAuthority: async ({
+                            abortSignal,
+                            deadlineAt: authorityDeadlineAt,
+                          }) => {
+                            const config = githubConfig.githubAppConfig();
+                            const refreshed =
+                              await githubConnection.refreshGitHubConnectionAuthority(
+                                {
+                                  abortSignal,
+                                  config,
+                                  deadlineAt: authorityDeadlineAt,
+                                  principal: {
+                                    kind: "subscriber",
+                                    tenant: run.tenant,
+                                    userId: policy.actorUserId,
+                                  },
+                                  provider: githubApp.createGitHubAppClient({
+                                    appId: config.appId,
+                                    appSlug: config.appSlug,
+                                    privateKey: config.privateKey,
+                                  }),
+                                  store: authorityStore,
+                                }
+                              );
+                            if (refreshed.kind !== "current") {
+                              throw new Error(
+                                "GitHub connection authority changed before capability issuance."
+                              );
+                            }
+                            return refreshed.snapshot;
+                          },
+                          replaceCapability: (input) =>
+                            githubCapability
+                              .createGitHubGatewayStore(
+                                teamStore.drizzleTeamStoreDatabase(database)
+                              )
+                              .replaceCapability(OPERATOR, input),
+                        }
+                      );
+                    return { rawCapability: issued.rawToken };
+                  },
+                  revokeCapability: async ({ attemptId, run }) => {
+                    const revoked = await githubCapability
+                      .createGitHubGatewayStore(
+                        teamStore.drizzleTeamStoreDatabase(database)
+                      )
+                      .revokeCapability(OPERATOR, {
+                        attemptId,
+                        runnerRunId: run.id,
+                      });
+                    return (
+                      revoked.kind === "revoked" || revoked.kind === "not_found"
+                    );
+                  },
+                  url: toolEndpoint,
+                },
+              }
+            : {}),
         });
         return admission.dispatchRunnerClaim(authorized, dependencies);
       },
@@ -118,6 +240,22 @@ function configuredClaimDispatcher(
       store,
     });
   };
+}
+
+function githubToolEndpoint(): string | null {
+  try {
+    const origin = configuredApplicationOrigin(process.env);
+    if (!origin) {
+      return null;
+    }
+    const basePath = configuredApplicationBasePath(process.env);
+    return new URL(
+      `${basePath}/api/internal/github-tool`.replace(/\/+/gu, "/"),
+      origin
+    ).toString();
+  } catch {
+    return null;
+  }
 }
 
 function persistentResourceLifecycle(

@@ -9,7 +9,12 @@ import {
 import { PgDialect } from "drizzle-orm/pg-core";
 import type { RunnerOperator, RunnerPrincipal } from "../runner/types";
 import { teamChildRunnerIds } from "./orchestrate";
-import { createTeamStore, type TeamStoreStatement } from "./store";
+import {
+  createTeamStore,
+  type GitHubConnectionRecord,
+  type ReplaceGitHubInstallationConnectionsInput,
+  type TeamStoreStatement,
+} from "./store";
 
 const principal: RunnerPrincipal = {
   kind: "subscriber",
@@ -68,6 +73,108 @@ function scripted(...responses: Record<string, unknown>[][]) {
       }),
   });
   return { statements, store };
+}
+
+type FencedGitHubStore = {
+  connectGitHubInstallationConnections: (
+    principal: RunnerPrincipal,
+    input: ReplaceGitHubInstallationConnectionsInput & {
+      expectedGeneration: number;
+    }
+  ) => Promise<
+    | { kind: "stale" }
+    | {
+        changed: boolean;
+        connections: GitHubConnectionRecord[];
+        generation: number;
+        kind: "connected";
+      }
+  >;
+  readGitHubConnectionSnapshot: (
+    principal: RunnerPrincipal,
+    limit: number
+  ) => Promise<{
+    connections: GitHubConnectionRecord[];
+    generation: number;
+  }>;
+  refreshGitHubInstallationConnections: (
+    principal: RunnerPrincipal,
+    input: ReplaceGitHubInstallationConnectionsInput & {
+      expectedGeneration: number;
+    }
+  ) => Promise<
+    | { kind: "stale" }
+    | {
+        changed: boolean;
+        connections: GitHubConnectionRecord[];
+        generation: number;
+        kind: "refreshed";
+      }
+  >;
+  removeGitHubInstallationConnectionsIfCurrent: (
+    principal: RunnerPrincipal,
+    input: { expectedGeneration: number; installationId: string }
+  ) => Promise<
+    | { kind: "stale" }
+    | { generation: number; kind: "unchanged" }
+    | {
+        generation: number;
+        kind: "removed";
+        removed: number;
+        revokedCapabilities: number;
+      }
+  >;
+};
+
+function fencedGitHubStore(
+  store: ReturnType<typeof createTeamStore>
+): FencedGitHubStore {
+  return store as unknown as FencedGitHubStore;
+}
+
+function githubConnectionRow(
+  overrides: Partial<GitHubConnectionRecord> = {}
+): GitHubConnectionRecord {
+  return {
+    accountId: "18446744073709551615",
+    accountLogin: "OpenCoven",
+    accountType: "Organization",
+    appIssuesPermission: "write",
+    appOrganizationProjectsPermission: "write",
+    appPullRequestsPermission: "write",
+    createdAt: NOW,
+    githubUserId: "112233",
+    githubUserLogin: "BunsDev",
+    id: CONNECTION_A,
+    installationId: "18446744073709551614",
+    repositoryId: "18446744073709551613",
+    repositoryName: "coven-agents",
+    repositoryNodeId: "R_kgDOExample",
+    repositoryOwner: "OpenCoven",
+    tenant: principal.tenant,
+    updatedAt: NOW,
+    userPermissionCeiling: "write",
+    userPermissionCurrent: "write",
+    userProjectManagementCeiling: false,
+    userProjectManagementCurrent: false,
+    version: 0,
+    ...overrides,
+  };
+}
+
+function githubConnectionAuthority(connection: GitHubConnectionRecord) {
+  return {
+    appIssuesPermission: connection.appIssuesPermission,
+    appOrganizationProjectsPermission:
+      connection.appOrganizationProjectsPermission,
+    appPullRequestsPermission: connection.appPullRequestsPermission,
+    githubUserId: connection.githubUserId,
+    githubUserLogin: connection.githubUserLogin,
+    userPermissionCeiling: connection.userPermissionCeiling,
+    userPermissionCurrent: connection.userPermissionCurrent,
+    userProjectManagementCeiling: connection.userProjectManagementCeiling,
+    userProjectManagementCurrent: connection.userProjectManagementCurrent,
+  };
 }
 
 function skillRow(
@@ -2277,39 +2384,506 @@ test("GitHub capability persistence accepts only hashes, bounded budgets, and al
 });
 
 test("GitHub connection stores decimal metadata without an access token field", async () => {
-  const row = {
-    accountId: "18446744073709551615",
-    accountLogin: "OpenCoven",
-    accountType: "Organization" as const,
-    createdAt: NOW,
-    id: CONNECTION_A,
-    installationId: "18446744073709551614",
-    repositoryId: "18446744073709551613",
-    repositoryName: "coven-agents",
-    repositoryNodeId: "R_kgDOExample",
-    repositoryOwner: "OpenCoven",
-    tenant: principal.tenant,
-    updatedAt: NOW,
-    version: 0,
-  };
-  const { statements, store } = scripted([row]);
+  const row = githubConnectionRow();
+  const { statements, store } = scripted(
+    [],
+    [{ generation: "0" }],
+    [],
+    [{ generation: "1" }],
+    [row],
+    [],
+    []
+  );
 
-  const result = await store.upsertGitHubConnection(principal, {
+  const result = await fencedGitHubStore(
+    store
+  ).connectGitHubInstallationConnections(principal, {
     accountId: row.accountId,
     accountLogin: row.accountLogin,
     accountType: row.accountType,
-    id: CONNECTION_A,
+    expectedGeneration: 0,
     installationId: row.installationId,
-    repositoryId: row.repositoryId,
-    repositoryName: row.repositoryName,
-    repositoryNodeId: row.repositoryNodeId,
-    repositoryOwner: row.repositoryOwner,
+    repositories: [
+      {
+        ...githubConnectionAuthority(row),
+        id: CONNECTION_A,
+        repositoryId: row.repositoryId,
+        repositoryName: row.repositoryName,
+        repositoryNodeId: row.repositoryNodeId,
+        repositoryOwner: row.repositoryOwner,
+      },
+    ],
   });
 
-  assert.equal(result.connection.installationId, row.installationId);
+  assert.equal(
+    result.kind === "connected" && result.connections[0]?.installationId,
+    row.installationId
+  );
+  for (const currentStatement of statements) {
+    assert.doesNotMatch(
+      JSON.stringify(currentStatement.args),
+      /token|authorization/iu
+    );
+  }
+});
+
+test("GitHub connection listing is tenant fenced and publicly bounded", async () => {
+  const row = githubConnectionRow();
+  const { statements, store } = scripted([], [{ generation: "3" }], [row]);
+
+  const result = await fencedGitHubStore(store).readGitHubConnectionSnapshot(
+    principal,
+    17
+  );
+
+  assert.deepEqual(result, { connections: [row], generation: 3 });
+  assert.equal(statements[2]?.args.tenant, principal.tenant);
+  assert.equal(statements[2]?.args.limit, 17);
+  assert.match(queryText(captured(statements, 2)), /"tenant" =/u);
+  assert.match(queryText(captured(statements, 2)), /LIMIT/u);
   assert.doesNotMatch(
-    JSON.stringify(statements[0]?.args),
-    /token|authorization/iu
+    `${queryText(captured(statements, 2))}${JSON.stringify(
+      statements[2]?.args
+    )}`,
+    /access.?token|authorization/i
+  );
+});
+
+test("GitHub connection snapshots read a durable shared generation before provider work", async () => {
+  const row = githubConnectionRow();
+  const { statements, store } = scripted([], [{ generation: "7" }], [row]);
+
+  const result = await fencedGitHubStore(store).readGitHubConnectionSnapshot(
+    principal,
+    17
+  );
+
+  assert.deepEqual(result, { connections: [row], generation: 7 });
+  assert.deepEqual(
+    statements.map(({ name }) => name),
+    [
+      "ensure-github-connection-fence",
+      "read-github-connection-fence",
+      "list-github-connections",
+    ]
+  );
+  assert.match(queryText(captured(statements, 1)), /FOR SHARE/u);
+  assert.match(
+    queryText(captured(statements, 1)),
+    /"tenant".*"generation"|"generation".*"tenant"/su
+  );
+});
+
+test("pre-aborted GitHub authority snapshot reads perform no database work", async () => {
+  const controller = new AbortController();
+  controller.abort(new Error("gateway authority deadline exceeded"));
+  const { statements, store } = scripted();
+  const controlled = store as unknown as {
+    readGitHubConnectionSnapshot: (
+      principal: RunnerPrincipal,
+      limit: number,
+      control: { abortSignal: AbortSignal; deadlineAt: number }
+    ) => Promise<unknown>;
+  };
+
+  await assert.rejects(
+    controlled.readGitHubConnectionSnapshot(principal, 17, {
+      abortSignal: controller.signal,
+      deadlineAt: Date.now() + 1000,
+    }),
+    /deadline|aborted/i
+  );
+  assert.equal(statements.length, 0);
+});
+
+test("GitHub reconnect advances the exact generation while stale reconnect and removal are no-ops", async () => {
+  const current = githubConnectionRow();
+  const replacement = {
+    accountId: current.accountId,
+    accountLogin: current.accountLogin,
+    accountType: current.accountType,
+    expectedGeneration: 7,
+    installationId: current.installationId,
+    repositories: [
+      {
+        ...githubConnectionAuthority(current),
+        id: current.id,
+        repositoryId: current.repositoryId,
+        repositoryName: current.repositoryName,
+        repositoryNodeId: current.repositoryNodeId,
+        repositoryOwner: current.repositoryOwner,
+      },
+    ],
+  };
+  const successful = scripted(
+    [],
+    [{ generation: "7" }],
+    [current],
+    [{ generation: "8" }]
+  );
+
+  const connected = await fencedGitHubStore(
+    successful.store
+  ).connectGitHubInstallationConnections(principal, replacement);
+
+  assert.deepEqual(connected, {
+    changed: false,
+    connections: [current],
+    generation: 8,
+    kind: "connected",
+  });
+  assert.deepEqual(
+    successful.statements.map(({ name }) => name),
+    [
+      "ensure-github-connection-fence",
+      "lock-github-connection-fence",
+      "list-github-tenant-connections-for-update",
+      "advance-github-connection-fence",
+    ]
+  );
+  assert.match(
+    queryText(captured(successful.statements, 3)),
+    /"generation" = "generation" \+ 1/u
+  );
+  assert.match(
+    queryText(captured(successful.statements, 3)),
+    /"generation" = \$/u
+  );
+
+  const staleReconnect = scripted([], [{ generation: "8" }]);
+  assert.deepEqual(
+    await fencedGitHubStore(
+      staleReconnect.store
+    ).connectGitHubInstallationConnections(principal, replacement),
+    { kind: "stale" }
+  );
+  assert.deepEqual(
+    staleReconnect.statements.map(({ name }) => name),
+    ["ensure-github-connection-fence", "lock-github-connection-fence"]
+  );
+
+  const staleRemoval = scripted([], [{ generation: "8" }]);
+  assert.deepEqual(
+    await fencedGitHubStore(
+      staleRemoval.store
+    ).removeGitHubInstallationConnectionsIfCurrent(principal, {
+      expectedGeneration: 7,
+      installationId: current.installationId,
+    }),
+    { kind: "stale" }
+  );
+  assert.deepEqual(
+    staleRemoval.statements.map(({ name }) => name),
+    ["ensure-github-connection-fence", "lock-github-connection-fence"]
+  );
+});
+
+test("GitHub refresh-existing cannot create authority after the installation disappears", async () => {
+  const current = githubConnectionRow();
+  const { statements, store } = scripted([], [{ generation: "4" }], []);
+
+  const result = await fencedGitHubStore(
+    store
+  ).refreshGitHubInstallationConnections(principal, {
+    accountId: current.accountId,
+    accountLogin: current.accountLogin,
+    accountType: current.accountType,
+    expectedGeneration: 4,
+    installationId: current.installationId,
+    repositories: [
+      {
+        ...githubConnectionAuthority(current),
+        id: current.id,
+        repositoryId: current.repositoryId,
+        repositoryName: current.repositoryName,
+        repositoryNodeId: current.repositoryNodeId,
+        repositoryOwner: current.repositoryOwner,
+      },
+    ],
+  });
+
+  assert.deepEqual(result, { kind: "stale" });
+  assert.deepEqual(
+    statements.map(({ name }) => name),
+    [
+      "ensure-github-connection-fence",
+      "lock-github-connection-fence",
+      "list-github-tenant-connections-for-update",
+    ]
+  );
+});
+
+test("GitHub installation replacement atomically upserts selected repositories, removes stale rows, and revokes capabilities", async () => {
+  const stale = githubConnectionRow({
+    repositoryId: "111",
+    repositoryName: "stale",
+    repositoryNodeId: "R_stale",
+  });
+  const first = githubConnectionRow({
+    id: "70000000-0000-4000-8000-000000000010",
+    repositoryId: "222",
+    repositoryName: "coven-agents",
+    repositoryNodeId: "R_first",
+  });
+  const second = githubConnectionRow({
+    id: "70000000-0000-4000-8000-000000000011",
+    repositoryId: "333",
+    repositoryName: "coven-web",
+    repositoryNodeId: "R_second",
+  });
+  const { statements, store } = scripted(
+    [],
+    [{ generation: "0" }],
+    [stale],
+    [{ generation: "1" }],
+    [first],
+    [second],
+    [stale],
+    [{ id: CAPABILITY_A }]
+  );
+
+  const result = await fencedGitHubStore(
+    store
+  ).connectGitHubInstallationConnections(principal, {
+    accountId: first.accountId,
+    accountLogin: first.accountLogin,
+    accountType: first.accountType,
+    expectedGeneration: 0,
+    installationId: first.installationId,
+    repositories: [
+      {
+        ...githubConnectionAuthority(first),
+        id: first.id,
+        repositoryId: first.repositoryId,
+        repositoryName: first.repositoryName,
+        repositoryNodeId: first.repositoryNodeId,
+        repositoryOwner: first.repositoryOwner,
+      },
+      {
+        ...githubConnectionAuthority(second),
+        id: second.id,
+        repositoryId: second.repositoryId,
+        repositoryName: second.repositoryName,
+        repositoryNodeId: second.repositoryNodeId,
+        repositoryOwner: second.repositoryOwner,
+      },
+    ],
+  });
+
+  assert.equal(result.kind, "connected");
+  assert.deepEqual(result.kind === "connected" ? result.connections : [], [
+    first,
+    second,
+  ]);
+  assert.equal(result.kind === "connected" && result.changed, true);
+  assert.equal(result.kind === "connected" && result.generation, 1);
+  assert.deepEqual(
+    statements.map(({ name }) => name),
+    [
+      "ensure-github-connection-fence",
+      "lock-github-connection-fence",
+      "list-github-tenant-connections-for-update",
+      "advance-github-connection-fence",
+      "upsert-github-installation-connection",
+      "upsert-github-installation-connection",
+      "delete-stale-github-installation-connections",
+      "revoke-github-capabilities-after-connection-change",
+    ]
+  );
+  for (const current of statements) {
+    assert.equal(current.args.tenant, principal.tenant);
+    assert.doesNotMatch(JSON.stringify(current.args), /token|authorization/iu);
+  }
+  assert.match(
+    queryText(captured(statements, 6)),
+    /"installationId".*"tenant"|"tenant".*"installationId"/su
+  );
+  assert.match(queryText(captured(statements, 7)), /"revokedAt" IS NULL/u);
+});
+
+test("identical GitHub refreshes are deterministic no-ops", async () => {
+  const current = githubConnectionRow();
+  const { statements, store } = scripted([], [{ generation: "5" }], [current]);
+
+  const result = await fencedGitHubStore(
+    store
+  ).refreshGitHubInstallationConnections(principal, {
+    accountId: current.accountId,
+    accountLogin: current.accountLogin,
+    accountType: current.accountType,
+    expectedGeneration: 5,
+    installationId: current.installationId,
+    repositories: [
+      {
+        ...githubConnectionAuthority(current),
+        id: current.id,
+        repositoryId: current.repositoryId,
+        repositoryName: current.repositoryName,
+        repositoryNodeId: current.repositoryNodeId,
+        repositoryOwner: current.repositoryOwner,
+      },
+    ],
+  });
+
+  assert.deepEqual(result, {
+    changed: false,
+    connections: [current],
+    generation: 5,
+    kind: "refreshed",
+  });
+  assert.deepEqual(
+    statements.map(({ name }) => name),
+    [
+      "ensure-github-connection-fence",
+      "lock-github-connection-fence",
+      "list-github-tenant-connections-for-update",
+    ]
+  );
+});
+
+test("GitHub installation replacement enforces the tenant-wide repository bound before writes", async () => {
+  const otherConnections = Array.from({ length: 15 }, (_, index) =>
+    githubConnectionRow({
+      id: `70000000-0000-4000-8000-${String(index + 100).padStart(12, "0")}`,
+      installationId: "999",
+      repositoryId: String(index + 1000),
+      repositoryName: `other-${index}`,
+      repositoryNodeId: `R_other_${index}`,
+    })
+  );
+  const { statements, store } = scripted(
+    [],
+    [{ generation: "0" }],
+    otherConnections
+  );
+
+  await assert.rejects(
+    fencedGitHubStore(store).connectGitHubInstallationConnections(principal, {
+      accountId: "13579",
+      accountLogin: "OpenCoven",
+      accountType: "Organization",
+      expectedGeneration: 0,
+      installationId: "888",
+      repositories: [
+        {
+          ...githubConnectionAuthority(githubConnectionRow()),
+          id: "70000000-0000-4000-8000-000000000020",
+          repositoryId: "2000",
+          repositoryName: "new-one",
+          repositoryNodeId: "R_new_one",
+          repositoryOwner: "OpenCoven",
+        },
+        {
+          ...githubConnectionAuthority(githubConnectionRow()),
+          id: "70000000-0000-4000-8000-000000000021",
+          repositoryId: "2001",
+          repositoryName: "new-two",
+          repositoryNodeId: "R_new_two",
+          repositoryOwner: "OpenCoven",
+        },
+      ],
+    }),
+    /tenant.*16|16.*tenant/i
+  );
+
+  assert.deepEqual(
+    statements.map(({ name }) => name),
+    [
+      "ensure-github-connection-fence",
+      "lock-github-connection-fence",
+      "list-github-tenant-connections-for-update",
+    ]
+  );
+});
+
+test("invalid GitHub installations are removed only inside the current tenant and revoke its capabilities", async () => {
+  const current = githubConnectionRow();
+  const { statements, store } = scripted(
+    [],
+    [{ generation: "0" }],
+    [current],
+    [{ generation: "1" }],
+    [{ id: CAPABILITY_A }]
+  );
+
+  const result = await fencedGitHubStore(
+    store
+  ).removeGitHubInstallationConnectionsIfCurrent(principal, {
+    expectedGeneration: 0,
+    installationId: current.installationId,
+  });
+
+  assert.deepEqual(result, {
+    generation: 1,
+    kind: "removed",
+    removed: 1,
+    revokedCapabilities: 1,
+  });
+  assert.deepEqual(
+    statements.map(({ name }) => name),
+    [
+      "ensure-github-connection-fence",
+      "lock-github-connection-fence",
+      "delete-github-installation-connections",
+      "advance-github-connection-fence",
+      "revoke-github-capabilities-after-installation-removal",
+    ]
+  );
+  for (const currentStatement of statements) {
+    assert.equal(currentStatement.args.tenant, principal.tenant);
+  }
+  assert.equal(statements[2]?.args.installationId, current.installationId);
+  assert.equal(statements[4]?.args.installationId, current.installationId);
+  assert.match(queryText(captured(statements, 2)), /"tenant" =/u);
+});
+
+test("disconnect is idempotent and revokes all tenant GitHub authority", async () => {
+  const current = githubConnectionRow();
+  const first = scripted(
+    [],
+    [{ generation: "0" }],
+    [{ generation: "1" }],
+    [current],
+    [{ id: CAPABILITY_A }]
+  );
+  assert.deepEqual(await first.store.disconnectGitHubConnections(principal), {
+    removed: 1,
+    revokedCapabilities: 1,
+  });
+  assert.deepEqual(
+    first.statements.map(({ name }) => name),
+    [
+      "ensure-github-connection-fence",
+      "lock-github-connection-fence",
+      "advance-github-connection-fence",
+      "disconnect-github-connections",
+      "revoke-github-capabilities-on-disconnect",
+    ]
+  );
+  for (const currentStatement of first.statements) {
+    assert.equal(currentStatement.args.tenant, principal.tenant);
+  }
+
+  const retry = scripted(
+    [],
+    [{ generation: "1" }],
+    [{ generation: "2" }],
+    [],
+    []
+  );
+  assert.deepEqual(await retry.store.disconnectGitHubConnections(principal), {
+    removed: 0,
+    revokedCapabilities: 0,
+  });
+  assert.deepEqual(
+    retry.statements.map(({ name }) => name),
+    [
+      "ensure-github-connection-fence",
+      "lock-github-connection-fence",
+      "advance-github-connection-fence",
+      "disconnect-github-connections",
+      "revoke-github-capabilities-on-disconnect",
+    ]
   );
 });
 
@@ -2345,6 +2919,7 @@ test("GitHub operations are idempotent by operation id and sanitized request has
     target: "OpenCoven/coven-agents:feature/team",
     teamStepId: TEAM_STEP_A,
   });
+
   assert.equal(createdResult.kind, "created");
   assert.equal(
     created.statements[1]?.args.repository,

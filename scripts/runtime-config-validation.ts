@@ -2,9 +2,11 @@ import { validateAbuseConfig } from "../lib/abuse/config";
 import { approvedApplicationOrigin } from "../lib/auth/application-origin";
 import { validateSubscriptionCheckoutEnvironment } from "../lib/billing/config-core";
 import { credentialKekRingFromEnvironment } from "../lib/credentials/key-ring";
+import { validateGitHubEnvironment } from "../lib/github/config";
 import {
   DAYTONA_SANDBOX_RESOURCE_POLICY_ENVIRONMENT_KEYS,
   daytonaDomainAllowList,
+  daytonaGitHubGatewayHostname,
   daytonaRequestTimeout,
   daytonaSandboxResourcePolicy,
   daytonaSnapshotConfiguration,
@@ -115,7 +117,8 @@ function validateProductionDaytonaConfig(environment: NodeJS.ProcessEnv): void {
   approvedApplicationOrigin(environment);
 
   daytonaRequestTimeout(environment);
-  daytonaDomainAllowList(environment);
+  const domainAllowList = daytonaDomainAllowList(environment);
+  daytonaGitHubGatewayHostname(environment, domainAllowList);
   daytonaSandboxResourcePolicy(environment);
   daytonaSnapshotConfiguration(environment);
   validateAdmissionSettings(environment);
@@ -276,6 +279,7 @@ export async function validateRuntimeConfig(
 ): Promise<void> {
   hermeticRunnerMode(env);
   validateSubscriptionCheckoutEnvironment(env);
+  validateGitHubEnvironment(env);
 
   const productionRelease = isProductionRelease(env, explicitRelease);
   validateReleaseAudience(env, explicitRelease);
@@ -285,6 +289,13 @@ export async function validateRuntimeConfig(
     validateConfiguredPreviewDaytonaConfig(env);
     if (env.APP_ORIGIN !== undefined) {
       approvedApplicationOrigin(env);
+    }
+
+    if (
+      env.GITHUB_TEAMS_ENABLED === "on" &&
+      env.DAYTONA_DOMAIN_ALLOW_LIST?.trim()
+    ) {
+      daytonaGitHubGatewayHostname(env);
     }
   }
 

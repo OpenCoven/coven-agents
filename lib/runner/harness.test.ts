@@ -85,6 +85,7 @@ test("quotes Copilot invocation and keeps incomplete JSONL outside the cursor", 
 
 test("explicit workspace permissions restrict tools without inspecting task text", () => {
   const readCommand = buildHarnessCommand({
+    attemptDirectory: "/run/coven-agents/attempt/work",
     configDirectory: "/run/coven-agents/attempt/copilot",
     executionPermission: "workspace_read",
     harness: "copilot",
@@ -94,6 +95,7 @@ test("explicit workspace permissions restrict tools without inspecting task text
     workspace: "/workspace/repo",
   });
   const writeCommand = buildHarnessCommand({
+    attemptDirectory: "/run/coven-agents/attempt/work",
     configDirectory: "/run/coven-agents/attempt/copilot",
     executionPermission: "workspace_write",
     harness: "copilot",
@@ -104,7 +106,7 @@ test("explicit workspace permissions restrict tools without inspecting task text
   });
 
   assert.doesNotMatch(readCommand, /--yolo/u);
-  assert.match(readCommand, /--available-tools' 'view,grep,glob/u);
+  assert.match(readCommand, /--available-tools' 'view,rg,glob/u);
   assert.doesNotMatch(readCommand, /--available-tools' '[^']*edit/iu);
   assert.doesNotMatch(readCommand, /--allow-tool' 'write/iu);
   assert.doesNotMatch(readCommand, /--allow-tool' 'shell/iu);
@@ -119,7 +121,7 @@ test("explicit workspace permissions restrict tools without inspecting task text
   );
 
   assert.doesNotMatch(writeCommand, /--yolo|shell|github-mcp|web_/iu);
-  assert.match(writeCommand, /--available-tools' 'view,edit,grep,glob/u);
+  assert.match(writeCommand, /--available-tools' 'view,apply_patch,rg,glob/u);
   assert.match(writeCommand, /--allow-tool' 'write/u);
 });
 

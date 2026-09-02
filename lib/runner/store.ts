@@ -9,6 +9,7 @@ import type {
 } from "@opencoven/agent-contracts";
 import { AGENT_RUNNER_API_VERSION } from "@opencoven/agent-contracts";
 import { type SQL, sql } from "drizzle-orm";
+import { canonicalJsonStringify } from "@/lib/canonical-json";
 import type { databaseFor } from "@/lib/db/access";
 import { daytonaRunSessionName } from "./daytona/names";
 import {
@@ -190,6 +191,7 @@ function asRun(row: Record<string, unknown>): RunnerRunRecord {
     executionPermission: column(row, "executionPermission"),
     executionProvenance: column(row, "executionProvenance"),
     fileEvidence: column(row, "fileEvidence"),
+    githubBrokerPolicy: column(row, "githubBrokerPolicy"),
     id: column(row, "id"),
     logCursor: column(row, "logCursor"),
     operationId: column(row, "operationId"),
@@ -199,6 +201,7 @@ function asRun(row: Record<string, unknown>): RunnerRunRecord {
     startedAt: nullableTimestampColumn(row, "startedAt"),
     status: column(row, "status"),
     task: column(row, "task"),
+    teamStepId: column(row, "teamStepId"),
     tenant: column(row, "tenant"),
     version: column(row, "version"),
   };
@@ -712,6 +715,13 @@ function matchesRunRequest(
   executionPermission: RunnerRunRecord["executionPermission"]
 ): boolean {
   if (run.executionPermission !== executionPermission) {
+    return false;
+  }
+  if (
+    run.teamStepId !== (input.teamStepId ?? null) ||
+    canonicalJsonStringify(run.githubBrokerPolicy) !==
+      canonicalJsonStringify(input.githubBrokerPolicy ?? null)
+  ) {
     return false;
   }
   if (run.requestHash === input.requestHash) {
@@ -2096,6 +2106,53 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         }
         return { kind: "decommissioning", value: asAgent(updated) };
       }),
+    beginDaytonaSandboxReset: (
+      principal: RunnerPrincipal,
+      input: DaytonaSandboxFence
+    ): Promise<
+      | { kind: "updated"; value: RunnerAgentRecord }
+      | { kind: "not_found" | "stale_version" }
+    > =>
+      database.transaction(async (transaction) => {
+        const [updated] = await transaction.execute(
+          statement(
+            "begin-daytona-sandbox-reset",
+            { ...input, tenant: principal.tenant },
+            sql`UPDATE "RunnerAgent"
+              SET "sandboxGeneration" = "sandboxGeneration" + 1,
+                  "sandboxLifecycle" = 'resetting',
+                  "sandboxUpdatedAt" = clock_timestamp(),
+                  "warmStatus" = 'not_started',
+                  "warmUpdatedAt" = clock_timestamp(),
+                  "updatedAt" = clock_timestamp(),
+                  "version" = "version" + 1
+              WHERE "id" = ${input.agentId}
+                AND "tenant" = ${principal.tenant}
+                AND "version" = ${input.expectedVersion}
+                AND "sandboxGeneration" = ${input.expectedGeneration}
+                AND "sandboxLifecycle" IN (
+                  'provisioning',
+                  'provisioning_ambiguous',
+                  'ready'
+                )
+              RETURNING *`
+          )
+        );
+        if (updated) {
+          return { kind: "updated", value: asAgent(updated) };
+        }
+        const [current] = await transaction.execute(
+          statement(
+            "get-agent-after-daytona-sandbox-reset-begin",
+            { agentId: input.agentId, tenant: principal.tenant },
+            sql`SELECT "id" FROM "RunnerAgent"
+              WHERE "id" = ${input.agentId}
+                AND "tenant" = ${principal.tenant}
+              LIMIT 1`
+          )
+        );
+        return current ? { kind: "stale_version" } : { kind: "not_found" };
+      }),
 
     /**
      * Fences the persistent sandbox before an exact cancellation, terminal,
@@ -2220,6 +2277,116 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         return updated
           ? { kind: "resetting", value: asAgent(updated) }
           : { kind: "stale_version" };
+      }),
+
+    beginDaytonaSandboxResetForDispatch: (
+      _operator: RunnerOperator,
+      authority: RunnerDispatchAuthority,
+      input: DaytonaSandboxFence
+    ): Promise<
+      | { kind: "updated"; value: RunnerAgentRecord }
+      | { kind: "not_found" | "not_live" | "stale_version" }
+    > =>
+      database.transaction(async (transaction) => {
+        const run = await lockedLiveDispatchRun(transaction, authority, [
+          "dispatching",
+          "running",
+        ]);
+        if (!run) {
+          return { kind: "not_live" };
+        }
+        const agent = await lockedDispatchAgent(transaction, run);
+        if (!agent) {
+          return { kind: "not_found" };
+        }
+        if (
+          agent.id !== input.agentId ||
+          agent.version !== input.expectedVersion ||
+          agent.sandboxGeneration !== input.expectedGeneration ||
+          (agent.sandboxLifecycle !== "provisioning" &&
+            agent.sandboxLifecycle !== "provisioning_ambiguous" &&
+            agent.sandboxLifecycle !== "ready")
+        ) {
+          return { kind: "stale_version" };
+        }
+        const [updated] = await transaction.execute(
+          statement(
+            "begin-daytona-sandbox-reset-for-dispatch",
+            {
+              agentId: agent.id,
+              expectedGeneration: input.expectedGeneration,
+              expectedVersion: input.expectedVersion,
+              tenant: agent.tenant,
+            },
+            sql`UPDATE "RunnerAgent"
+              SET "sandboxGeneration" = "sandboxGeneration" + 1,
+                  "sandboxLifecycle" = 'resetting',
+                  "sandboxUpdatedAt" = clock_timestamp(),
+                  "warmStatus" = 'not_started',
+                  "warmUpdatedAt" = clock_timestamp(),
+                  "updatedAt" = clock_timestamp(),
+                  "version" = "version" + 1
+              WHERE "id" = ${agent.id}
+                AND "tenant" = ${agent.tenant}
+                AND "version" = ${input.expectedVersion}
+                AND "sandboxGeneration" = ${input.expectedGeneration}
+                AND "sandboxLifecycle" IN (
+                  'provisioning',
+                  'provisioning_ambiguous',
+                  'ready'
+                )
+              RETURNING *`
+          )
+        );
+        return updated
+          ? { kind: "updated", value: asAgent(updated) }
+          : { kind: "stale_version" };
+      }),
+
+    beginDaytonaSandboxResetForRecovery: (
+      _operator: RunnerOperator,
+      input: DaytonaSandboxFence
+    ): Promise<
+      | { kind: "updated"; value: RunnerAgentRecord }
+      | { kind: "not_found" | "stale_version" }
+    > =>
+      database.transaction(async (transaction) => {
+        const [updated] = await transaction.execute(
+          statement(
+            "begin-daytona-sandbox-reset-for-recovery",
+            input,
+            sql`UPDATE "RunnerAgent"
+              SET "sandboxGeneration" = "sandboxGeneration" + 1,
+                  "sandboxLifecycle" = 'resetting',
+                  "sandboxUpdatedAt" = clock_timestamp(),
+                  "warmStatus" = 'not_started',
+                  "warmUpdatedAt" = clock_timestamp(),
+                  "updatedAt" = clock_timestamp(),
+                  "version" = "version" + 1
+              WHERE "id" = ${input.agentId}
+                AND "version" = ${input.expectedVersion}
+                AND "sandboxGeneration" = ${input.expectedGeneration}
+                AND "sandboxLifecycle" IN (
+                  'provisioning',
+                  'provisioning_ambiguous',
+                  'ready'
+                )
+              RETURNING *`
+          )
+        );
+        if (updated) {
+          return { kind: "updated", value: asAgent(updated) };
+        }
+        const [current] = await transaction.execute(
+          statement(
+            "get-agent-after-daytona-recovery-reset-begin",
+            { agentId: input.agentId },
+            sql`SELECT "id" FROM "RunnerAgent"
+              WHERE "id" = ${input.agentId}
+              LIMIT 1`
+          )
+        );
+        return current ? { kind: "stale_version" } : { kind: "not_found" };
       }),
 
     beginDaytonaSandboxWarm: (
@@ -2820,7 +2987,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                 AND "tenant" = ${principal.tenant}
                 AND "version" = ${input.expectedVersion}
                 AND "sandboxGeneration" = ${input.expectedGeneration}
-                AND "sandboxLifecycle" = 'provisioning'
+                AND "sandboxLifecycle" IN ('provisioning', 'provisioning_ambiguous')
               RETURNING *`
           )
         );
@@ -2880,7 +3047,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                 AND "tenant" = ${run.tenant}
                 AND "version" = ${input.expectedVersion}
                 AND "sandboxGeneration" = ${input.expectedGeneration}
-                AND "sandboxLifecycle" = 'provisioning'
+                AND "sandboxLifecycle" IN ('provisioning', 'provisioning_ambiguous')
               RETURNING *`
           )
         );
@@ -3002,6 +3169,110 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           finalized.agentId
         );
         return { kind: "finalized", prunedRunIds, run: finalized };
+      }),
+
+    finishDaytonaSandboxReset: (
+      principal: RunnerPrincipal,
+      input: DaytonaSandboxFence
+    ): Promise<
+      | { kind: "updated"; value: RunnerAgentRecord }
+      | { kind: "not_found" | "stale_version" }
+    > =>
+      database.transaction(async (transaction) => {
+        const [updated] = await transaction.execute(
+          statement(
+            "finish-daytona-sandbox-reset",
+            { ...input, tenant: principal.tenant },
+            sql`UPDATE "RunnerAgent"
+              SET "daytonaSandboxId" = NULL,
+                  "sandboxLifecycle" = 'unprovisioned',
+                  "sandboxTrust" = 'clean',
+                  "sandboxUpdatedAt" = clock_timestamp(),
+                  "warmStatus" = 'not_started',
+                  "warmUpdatedAt" = clock_timestamp(),
+                  "updatedAt" = clock_timestamp(),
+                  "version" = "version" + 1
+              WHERE "id" = ${input.agentId}
+                AND "tenant" = ${principal.tenant}
+                AND "version" = ${input.expectedVersion}
+                AND "sandboxGeneration" = ${input.expectedGeneration}
+                AND "sandboxLifecycle" = 'resetting'
+              RETURNING *`
+          )
+        );
+        if (updated) {
+          return { kind: "updated", value: asAgent(updated) };
+        }
+        const [current] = await transaction.execute(
+          statement(
+            "get-agent-after-daytona-reset-finish",
+            { agentId: input.agentId, tenant: principal.tenant },
+            sql`SELECT "id" FROM "RunnerAgent"
+              WHERE "id" = ${input.agentId}
+                AND "tenant" = ${principal.tenant}
+              LIMIT 1`
+          )
+        );
+        return current ? { kind: "stale_version" } : { kind: "not_found" };
+      }),
+
+    finishDaytonaSandboxResetForDispatch: (
+      _operator: RunnerOperator,
+      authority: RunnerDispatchAuthority,
+      input: DaytonaSandboxFence
+    ): Promise<
+      | { kind: "updated"; value: RunnerAgentRecord }
+      | { kind: "not_found" | "not_live" | "stale_version" }
+    > =>
+      database.transaction(async (transaction) => {
+        const run = await lockedLiveDispatchRun(transaction, authority, [
+          "dispatching",
+          "running",
+        ]);
+        if (!run) {
+          return { kind: "not_live" };
+        }
+        const agent = await lockedDispatchAgent(transaction, run);
+        if (!agent) {
+          return { kind: "not_found" };
+        }
+        if (
+          agent.id !== input.agentId ||
+          agent.version !== input.expectedVersion ||
+          agent.sandboxGeneration !== input.expectedGeneration ||
+          agent.sandboxLifecycle !== "resetting"
+        ) {
+          return { kind: "stale_version" };
+        }
+        const [updated] = await transaction.execute(
+          statement(
+            "finish-daytona-sandbox-reset-for-dispatch",
+            {
+              agentId: agent.id,
+              expectedGeneration: input.expectedGeneration,
+              expectedVersion: input.expectedVersion,
+              tenant: agent.tenant,
+            },
+            sql`UPDATE "RunnerAgent"
+              SET "daytonaSandboxId" = NULL,
+                  "sandboxLifecycle" = 'unprovisioned',
+                  "sandboxTrust" = 'clean',
+                  "sandboxUpdatedAt" = clock_timestamp(),
+                  "warmStatus" = 'not_started',
+                  "warmUpdatedAt" = clock_timestamp(),
+                  "updatedAt" = clock_timestamp(),
+                  "version" = "version" + 1
+              WHERE "id" = ${agent.id}
+                AND "tenant" = ${agent.tenant}
+                AND "version" = ${input.expectedVersion}
+                AND "sandboxGeneration" = ${input.expectedGeneration}
+                AND "sandboxLifecycle" = 'resetting'
+              RETURNING *`
+          )
+        );
+        return updated
+          ? { kind: "updated", value: asAgent(updated) }
+          : { kind: "stale_version" };
       }),
 
     finishDaytonaSandboxResetForRecovery: (
@@ -4424,6 +4695,8 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         }
     > => {
       const executionPermission = input.executionPermission ?? "unrestricted";
+      const githubBrokerPolicy = input.githubBrokerPolicy ?? null;
+      const teamStepId = input.teamStepId ?? null;
       return database.transaction(async (transaction) => {
         const [agent] = await transaction.execute(
           statement(
@@ -4535,22 +4808,26 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
               agentWorkspace: agentSnapshot.workspace,
               authVersion: input.authVersion,
               executionPermission,
+              githubBrokerPolicy,
               id: input.id,
               operationId: input.operationId,
               requestHash: input.requestHash,
               task: input.task,
+              teamStepId,
               tenant: principal.tenant,
             },
             sql`INSERT INTO "RunnerRun" (
               "id", "agentId", "tenant", "agentInstructions", "agentModel",
               "agentRuntime", "agentWorkspace", "authVersion", "operationId",
-              "requestHash", "task", "executionPermission"
+              "requestHash", "task", "executionPermission", "teamStepId",
+              "githubBrokerPolicy"
             ) VALUES (
               ${input.id}, ${input.agentId}, ${principal.tenant},
               ${agentSnapshot.instructions}, ${agentSnapshot.model},
               ${agentSnapshot.runtime}, ${agentSnapshot.workspace},
               ${input.authVersion}, ${input.operationId}, ${input.requestHash},
-              ${input.task}, ${executionPermission}
+              ${input.task}, ${executionPermission}, ${teamStepId},
+              CAST(${JSON.stringify(githubBrokerPolicy)} AS jsonb)
             ) ON CONFLICT ("agentId", "operationId") DO NOTHING RETURNING *`
           )
         );

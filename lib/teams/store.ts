@@ -6,6 +6,7 @@ import {
   type GitHubOperationKind,
   type GitHubOperationStatus,
   githubOperationKindSchema,
+  isCanonicalUuid,
   type RunError,
   runErrorSchema,
   TEAM_LIMITS,
@@ -17,7 +18,15 @@ import {
   teamHandoffSchema,
 } from "@opencoven/agent-contracts";
 import { type SQL, sql } from "drizzle-orm";
+import { compareAscii } from "@/lib/ascii";
 import type { databaseFor } from "@/lib/db/access";
+import {
+  type GitHubAppRepositoryPermission,
+  type GitHubUserRepositoryPermission,
+  userPermissionAtMost,
+  validAppRepositoryPermission,
+  validUserRepositoryPermission,
+} from "@/lib/github/authority-types";
 import type {
   RunnerAgentExecutionSnapshot,
   RunnerExecutionPermission,
@@ -27,8 +36,6 @@ import type {
 import { teamChildRunnerIds } from "./child-ids";
 import { buildTeamHandoff } from "./handoff";
 
-const UUID =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const SHA256 = /^[a-f0-9]{64}$/u;
 const DECIMAL_ID = /^(0|[1-9][0-9]{0,19})$/u;
 const REPOSITORY = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/u;
@@ -177,7 +184,12 @@ export type GitHubConnectionRecord = {
   accountId: string;
   accountLogin: string;
   accountType: "Organization" | "User";
+  appIssuesPermission: GitHubAppRepositoryPermission;
+  appOrganizationProjectsPermission: GitHubAppRepositoryPermission;
+  appPullRequestsPermission: GitHubAppRepositoryPermission;
   createdAt: Date;
+  githubUserId: string;
+  githubUserLogin: string;
   id: string;
   installationId: string;
   repositoryId: string;
@@ -186,6 +198,10 @@ export type GitHubConnectionRecord = {
   repositoryOwner: string;
   tenant: string;
   updatedAt: Date;
+  userPermissionCeiling: GitHubUserRepositoryPermission;
+  userPermissionCurrent: GitHubUserRepositoryPermission;
+  userProjectManagementCeiling: boolean;
+  userProjectManagementCurrent: boolean;
   version: number;
 };
 
@@ -317,6 +333,73 @@ export type CreateGitHubCapabilityInput = {
   tokenHash: string;
 };
 
+export type ReplaceGitHubInstallationConnectionsInput = {
+  accountId: string;
+  accountLogin: string;
+  accountType: "Organization" | "User";
+  installationId: string;
+  repositories: Array<{
+    appIssuesPermission: GitHubAppRepositoryPermission;
+    appOrganizationProjectsPermission: GitHubAppRepositoryPermission;
+    appPullRequestsPermission: GitHubAppRepositoryPermission;
+    githubUserId: string;
+    githubUserLogin: string;
+    id: string;
+    repositoryId: string;
+    repositoryName: string;
+    repositoryNodeId: string;
+    repositoryOwner: string;
+    userPermissionCeiling: GitHubUserRepositoryPermission;
+    userPermissionCurrent: GitHubUserRepositoryPermission;
+    userProjectManagementCeiling: boolean;
+    userProjectManagementCurrent: boolean;
+  }>;
+};
+
+export type GitHubConnectionPhaseControl = Readonly<{
+  abortSignal?: AbortSignal;
+  deadlineAt?: number;
+}>;
+
+export type FencedGitHubInstallationConnectionsInput =
+  ReplaceGitHubInstallationConnectionsInput &
+    GitHubConnectionPhaseControl & {
+      expectedGeneration: number;
+    };
+
+export type GitHubConnectionSnapshot = {
+  connections: readonly GitHubConnectionRecord[];
+  generation: number;
+};
+
+export type ConnectGitHubInstallationConnectionsResult =
+  | Readonly<{ kind: "stale" }>
+  | Readonly<{
+      changed: boolean;
+      connections: GitHubConnectionRecord[];
+      generation: number;
+      kind: "connected";
+    }>;
+
+export type RefreshGitHubInstallationConnectionsResult =
+  | Readonly<{ kind: "stale" }>
+  | Readonly<{
+      changed: boolean;
+      connections: GitHubConnectionRecord[];
+      generation: number;
+      kind: "refreshed";
+    }>;
+
+export type RemoveGitHubInstallationConnectionsResult =
+  | Readonly<{ kind: "stale" }>
+  | Readonly<{ generation: number; kind: "unchanged" }>
+  | Readonly<{
+      generation: number;
+      kind: "removed";
+      removed: number;
+      revokedCapabilities: number;
+    }>;
+
 export type BeginGitHubOperationInput = {
   capabilityId: string;
   id: string;
@@ -336,12 +419,135 @@ function statement(
   return { args, name, query };
 }
 
+function githubConnectionTransaction<T>(
+  database: TeamStoreDatabase,
+  control: GitHubConnectionPhaseControl,
+  callback: (transaction: TeamStoreTransaction) => Promise<T>
+): Promise<T> {
+  const assertLive = () => {
+    control.abortSignal?.throwIfAborted();
+    if (
+      control.deadlineAt !== undefined &&
+      (!Number.isSafeInteger(control.deadlineAt) ||
+        control.deadlineAt <= Date.now())
+    ) {
+      throw Object.assign(new Error("GitHub authority deadline exceeded."), {
+        code: "57014",
+      });
+    }
+  };
+  return database.transaction(async (transaction) => {
+    assertLive();
+    if (control.abortSignal !== undefined || control.deadlineAt !== undefined) {
+      const remaining = control.deadlineAt
+        ? control.deadlineAt - Date.now()
+        : 5000;
+      const statementTimeoutMs = Math.max(1, Math.min(5000, remaining));
+      const lockTimeoutMs = Math.max(1, Math.min(1000, statementTimeoutMs));
+      await transaction.execute(
+        statement(
+          "configure-github-authority-database-deadlines",
+          { lockTimeoutMs, statementTimeoutMs },
+          sql`SELECT
+            set_config('lock_timeout', ${`${lockTimeoutMs}ms`}, true),
+            set_config('statement_timeout', ${`${statementTimeoutMs}ms`}, true)`
+        )
+      );
+      assertLive();
+    }
+    const result = await callback(transaction);
+    assertLive();
+    return result;
+  });
+}
+
+async function ensureGitHubConnectionFence(
+  transaction: TeamStoreTransaction,
+  tenant: string
+): Promise<void> {
+  await transaction.execute(
+    statement(
+      "ensure-github-connection-fence",
+      { tenant },
+      sql`INSERT INTO "RunnerGitHubConnectionFence" ("tenant", "generation")
+        VALUES (${tenant}, 0)
+        ON CONFLICT ("tenant") DO NOTHING`
+    )
+  );
+}
+
+async function readGitHubConnectionFence(
+  transaction: TeamStoreTransaction,
+  tenant: string,
+  lock: "share" | "update"
+): Promise<number> {
+  await ensureGitHubConnectionFence(transaction, tenant);
+  const [row] = await transaction.execute(
+    statement(
+      lock === "share"
+        ? "read-github-connection-fence"
+        : "lock-github-connection-fence",
+      { tenant },
+      lock === "share"
+        ? sql`SELECT "generation"
+            FROM "RunnerGitHubConnectionFence"
+            WHERE "tenant" = ${tenant}
+            FOR SHARE`
+        : sql`SELECT "generation"
+            FROM "RunnerGitHubConnectionFence"
+            WHERE "tenant" = ${tenant}
+            FOR UPDATE`
+    )
+  );
+  if (!row) {
+    throw new Error("GitHub connection fence is unavailable.");
+  }
+  return generationColumn(row, "generation");
+}
+
+async function advanceGitHubConnectionFence(
+  transaction: TeamStoreTransaction,
+  tenant: string,
+  expectedGeneration: number
+): Promise<number> {
+  const [advanced] = await transaction.execute(
+    statement(
+      "advance-github-connection-fence",
+      { expectedGeneration, tenant },
+      sql`UPDATE "RunnerGitHubConnectionFence"
+        SET "generation" = "generation" + 1,
+            "updatedAt" = clock_timestamp()
+        WHERE "tenant" = ${tenant}
+          AND "generation" = ${expectedGeneration}
+        RETURNING "generation"`
+    )
+  );
+  if (!advanced) {
+    throw new Error("GitHub connection fence changed during mutation.");
+  }
+  return generationColumn(advanced, "generation");
+}
+
 function column<T>(row: Record<string, unknown>, name: string): T {
   const value = row[name];
   if (value === undefined) {
     throw new Error(`Team query did not return "${name}".`);
   }
   return value as T;
+}
+
+function generationColumn(row: Record<string, unknown>, name: string): number {
+  const value = column<unknown>(row, name);
+  const parsed =
+    typeof value === "number"
+      ? value
+      : typeof value === "string" && /^(0|[1-9][0-9]*)$/u.test(value)
+        ? Number(value)
+        : Number.NaN;
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error(`Team query returned an invalid "${name}".`);
+  }
+  return parsed;
 }
 
 function postgresTimestamp(value: unknown): Date | null {
@@ -512,7 +718,15 @@ function asConnection(row: Record<string, unknown>): GitHubConnectionRecord {
     accountId: column(row, "accountId"),
     accountLogin: column(row, "accountLogin"),
     accountType: column(row, "accountType"),
+    appIssuesPermission: column(row, "appIssuesPermission"),
+    appOrganizationProjectsPermission: column(
+      row,
+      "appOrganizationProjectsPermission"
+    ),
+    appPullRequestsPermission: column(row, "appPullRequestsPermission"),
     createdAt: timestampColumn(row, "createdAt"),
+    githubUserId: column(row, "githubUserId"),
+    githubUserLogin: column(row, "githubUserLogin"),
     id: column(row, "id"),
     installationId: column(row, "installationId"),
     repositoryId: column(row, "repositoryId"),
@@ -521,6 +735,10 @@ function asConnection(row: Record<string, unknown>): GitHubConnectionRecord {
     repositoryOwner: column(row, "repositoryOwner"),
     tenant: column(row, "tenant"),
     updatedAt: timestampColumn(row, "updatedAt"),
+    userPermissionCeiling: column(row, "userPermissionCeiling"),
+    userPermissionCurrent: column(row, "userPermissionCurrent"),
+    userProjectManagementCeiling: column(row, "userProjectManagementCeiling"),
+    userProjectManagementCurrent: column(row, "userProjectManagementCurrent"),
     version: column(row, "version"),
   };
 }
@@ -568,7 +786,7 @@ function asGitHubOperation(
 }
 
 function assertUuid(value: string, field: string): void {
-  if (!UUID.test(value)) {
+  if (!isCanonicalUuid(value)) {
     throw new Error(`${field} must be a UUID.`);
   }
 }
@@ -886,7 +1104,12 @@ function teamExecutionPermission(
   if (capabilities.includes("workspace.write")) {
     return "workspace_write";
   }
-  return capabilities.includes("workspace.read") ? "workspace_read" : null;
+  if (capabilities.includes("workspace.read")) {
+    return "workspace_read";
+  }
+  return capabilities.some((capability) => capability.startsWith("github."))
+    ? "github_only"
+    : null;
 }
 
 function validApprovalCapabilities(
@@ -967,26 +1190,49 @@ function validateConnectionInput(input: {
   accountId: string;
   accountLogin: string;
   accountType: "Organization" | "User";
+  appIssuesPermission: GitHubAppRepositoryPermission;
+  appOrganizationProjectsPermission: GitHubAppRepositoryPermission;
+  appPullRequestsPermission: GitHubAppRepositoryPermission;
+  githubUserId: string;
+  githubUserLogin: string;
   id: string;
   installationId: string;
   repositoryId: string;
   repositoryName: string;
   repositoryNodeId: string;
   repositoryOwner: string;
+  userPermissionCeiling: GitHubUserRepositoryPermission;
+  userPermissionCurrent: GitHubUserRepositoryPermission;
+  userProjectManagementCeiling: boolean;
+  userProjectManagementCurrent: boolean;
 }): void {
   assertUuid(input.id, "GitHub connection id");
   for (const [name, value] of [
     ["installation id", input.installationId],
     ["account id", input.accountId],
     ["repository id", input.repositoryId],
+    ["GitHub user id", input.githubUserId],
   ] as const) {
     if (!DECIMAL_ID.test(value)) {
       throw new Error(`GitHub ${name} must be a decimal string.`);
     }
   }
   if (
+    !validAppRepositoryPermission(input.appIssuesPermission) ||
+    !validAppRepositoryPermission(input.appPullRequestsPermission) ||
+    !validAppRepositoryPermission(input.appOrganizationProjectsPermission) ||
+    !validUserRepositoryPermission(input.userPermissionCeiling) ||
+    !validUserRepositoryPermission(input.userPermissionCurrent) ||
+    !userPermissionAtMost(
+      input.userPermissionCurrent,
+      input.userPermissionCeiling
+    ) ||
+    (input.userProjectManagementCurrent &&
+      !input.userProjectManagementCeiling) ||
     !input.accountLogin ||
     input.accountLogin.length > 100 ||
+    !input.githubUserLogin ||
+    input.githubUserLogin.length > 100 ||
     !input.repositoryOwner ||
     input.repositoryOwner.length > 100 ||
     !input.repositoryName ||
@@ -996,6 +1242,104 @@ function validateConnectionInput(input: {
   ) {
     throw new Error("GitHub connection metadata is invalid.");
   }
+}
+
+function normalizedReplacementConnections(
+  input: ReplaceGitHubInstallationConnectionsInput
+): Array<
+  ReplaceGitHubInstallationConnectionsInput["repositories"][number] & {
+    accountId: string;
+    accountLogin: string;
+    accountType: "Organization" | "User";
+    installationId: string;
+  }
+> {
+  if (input.accountType !== "Organization" && input.accountType !== "User") {
+    throw new Error("GitHub account type is invalid.");
+  }
+  if (
+    input.repositories.length < 1 ||
+    input.repositories.length > MAX_REPOSITORIES
+  ) {
+    throw new Error(
+      `GitHub installation must select 1-${MAX_REPOSITORIES} repositories.`
+    );
+  }
+
+  const connections = input.repositories
+    .map((repository) => ({
+      ...repository,
+      accountId: input.accountId,
+      accountLogin: input.accountLogin,
+      accountType: input.accountType,
+      installationId: input.installationId,
+    }))
+    .sort((left, right) => compareAscii(left.repositoryId, right.repositoryId));
+  if (
+    new Set(connections.map(({ repositoryId }) => repositoryId)).size !==
+    connections.length
+  ) {
+    throw new Error("GitHub installation contains duplicate repositories.");
+  }
+  for (const connection of connections) {
+    validateConnectionInput(connection);
+  }
+  return connections;
+}
+
+type NormalizedGitHubConnection = ReturnType<
+  typeof normalizedReplacementConnections
+>[number];
+
+function sameConnectionAuthority(
+  current: readonly GitHubConnectionRecord[],
+  next: readonly NormalizedGitHubConnection[]
+): boolean {
+  if (current.length !== next.length) {
+    return false;
+  }
+  const sortedCurrent = [...current].sort((left, right) =>
+    compareAscii(left.repositoryId, right.repositoryId)
+  );
+  return sortedCurrent.every((connection, index) => {
+    const candidate = next[index];
+    return (
+      candidate !== undefined &&
+      connection.installationId === candidate.installationId &&
+      connection.accountId === candidate.accountId &&
+      connection.accountLogin === candidate.accountLogin &&
+      connection.accountType === candidate.accountType &&
+      connection.repositoryId === candidate.repositoryId &&
+      connection.repositoryNodeId === candidate.repositoryNodeId &&
+      connection.repositoryOwner === candidate.repositoryOwner &&
+      connection.repositoryName === candidate.repositoryName &&
+      connection.githubUserId === candidate.githubUserId &&
+      connection.githubUserLogin === candidate.githubUserLogin &&
+      connection.userPermissionCeiling === candidate.userPermissionCeiling &&
+      connection.userPermissionCurrent === candidate.userPermissionCurrent &&
+      connection.userProjectManagementCeiling ===
+        candidate.userProjectManagementCeiling &&
+      connection.userProjectManagementCurrent ===
+        candidate.userProjectManagementCurrent &&
+      connection.appIssuesPermission === candidate.appIssuesPermission &&
+      connection.appPullRequestsPermission ===
+        candidate.appPullRequestsPermission &&
+      connection.appOrganizationProjectsPermission ===
+        candidate.appOrganizationProjectsPermission
+    );
+  });
+}
+
+function sameImmutableUserAuthority(
+  current: GitHubConnectionRecord,
+  next: NormalizedGitHubConnection
+): boolean {
+  return (
+    current.githubUserId === next.githubUserId &&
+    current.githubUserLogin === next.githubUserLogin &&
+    current.userPermissionCeiling === next.userPermissionCeiling &&
+    current.userProjectManagementCeiling === next.userProjectManagementCeiling
+  );
 }
 
 function validateReceipt(input: {
@@ -1035,6 +1379,225 @@ function validateReceipt(input: {
   }
   if (input.status === "failed" && input.error === null) {
     throw new Error("Failed GitHub operations require an error.");
+  }
+}
+
+function replaceFencedGitHubInstallationConnections(
+  database: TeamStoreDatabase,
+  principal: RunnerPrincipal,
+  input: FencedGitHubInstallationConnectionsInput,
+  mode: "connect"
+): Promise<ConnectGitHubInstallationConnectionsResult>;
+function replaceFencedGitHubInstallationConnections(
+  database: TeamStoreDatabase,
+  principal: RunnerPrincipal,
+  input: FencedGitHubInstallationConnectionsInput,
+  mode: "refresh"
+): Promise<RefreshGitHubInstallationConnectionsResult>;
+async function replaceFencedGitHubInstallationConnections(
+  database: TeamStoreDatabase,
+  principal: RunnerPrincipal,
+  input: FencedGitHubInstallationConnectionsInput,
+  mode: "connect" | "refresh"
+): Promise<
+  | ConnectGitHubInstallationConnectionsResult
+  | RefreshGitHubInstallationConnectionsResult
+> {
+  assertGeneration(input.expectedGeneration);
+  const connections = normalizedReplacementConnections(input);
+  return await githubConnectionTransaction(
+    database,
+    input,
+    async (transaction) => {
+      const currentGeneration = await readGitHubConnectionFence(
+        transaction,
+        principal.tenant,
+        "update"
+      );
+      if (currentGeneration !== input.expectedGeneration) {
+        return { kind: "stale" } as const;
+      }
+      const tenantRows = await transaction.execute(
+        statement(
+          "list-github-tenant-connections-for-update",
+          {
+            installationId: input.installationId,
+            tenant: principal.tenant,
+          },
+          sql`SELECT * FROM "RunnerGitHubConnection"
+          WHERE "tenant" = ${principal.tenant}
+          ORDER BY "installationId", "repositoryId"
+          FOR UPDATE`
+        )
+      );
+      const tenantConnections = tenantRows.map(asConnection);
+      const existing = tenantConnections.filter(
+        (connection) => connection.installationId === input.installationId
+      );
+      if (mode === "refresh" && existing.length === 0) {
+        return { kind: "stale" } as const;
+      }
+      if (
+        mode === "refresh" &&
+        connections.some((connection) => {
+          const current = existing.find(
+            ({ repositoryId }) => repositoryId === connection.repositoryId
+          );
+          return !current || !sameImmutableUserAuthority(current, connection);
+        })
+      ) {
+        throw new Error(
+          "GitHub user authority ceilings are immutable until reconnect."
+        );
+      }
+      const projectedRepositoryIds = new Set(
+        tenantConnections
+          .filter(
+            (connection) => connection.installationId !== input.installationId
+          )
+          .map(({ repositoryId }) => repositoryId)
+      );
+      for (const connection of connections) {
+        projectedRepositoryIds.add(connection.repositoryId);
+      }
+      if (projectedRepositoryIds.size > MAX_REPOSITORIES) {
+        throw new Error(
+          `GitHub tenant connections cannot exceed ${MAX_REPOSITORIES} repositories.`
+        );
+      }
+
+      const changed = !sameConnectionAuthority(existing, connections);
+      let generation = currentGeneration;
+      if (mode === "connect" || changed) {
+        generation = await advanceGitHubConnectionFence(
+          transaction,
+          principal.tenant,
+          currentGeneration
+        );
+      }
+      if (!changed) {
+        return {
+          changed: false,
+          connections: existing,
+          generation,
+          kind: mode === "connect" ? "connected" : "refreshed",
+        } as const;
+      }
+
+      const stored: GitHubConnectionRecord[] = [];
+      for (const connection of connections) {
+        // biome-ignore lint/performance/noAwaitInLoops: bounded writes share one tenant-fenced replacement transaction
+        const [row] = await transaction.execute(
+          statement(
+            "upsert-github-installation-connection",
+            { ...connection, tenant: principal.tenant },
+            sql`INSERT INTO "RunnerGitHubConnection" (
+              "id", "tenant", "installationId", "accountId", "accountLogin",
+              "accountType", "repositoryId", "repositoryNodeId",
+              "repositoryOwner", "repositoryName", "githubUserId",
+              "githubUserLogin", "userPermissionCeiling",
+              "userPermissionCurrent", "userProjectManagementCeiling",
+              "userProjectManagementCurrent", "appIssuesPermission",
+              "appPullRequestsPermission", "appOrganizationProjectsPermission"
+            ) VALUES (
+              ${connection.id}, ${principal.tenant}, ${connection.installationId},
+              ${connection.accountId}, ${connection.accountLogin},
+              ${connection.accountType}, ${connection.repositoryId},
+              ${connection.repositoryNodeId}, ${connection.repositoryOwner},
+              ${connection.repositoryName}, ${connection.githubUserId},
+              ${connection.githubUserLogin}, ${connection.userPermissionCeiling},
+              ${connection.userPermissionCurrent},
+              ${connection.userProjectManagementCeiling},
+              ${connection.userProjectManagementCurrent},
+              ${connection.appIssuesPermission},
+              ${connection.appPullRequestsPermission},
+              ${connection.appOrganizationProjectsPermission}
+            )
+            ON CONFLICT ("tenant", "repositoryId") DO UPDATE
+            SET "installationId" = EXCLUDED."installationId",
+                "accountId" = EXCLUDED."accountId",
+                "accountLogin" = EXCLUDED."accountLogin",
+                "accountType" = EXCLUDED."accountType",
+                "repositoryNodeId" = EXCLUDED."repositoryNodeId",
+                "repositoryOwner" = EXCLUDED."repositoryOwner",
+                "repositoryName" = EXCLUDED."repositoryName",
+                "githubUserId" = EXCLUDED."githubUserId",
+                "githubUserLogin" = EXCLUDED."githubUserLogin",
+                "userPermissionCeiling" = EXCLUDED."userPermissionCeiling",
+                "userPermissionCurrent" = EXCLUDED."userPermissionCurrent",
+                "userProjectManagementCeiling" =
+                  EXCLUDED."userProjectManagementCeiling",
+                "userProjectManagementCurrent" =
+                  EXCLUDED."userProjectManagementCurrent",
+                "appIssuesPermission" = EXCLUDED."appIssuesPermission",
+                "appPullRequestsPermission" =
+                  EXCLUDED."appPullRequestsPermission",
+                "appOrganizationProjectsPermission" =
+                  EXCLUDED."appOrganizationProjectsPermission",
+                "updatedAt" = now(),
+                "version" = "RunnerGitHubConnection"."version" + 1
+            RETURNING *`
+          )
+        );
+        if (!row) {
+          throw new Error("GitHub connection replacement returned no row.");
+        }
+        stored.push(asConnection(row));
+      }
+
+      const repositoryIds = connections.map(({ repositoryId }) => repositoryId);
+      await transaction.execute(
+        statement(
+          "delete-stale-github-installation-connections",
+          {
+            installationId: input.installationId,
+            repositoryIds,
+            tenant: principal.tenant,
+          },
+          sql`DELETE FROM "RunnerGitHubConnection"
+          WHERE "installationId" = ${input.installationId}
+            AND "tenant" = ${principal.tenant}
+            AND NOT (
+              "repositoryId" = ANY (
+                SELECT jsonb_array_elements_text(
+                  CAST(${jsonParameter(repositoryIds)} AS jsonb)
+                )
+              )
+            )
+          RETURNING "id"`
+        )
+      );
+      await transaction.execute(
+        statement(
+          "revoke-github-capabilities-after-connection-change",
+          {
+            installationId: input.installationId,
+            tenant: principal.tenant,
+          },
+          sql`UPDATE "RunnerGitHubCapability"
+          SET "revokedAt" = COALESCE("revokedAt", now()),
+              "updatedAt" = now(),
+              "version" = "version" + 1
+          WHERE "tenant" = ${principal.tenant}
+            AND "revokedAt" IS NULL
+          RETURNING "id"`
+        )
+      );
+      return {
+        changed: true,
+        connections: stored.sort((left, right) =>
+          compareAscii(left.repositoryId, right.repositoryId)
+        ),
+        generation,
+        kind: mode === "connect" ? "connected" : "refreshed",
+      } as const;
+    }
+  );
+}
+
+function assertGeneration(value: number): void {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error("GitHub connection generation is invalid.");
   }
 }
 
@@ -1973,6 +2536,17 @@ export function createTeamStore(database: TeamStoreDatabase) {
       });
     },
 
+    connectGitHubInstallationConnections: (
+      principal: RunnerPrincipal,
+      input: FencedGitHubInstallationConnectionsInput
+    ): Promise<ConnectGitHubInstallationConnectionsResult> =>
+      replaceFencedGitHubInstallationConnections(
+        database,
+        principal,
+        input,
+        "connect"
+      ),
+
     createGitHubCapability: async (
       principal: RunnerPrincipal,
       input: CreateGitHubCapabilityInput
@@ -2690,6 +3264,46 @@ export function createTeamStore(database: TeamStoreDatabase) {
           : { kind: "stale_version" as const };
       }),
 
+    disconnectGitHubConnections: async (principal: RunnerPrincipal) =>
+      database.transaction(async (transaction) => {
+        const generation = await readGitHubConnectionFence(
+          transaction,
+          principal.tenant,
+          "update"
+        );
+        await advanceGitHubConnectionFence(
+          transaction,
+          principal.tenant,
+          generation
+        );
+        const removed = await transaction.execute(
+          statement(
+            "disconnect-github-connections",
+            { tenant: principal.tenant },
+            sql`DELETE FROM "RunnerGitHubConnection"
+              WHERE "tenant" = ${principal.tenant}
+              RETURNING "id"`
+          )
+        );
+        const revoked = await transaction.execute(
+          statement(
+            "revoke-github-capabilities-on-disconnect",
+            { tenant: principal.tenant },
+            sql`UPDATE "RunnerGitHubCapability"
+              SET "revokedAt" = COALESCE("revokedAt", now()),
+                  "updatedAt" = now(),
+                  "version" = "version" + 1
+              WHERE "tenant" = ${principal.tenant}
+                AND "revokedAt" IS NULL
+              RETURNING "id"`
+          )
+        );
+        return {
+          removed: removed.length,
+          revokedCapabilities: revoked.length,
+        };
+      }),
+
     failTeamStepAdmission: (
       _operator: RunnerOperator,
       input: {
@@ -3183,6 +3797,121 @@ export function createTeamStore(database: TeamStoreDatabase) {
         return { kind: "projected" as const, teamRunId };
       }),
 
+    readGitHubConnectionSnapshot: (
+      principal: RunnerPrincipal,
+      limit: number,
+      control: GitHubConnectionPhaseControl = {}
+    ): Promise<GitHubConnectionSnapshot> =>
+      githubConnectionTransaction(database, control, async (transaction) => {
+        if (
+          !Number.isSafeInteger(limit) ||
+          limit < 1 ||
+          limit > MAX_REPOSITORIES + 1
+        ) {
+          throw new Error("GitHub connection list limit is invalid.");
+        }
+        const generation = await readGitHubConnectionFence(
+          transaction,
+          principal.tenant,
+          "share"
+        );
+        const rows = await transaction.execute(
+          statement(
+            "list-github-connections",
+            { limit, tenant: principal.tenant },
+            sql`SELECT * FROM "RunnerGitHubConnection"
+              WHERE "tenant" = ${principal.tenant}
+              ORDER BY "repositoryOwner", "repositoryName", "repositoryId"
+              LIMIT ${limit}`
+          )
+        );
+        return { connections: rows.map(asConnection), generation };
+      }),
+
+    refreshGitHubInstallationConnections: (
+      principal: RunnerPrincipal,
+      input: FencedGitHubInstallationConnectionsInput
+    ): Promise<RefreshGitHubInstallationConnectionsResult> =>
+      replaceFencedGitHubInstallationConnections(
+        database,
+        principal,
+        input,
+        "refresh"
+      ),
+
+    removeGitHubInstallationConnectionsIfCurrent: async (
+      principal: RunnerPrincipal,
+      input: GitHubConnectionPhaseControl & {
+        expectedGeneration: number;
+        installationId: string;
+      }
+    ): Promise<RemoveGitHubInstallationConnectionsResult> => {
+      assertGeneration(input.expectedGeneration);
+      if (!DECIMAL_ID.test(input.installationId)) {
+        throw new Error("GitHub installation id must be a decimal string.");
+      }
+      return await githubConnectionTransaction(
+        database,
+        input,
+        async (transaction) => {
+          const currentGeneration = await readGitHubConnectionFence(
+            transaction,
+            principal.tenant,
+            "update"
+          );
+          if (currentGeneration !== input.expectedGeneration) {
+            return { kind: "stale" } as const;
+          }
+          const removed = await transaction.execute(
+            statement(
+              "delete-github-installation-connections",
+              {
+                installationId: input.installationId,
+                tenant: principal.tenant,
+              },
+              sql`DELETE FROM "RunnerGitHubConnection"
+              WHERE "installationId" = ${input.installationId}
+                AND "tenant" = ${principal.tenant}
+              RETURNING "id"`
+            )
+          );
+          if (removed.length === 0) {
+            return {
+              generation: currentGeneration,
+              kind: "unchanged",
+            } as const;
+          }
+          const generation = await advanceGitHubConnectionFence(
+            transaction,
+            principal.tenant,
+            currentGeneration
+          );
+          const revoked = await transaction.execute(
+            statement(
+              "revoke-github-capabilities-after-installation-removal",
+              {
+                installationId: input.installationId,
+                tenant: principal.tenant,
+              },
+              sql`UPDATE "RunnerGitHubCapability"
+              SET "revokedAt" = COALESCE("revokedAt", now()),
+                  "updatedAt" = now(),
+                  "version" = "version" + 1
+              WHERE "tenant" = ${principal.tenant}
+                AND "revokedAt" IS NULL
+              RETURNING "id"`
+            )
+          );
+          return {
+            generation,
+            kind: "removed",
+            removed: removed.length,
+            revokedCapabilities: revoked.length,
+          } as const;
+        }
+      );
+    },
+
     revokeGitHubCapability: (
       principal: RunnerPrincipal,
       input: { expectedVersion: number; id: string }
@@ -3463,55 +4192,6 @@ export function createTeamStore(database: TeamStoreDatabase) {
         return updated
           ? { kind: "updated" as const, value: asStep(updated) }
           : { kind: "handoff_limit" as const };
-      });
-    },
-
-    upsertGitHubConnection: async (
-      principal: RunnerPrincipal,
-      input: {
-        accountId: string;
-        accountLogin: string;
-        accountType: "Organization" | "User";
-        id: string;
-        installationId: string;
-        repositoryId: string;
-        repositoryName: string;
-        repositoryNodeId: string;
-        repositoryOwner: string;
-      }
-    ) => {
-      validateConnectionInput(input);
-      return await database.transaction(async (transaction) => {
-        const [connection] = await transaction.execute(
-          statement(
-            "upsert-github-connection",
-            { ...input, tenant: principal.tenant },
-            sql`INSERT INTO "RunnerGitHubConnection" (
-                "id", "tenant", "installationId", "accountId", "accountLogin",
-                "accountType", "repositoryId", "repositoryNodeId",
-                "repositoryOwner", "repositoryName"
-              ) VALUES (
-                ${input.id}, ${principal.tenant}, ${input.installationId}, ${input.accountId},
-                ${input.accountLogin}, ${input.accountType}, ${input.repositoryId},
-                ${input.repositoryNodeId}, ${input.repositoryOwner}, ${input.repositoryName}
-              )
-              ON CONFLICT ("tenant", "repositoryId") DO UPDATE
-              SET "installationId" = EXCLUDED."installationId",
-                  "accountId" = EXCLUDED."accountId",
-                  "accountLogin" = EXCLUDED."accountLogin",
-                  "accountType" = EXCLUDED."accountType",
-                  "repositoryNodeId" = EXCLUDED."repositoryNodeId",
-                  "repositoryOwner" = EXCLUDED."repositoryOwner",
-                  "repositoryName" = EXCLUDED."repositoryName",
-                  "updatedAt" = now(),
-                  "version" = "RunnerGitHubConnection"."version" + 1
-              RETURNING *`
-          )
-        );
-        if (!connection) {
-          throw new Error("GitHub connection upsert returned no row.");
-        }
-        return { connection: asConnection(connection) };
       });
     },
   };

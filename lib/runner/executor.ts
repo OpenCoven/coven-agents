@@ -70,13 +70,14 @@ export type RunnerExecutorStartInput = Readonly<{
     }>
   ) => Promise<boolean>;
   executionPermission: RunnerExecutionPermission;
+  githubTool?: RunnerGitHubTool;
   instructions: string;
   model: string;
   persistAttemptRedaction: (
     input: Readonly<{
       attemptId: RunnerExecutionAttemptId;
-      credential: string;
       runId: string;
+      secrets: readonly string[];
     }>
   ) => Promise<boolean>;
   runId: string;
@@ -87,6 +88,22 @@ export type RunnerExecutorStartInput = Readonly<{
 
 export type RunnerStartedExecution = Readonly<{
   dispatchAuthority: RunnerDispatchAuthority;
+}>;
+
+export type RunnerGitHubTool = Readonly<{
+  issueCapability: (
+    input: Readonly<{
+      attemptId: RunnerExecutionAttemptId;
+      runId: string;
+    }>
+  ) => Promise<Readonly<{ rawCapability: string }>>;
+  revokeCapability: (
+    input: Readonly<{
+      attemptId: RunnerExecutionAttemptId;
+      runId: string;
+    }>
+  ) => Promise<boolean>;
+  url: string;
 }>;
 
 export type RunnerExecutor = Readonly<{

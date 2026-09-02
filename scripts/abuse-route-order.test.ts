@@ -291,6 +291,80 @@ test("subscription status admits IP before verification and user before database
   );
 });
 
+test("GitHub connection handlers establish subscriber identity and admission before provider or store work", () => {
+  const implementation = read("lib/github/connection.ts");
+  for (const [handler, policy, marker] of [
+    ["install", "github_install", "createGitHubInstallState("],
+    ["callback", "github_callback", "installationSetupCallback("],
+    ["getConnection", "github_connection_read", "createProvider("],
+    ["disconnect", "github_connection_delete", "disconnectGitHubConnections("],
+  ] as const) {
+    const start = implementation.indexOf(`async ${handler}(`);
+    assert.ok(start >= 0, `${handler} must exist`);
+    const next = implementation.indexOf("\n    async ", start + 1);
+    const block = implementation.slice(
+      start,
+      next === -1 ? implementation.length : next
+    );
+    const identity = block.indexOf("authorize()");
+    const admission = block.indexOf(`"${policy}"`);
+    const expensive = block.indexOf(marker);
+    assert.ok(identity >= 0, `${handler} must authorize`);
+    assert.ok(admission > identity, `${handler} must admit after identity`);
+    assert.ok(expensive > admission, `${handler} must admit before ${marker}`);
+  }
+
+  const setup = functionBlock(implementation, "installationSetupCallback");
+  assert.ok(
+    setup.indexOf("runIdempotentOperation(") >= 0,
+    "installation setup must consume durable state"
+  );
+  const authorization = functionBlock(
+    implementation,
+    "userAuthorizationCallback"
+  );
+  assert.ok(
+    authorization.indexOf("runIdempotentOperation(") <
+      authorization.indexOf("completeUserAuthorization("),
+    "OAuth state must be durably consumed before code exchange"
+  );
+  const proof = functionBlock(implementation, "completeUserAuthorization");
+  assert.ok(
+    proof.indexOf(".proveInstallationAccess(") <
+      proof.indexOf(".createProvider("),
+    "user installation proof must precede app-level provider access"
+  );
+
+  for (const routePath of [
+    "app/api/github/install/route.ts",
+    "app/api/github/callback/route.ts",
+    "app/api/github/connection/route.ts",
+  ]) {
+    assert.match(read(routePath), /ipAddress\(request\)/u);
+  }
+});
+
+test("the internal GitHub tool admits its source before bearer parsing, body buffering, or database composition", () => {
+  const routeSource = read("app/api/internal/github-tool/route.ts");
+  const dependencies = read("lib/github/tool-route-dependencies.ts");
+  const handler = functionBlock(
+    read("lib/github/http.ts"),
+    "createGitHubToolHttpHandler"
+  );
+  const admission = handler.indexOf("input.enforceAbuse(");
+  const bearer = handler.indexOf('request.headers.get("authorization")');
+  const body = handler.indexOf("readBoundedRequestBody(");
+
+  assert.match(routeSource, /from "@vercel\/functions"/u);
+  assert.match(routeSource, /ipAddress\(request\)/u);
+  assert.match(dependencies, /enforceAbusePolicy/u);
+  assert.match(handler, /route: "github_tool"/u);
+  assert.ok(admission >= 0);
+  assert.ok(bearer > admission);
+  assert.ok(body > bearer);
+  assert.match(dependencies, /execute: \(request\) => \{[\s\S]*databaseFor/u);
+});
+
 test("Stripe webhook admission precedes body and provider work", () => {
   const routeSource = read("app/api/stripe/webhook/route.ts");
   const webhookSource = read("lib/billing/webhook.ts");

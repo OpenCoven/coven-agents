@@ -27,6 +27,9 @@ does not revoke it.
 | `CRON_SECRET` | Scheduled reconciliation |
 | `RUNNER_MANUAL_RECONCILE_SECRET` | Manual reconciliation |
 | `AUTH_GITHUB_SECRET` | GitHub OAuth application |
+| `GITHUB_APP_PRIVATE_KEY` | Installation-scoped GitHub App authority |
+| `GITHUB_APP_CLIENT_SECRET` | Ephemeral GitHub App user-authorization proof |
+| `GITHUB_STATE_SIGNING_SECRET` | GitHub installation callback state |
 | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | Billing operations and event authentication |
 | Tenant harness credential | Tenant coding-provider authority |
 
@@ -96,6 +99,31 @@ manual reconciliation.
 
 Create the replacement OAuth secret, update the deployment, verify sign-in,
 then revoke the old value.
+
+### `GITHUB_APP_PRIVATE_KEY`
+
+Set `GITHUB_TEAMS_ENABLED=off`, generate a new private key in the dedicated
+GitHub App, update the deployment secret, rebuild and redeploy, verify a
+bounded installation read, then delete the old key in GitHub before re-enabling
+the feature. Never substitute the OAuth or Copilot runtime credential.
+
+### `GITHUB_APP_CLIENT_ID` / `GITHUB_APP_CLIENT_SECRET`
+
+Set `GITHUB_TEAMS_ENABLED=off`, generate a replacement client secret on the
+dedicated GitHub App, update the deployment secret, rebuild and redeploy, then
+exercise a complete installation plus user-authorization proof before deleting
+the old secret. Never reuse `AUTH_GITHUB_SECRET`. The proof token and refresh
+grant are revoked immediately after the bounded user-installation lookup and
+must never appear in browser output, logs, or persisted callback state.
+
+### `GITHUB_STATE_SIGNING_SECRET`
+
+Set `GITHUB_TEAMS_ENABLED=off`, replace the secret with a newly generated
+independent value, rebuild and redeploy, then re-enable the feature. Rotation
+intentionally invalidates every installation flow that has not completed;
+users must start those flows again. Keep it distinct from the GitHub App
+private key and client secret, Auth.js authorities, credential KEKs, abuse
+credentials, and runner/operator secrets.
 
 ### `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET`
 

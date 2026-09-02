@@ -47,6 +47,7 @@ function run(task = "complete certification"): RunnerRunRecord {
     executionPermission: "unrestricted",
     executionProvenance: HERMETIC_EXECUTION_PROVENANCE,
     fileEvidence: [],
+    githubBrokerPolicy: null,
     id: runId,
     logCursor: 0,
     operationId: "33333333-3333-4333-8333-333333333333",
@@ -56,6 +57,7 @@ function run(task = "complete certification"): RunnerRunRecord {
     startedAt: new Date("2026-09-01T00:00:00.000Z"),
     status: "running",
     task,
+    teamStepId: null,
     tenant: "tenant_a",
     version: 2,
   };

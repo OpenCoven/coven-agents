@@ -96,6 +96,7 @@ export function daytonaRunnerExecutor(
         credential: input.credential,
         deleteAttemptRedaction: input.deleteAttemptRedaction,
         executionPermission: input.executionPermission,
+        ...(input.githubTool ? { githubTool: input.githubTool } : {}),
         instructions: input.instructions,
         model: input.model,
         persistAttemptRedaction: input.persistAttemptRedaction,

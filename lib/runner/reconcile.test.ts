@@ -8,9 +8,10 @@ import {
   type ReconcileAndDispatchDependencies,
   reconcileAndDispatch,
 } from "./attempt-reconcile";
-import { daytonaProbeSessionName } from "./daytona/names";
+import { daytonaProbeSessionName, daytonaSandboxLabels } from "./daytona/names";
 import { reconcileDaytonaSandboxes } from "./daytona/resource-recovery";
 import { RUNNER_MID_RUN_ENTITLEMENT_POLICY } from "./entitlement-policy";
+import { encodeRunnerAttemptRedactionSecrets } from "./redaction-secrets";
 import type {
   RunnerAgentRecord,
   RunnerDaytonaAttemptId,
@@ -20,6 +21,16 @@ import type {
 } from "./types";
 
 const operator: RunnerOperator = { kind: "runner-operator" };
+const SANDBOX_CONFIGURATION = {
+  autoArchiveInterval: 10_080,
+  autoDeleteInterval: -1 as const,
+  autoStopInterval: 15,
+  configurationId: "current-configuration",
+  resources: { cpu: 2, disk: 20, memory: 4 },
+  snapshotName: "coven-agents-copilot-1",
+  target: "us" as const,
+  ttlMinutes: 0 as const,
+};
 const attemptId =
   "53af1a29-4e98-43d6-ac5b-3b9dcba5e730" as RunnerDaytonaAttemptId;
 
@@ -46,6 +57,7 @@ function run(overrides: Partial<RunnerRunRecord> = {}): RunnerRunRecord {
     executionPermission: "unrestricted",
     executionProvenance: null,
     fileEvidence: [],
+    githubBrokerPolicy: null,
     id: "00000000-0000-4000-8000-000000000002",
     logCursor: 1,
     operationId: "00000000-0000-4000-8000-000000000003",
@@ -55,6 +67,7 @@ function run(overrides: Partial<RunnerRunRecord> = {}): RunnerRunRecord {
     startedAt: null,
     status: "queued",
     task: "safe task",
+    teamStepId: null,
     tenant: "tenant_a",
     version: 1,
     ...overrides,
@@ -527,10 +540,18 @@ test("ambiguous sandbox provisioning attaches only the scanned generation", asyn
       },
       get: async () => {
         calls.push("get");
-        return { id: "sandbox" } as never;
+        return {
+          id: "sandbox",
+          labels: {
+            ...daytonaSandboxLabels(pending.tenant, pending.id),
+            configurationId: SANDBOX_CONFIGURATION.configurationId,
+            sandboxGeneration: String(pending.sandboxGeneration),
+          },
+        } as never;
       },
     },
     operator,
+    sandboxConfiguration: SANDBOX_CONFIGURATION,
     store: {
       attachDaytonaSandboxForRecovery: async () => {
         calls.push("attach");
@@ -552,6 +573,111 @@ test("ambiguous sandbox provisioning attaches only the scanned generation", asyn
 
   assert.deepEqual(calls, ["scan", "get", "attach"]);
   assert.deepEqual(result, { deferred: 0, failures: 0, recovered: 1 });
+});
+
+test("cron recovery deletes and resets stale or unlabeled provisioning sandboxes instead of attaching them", async () => {
+  for (const labels of [
+    {
+      ...daytonaSandboxLabels("tenant_a", agent().id),
+      configurationId: "old-configuration",
+      sandboxGeneration: "1",
+    },
+    {
+      ...daytonaSandboxLabels("tenant_a", agent().id),
+      configurationId: SANDBOX_CONFIGURATION.configurationId,
+      sandboxGeneration: "0",
+    },
+    {},
+  ]) {
+    const calls: string[] = [];
+    const pending = agent();
+    // biome-ignore lint/performance/noAwaitInLoops: each stale identity owns an isolated reconciliation scan
+    const result = await reconcileDaytonaSandboxes({
+      daytona: {
+        create: async () => {
+          throw new Error("reconciliation must not create");
+        },
+        get: async () =>
+          ({
+            delete: async (timeout: number, wait: boolean) => {
+              assert.equal(timeout, 60);
+              assert.equal(wait, true);
+              calls.push("delete");
+            },
+            id: "stale-sandbox",
+            labels,
+          }) as never,
+      },
+      operator,
+      sandboxConfiguration: SANDBOX_CONFIGURATION,
+      store: {
+        attachDaytonaSandboxForRecovery: async () => {
+          calls.push("attach");
+          throw new Error("stale sandbox must not attach");
+        },
+        beginDaytonaSandboxResetForRecovery: async () => ({
+          kind: "updated" as const,
+          value: agent({
+            sandboxGeneration: 2,
+            sandboxLifecycle: "resetting",
+            version: 2,
+          }),
+        }),
+        finishDaytonaSandboxResetForRecovery: async () => {
+          calls.push("reset");
+          return {
+            kind: "updated" as const,
+            value: agent({
+              sandboxGeneration: 2,
+              sandboxLifecycle: "unprovisioned",
+              version: 3,
+            }),
+          };
+        },
+        scanDaytonaSandboxRecoveries: async () => [pending],
+        scanDaytonaWarmRecoveries: async () => [],
+      } as never,
+    });
+
+    assert.deepEqual(calls, ["delete", "reset"]);
+    assert.deepEqual(result, { deferred: 0, failures: 0, recovered: 1 });
+  }
+});
+
+test("stale cron recovery cannot delete a sandbox after losing the durable reset fence", async () => {
+  const pending = agent();
+  let deletes = 0;
+  const result = await reconcileDaytonaSandboxes({
+    daytona: {
+      create: async () => {
+        throw new Error("reconciliation must not create");
+      },
+      get: async () =>
+        ({
+          delete: async () => {
+            deletes += 1;
+          },
+          id: "newer-sandbox",
+          labels: {
+            ...daytonaSandboxLabels(pending.tenant, pending.id),
+            configurationId: SANDBOX_CONFIGURATION.configurationId,
+            sandboxGeneration: "2",
+          },
+        }) as never,
+    },
+    operator,
+    sandboxConfiguration: SANDBOX_CONFIGURATION,
+    store: {
+      beginDaytonaSandboxResetForRecovery: async () => ({
+        kind: "stale_version" as const,
+      }),
+      scanDaytonaSandboxRecoveries: async () => [pending],
+      scanDaytonaWarmRecoveries: async () => [],
+    } as never,
+  });
+
+  assert.equal(deletes, 0);
+  assert.deepEqual(result, { deferred: 1, failures: 0, recovered: 0 });
 });
 
 test("cron removes only the exact stale warm probe and fenced-finishes it", async () => {
@@ -600,6 +726,7 @@ test("cron removes only the exact stale warm probe and fenced-finishes it", asyn
         }) as never,
     },
     operator,
+    sandboxConfiguration: SANDBOX_CONFIGURATION,
     store: {
       finishDaytonaSandboxWarmForRecovery: async (
         _operator: RunnerOperator,
@@ -677,6 +804,7 @@ test("stale warm recovery runs even when lifecycle recovery fills its batch", as
         }) as never,
     },
     operator,
+    sandboxConfiguration: SANDBOX_CONFIGURATION,
     store: {
       finishDaytonaSandboxWarmForRecovery: async () => ({
         kind: "updated" as const,
@@ -730,6 +858,7 @@ test("a lifecycle scan outage does not block the stale warm lane", async () => {
       },
     },
     operator,
+    sandboxConfiguration: SANDBOX_CONFIGURATION,
     store: {
       finishDaytonaSandboxWarmForRecovery: async () => {
         finishes += 1;
@@ -771,6 +900,7 @@ test("recent and provider-failed warm recovery remains deferred and retryable", 
       },
     },
     operator,
+    sandboxConfiguration: SANDBOX_CONFIGURATION,
     store: {
       finishDaytonaSandboxWarmForRecovery: async () => {
         finishes += 1;
@@ -820,6 +950,7 @@ test("recent and provider-failed warm recovery remains deferred and retryable", 
         }) as never,
     },
     operator,
+    sandboxConfiguration: SANDBOX_CONFIGURATION,
     store: {
       finishDaytonaSandboxWarmForRecovery: async () => {
         finishes += 1;
@@ -876,6 +1007,7 @@ test("overlapping warm recovery is idempotent under the version fence", async ()
     },
     operator,
     providerConcurrency: 2,
+    sandboxConfiguration: SANDBOX_CONFIGURATION,
     store: {
       finishDaytonaSandboxWarmForRecovery: async () => {
         finishes += 1;
@@ -917,6 +1049,7 @@ test("decommissioning retry deletes provider state before fenced agent removal",
       },
     },
     operator,
+    sandboxConfiguration: SANDBOX_CONFIGURATION,
     store: {
       deleteDecommissionedAgentForRecovery: async () => {
         calls.push("remove");
@@ -2701,7 +2834,11 @@ test("dirty terminal cancellation is cleanup-required, not stopped", async () =>
 
 test("reconciliation appends only fresh logs and terminalizes a settled command", async () => {
   const calls: string[] = [];
-  const credential = "attempt-redaction-secret";
+  const credentialSecrets = [
+    "attempt-redaction-secret",
+    "github-capability-secret",
+  ];
+  const credential = encodeRunnerAttemptRedactionSecrets(credentialSecrets);
   const commandId = "daytona-command-neutral-projection";
   const sessionId = "daytona-session-neutral-projection";
   const attached = run({
@@ -2712,7 +2849,7 @@ test("reconciliation appends only fresh logs and terminalizes a settled command"
     status: "running",
   });
   const privateValues = [
-    credential,
+    ...credentialSecrets,
     attached.daytonaAttemptId,
     commandId,
     sessionId,

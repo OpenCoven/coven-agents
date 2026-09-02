@@ -1,3 +1,4 @@
+// biome-ignore-all lint/style/useErrorCause: Provider and cleanup errors are intentionally replaced with bounded non-secret diagnostics.
 import "server-only";
 
 import type {
@@ -31,9 +32,16 @@ import type {
   RunnerExecutionPermission,
 } from "../types";
 import {
+  cleanupGitHubToolCapability,
+  type GitHubToolFileSystem,
+  githubToolCapabilityPath,
+  stageGitHubTool,
+} from "./github-tool";
+import {
   daytonaRunConfigDirectory,
   daytonaRunCredentialPath,
   daytonaRunSessionName,
+  daytonaRunWorkingDirectory,
 } from "./names";
 import { classifyDaytonaProviderError } from "./sandbox";
 
@@ -42,15 +50,22 @@ const WORKSPACE_INSPECTION_TIMEOUT_SECONDS = 15;
 const PROBE_SESSION_PATTERN = /^coven-probe-[0-9a-f]{40}$/u;
 const RESTRICTED_WORKSPACE_CONTROL_PATHS = [
   ".mcp.json",
+  ".vscode/mcp.json",
   ".github/hooks",
   ".github/mcp.json",
   ".github/extensions",
   ".github/lsp.json",
+  ".github/agents",
+  ".github/skills",
   ".github/copilot/settings.json",
   ".github/copilot/settings.local.json",
   ".github/copilot/config.json",
   ".github/copilot/plugins",
   ".github/plugins",
+  ".copilot/mcp-config.json",
+  ".copilot/settings.json",
+  ".copilot/hooks",
+  ".copilot/extensions",
   ".copilot/plugins",
   ".claude/settings.json",
   ".claude/settings.local.json",
@@ -102,6 +117,7 @@ export type DaytonaProcessService = Readonly<{
 }>;
 
 export type DaytonaProcessSandbox = Readonly<{
+  fs?: GitHubToolFileSystem;
   id?: string;
   name?: string;
   process: DaytonaProcessService;
@@ -193,10 +209,16 @@ function restrictedWorkspaceInspectionCommand(): string {
 function asyncCommand(
   authName: string,
   credentialPath: string,
+  attemptDirectory: string,
   configDirectory: string,
   executionPermission: RunnerExecutionPermission,
   workspace: string,
-  harnessCommand: string
+  harnessCommand: string,
+  githubTool?: Readonly<{
+    capabilityPath: string;
+    toolDirectory: string;
+    url: string;
+  }>
 ): string {
   const providerCredentialVariables = [
     "AI_GATEWAY_API_KEY",
@@ -231,29 +253,48 @@ function asyncCommand(
     ]),
   ].filter((name) => name !== authName);
   const restricted = executionPermission !== "unrestricted";
+  const workspaceRestricted =
+    executionPermission === "workspace_read" ||
+    executionPermission === "workspace_write";
   const settingsPath = `${configDirectory}/settings.json`;
   const restrictedSettings =
     '{"disableAllHooks":true,"extensions":{"mode":"disabled"}}';
   return [
     "set -eu",
     `rm -rf -- ${shellQuote(configDirectory)}`,
+    ...(restricted ? [`rm -rf -- ${shellQuote(attemptDirectory)}`] : []),
     `mkdir -p -- ${shellQuote(configDirectory)}`,
+    ...(restricted ? [`mkdir -p -- ${shellQuote(attemptDirectory)}`] : []),
     `chmod 700 ${shellQuote(configDirectory)}`,
+    ...(restricted ? [`chmod 500 ${shellQuote(attemptDirectory)}`] : []),
     `export HOME=${shellQuote(configDirectory)}`,
     ...(restricted
       ? [
           `export COPILOT_HOME=${shellQuote(configDirectory)}`,
           `printf '%s\\n' ${shellQuote(restrictedSettings)} > ${shellQuote(settingsPath)}`,
           `chmod 600 ${shellQuote(settingsPath)}`,
-          `mkdir -p -- ${shellQuote(workspace)}`,
-          `cd -- ${shellQuote(workspace)}`,
-          restrictedWorkspaceInspectionCommand(),
+          ...(workspaceRestricted
+            ? [
+                `cd -- ${shellQuote(workspace)}`,
+                restrictedWorkspaceInspectionCommand(),
+              ]
+            : []),
+          `cd -- ${shellQuote(attemptDirectory)}`,
           "unset COPILOT_ALLOW_ALL GITHUB_COPILOT_PROMPT_MODE_EXTENSIONS",
         ]
       : []),
     `${authName}="$(cat -- ${shellQuote(credentialPath)})"`,
     `export ${authName}`,
     `rm -f -- ${shellQuote(credentialPath)}`,
+    ...(githubTool
+      ? [
+          `COVEN_GITHUB_CAPABILITY="$(cat -- ${shellQuote(githubTool.capabilityPath)})"`,
+          "export COVEN_GITHUB_CAPABILITY",
+          `rm -f -- ${shellQuote(githubTool.capabilityPath)}`,
+          `export COVEN_GITHUB_TOOL_URL=${shellQuote(githubTool.url)}`,
+          `export PATH=${shellQuote(githubTool.toolDirectory)}:"$PATH"`,
+        ]
+      : []),
     `unset ${credentialVariables.join(" ")}`,
     "export CI=true",
     ...(restricted
@@ -431,7 +472,6 @@ async function cleanupFailedStart(
       throw new Error("Attempt redaction deletion was rejected.");
     }
   } catch {
-    // biome-ignore lint/style/useErrorCause: Durable redaction errors can contain encrypted metadata.
     throw new DaytonaProcessError(
       "Daytona cleanup succeeded but attempt redaction retirement could not be confirmed.",
       "durable_release_failed",
@@ -444,7 +484,6 @@ async function cleanupFailedStart(
       throw new Error("Preparation release was rejected.");
     }
   } catch {
-    // biome-ignore lint/style/useErrorCause: Release errors can contain durable-store details.
     throw new DaytonaProcessError(
       "Daytona cleanup succeeded but preparation release could not be confirmed.",
       "durable_release_failed",
@@ -525,10 +564,26 @@ export type DaytonaPreparationRelease = (
 export type DaytonaAttemptRedactionPersister = (
   input: Readonly<{
     attemptId: DaytonaAttemptId;
-    credential: string;
     runId: string;
+    secrets: readonly string[];
   }>
 ) => Promise<boolean>;
+
+export type DaytonaGitHubTool = Readonly<{
+  issueCapability: (
+    input: Readonly<{
+      attemptId: DaytonaAttemptId;
+      runId: string;
+    }>
+  ) => Promise<Readonly<{ rawCapability: string }>>;
+  revokeCapability: (
+    input: Readonly<{
+      attemptId: DaytonaAttemptId;
+      runId: string;
+    }>
+  ) => Promise<boolean>;
+  url: string;
+}>;
 
 export type DaytonaAttemptRedactionRelease = (
   input: Readonly<{
@@ -550,6 +605,7 @@ export async function startDaytonaProcess(input: {
   credential: HarnessCredential;
   deleteAttemptRedaction: DaytonaAttemptRedactionRelease;
   executionPermission: RunnerExecutionPermission;
+  githubTool?: DaytonaGitHubTool;
   instructions: string;
   model: string;
   persistAttemptRedaction: DaytonaAttemptRedactionPersister;
@@ -561,15 +617,52 @@ export async function startDaytonaProcess(input: {
   workspace?: string;
 }): Promise<DaytonaStartedProcess> {
   const { auth, spec } = requireHarness(input.runtime, input.credential);
-  if (
-    input.executionPermission !== "unrestricted" &&
-    !input.workspace?.trim()
-  ) {
+  const restricted = input.executionPermission !== "unrestricted";
+  const workspaceRestricted =
+    input.executionPermission === "workspace_read" ||
+    input.executionPermission === "workspace_write";
+  if (workspaceRestricted && !input.workspace?.trim()) {
     throw new DaytonaProcessError(
       "Restricted runner execution requires an explicit workspace.",
       "workspace_required",
       false
     );
+  }
+  if (input.githubTool && !input.sandbox.fs) {
+    throw new DaytonaProcessError(
+      "GitHub tool execution requires Daytona filesystem upload.",
+      "process_start_failed",
+      false
+    );
+  }
+  if (
+    (input.executionPermission === "github_only" && !input.githubTool) ||
+    (input.githubTool && input.executionPermission === "unrestricted")
+  ) {
+    throw new DaytonaProcessError(
+      "GitHub tool execution requires an exact restricted permission.",
+      "process_start_failed",
+      false
+    );
+  }
+  if (input.githubTool) {
+    try {
+      const endpoint = new URL(input.githubTool.url);
+      if (
+        endpoint.protocol !== "https:" ||
+        endpoint.username ||
+        endpoint.password ||
+        input.githubTool.url.length > 2048
+      ) {
+        throw new Error("invalid endpoint");
+      }
+    } catch {
+      throw new DaytonaProcessError(
+        "GitHub tool execution endpoint is invalid.",
+        "process_start_failed",
+        false
+      );
+    }
   }
   const workspace = resolveSandboxWorkspace(input.workspace);
   const { process } = input.sandbox;
@@ -616,6 +709,21 @@ export async function startDaytonaProcess(input: {
       false
     );
   }
+  if (restricted && input.executionPermission !== "github_only") {
+    const inspection = await inspectRestrictedWorkspace(
+      input.sandbox,
+      workspace
+    );
+    if (inspection.kind !== "safe") {
+      throw new DaytonaProcessError(
+        inspection.kind === "unsafe"
+          ? "Restricted runner workspace configuration is unsafe."
+          : "Restricted runner workspace inspection is unavailable.",
+        "process_start_failed",
+        inspection.kind === "unavailable"
+      );
+    }
+  }
   let attemptId: DaytonaAttemptId | null;
   try {
     attemptId = await input.authorizePreparation({
@@ -624,7 +732,6 @@ export async function startDaytonaProcess(input: {
   } catch {
     // Authorization callbacks can cross a durable database boundary. Keep
     // their failure retryable, but never retain or expose their raw error.
-    // biome-ignore lint/style/useErrorCause: Durable authorization errors can contain secret database details.
     throw new DaytonaProcessError(
       "Daytona preparation authorization could not be confirmed.",
       "process_start_failed",
@@ -641,13 +748,100 @@ export async function startDaytonaProcess(input: {
   const sessionId = daytonaRunSessionName(input.runId, attemptId);
   const credentialPath = daytonaRunCredentialPath(input.runId, attemptId);
   const configDirectory = daytonaRunConfigDirectory(input.runId, attemptId);
+  const attemptDirectory = daytonaRunWorkingDirectory(input.runId, attemptId);
+  let githubCapability = "";
+  let githubCapabilityTouched = false;
+  let githubFileStagingAttempted = false;
+  let stagedGitHubTool:
+    | Readonly<{
+        capabilityPath: string;
+        clientPath: string;
+        toolDirectory: string;
+      }>
+    | undefined;
+
+  const deleteAttemptSecurity = async (
+    claim: DaytonaAttemptId
+  ): Promise<boolean> => {
+    let cleaned = true;
+    if (input.githubTool && githubFileStagingAttempted) {
+      try {
+        await cleanupGitHubToolCapability(
+          input.sandbox.fs as GitHubToolFileSystem,
+          input.runId,
+          claim
+        );
+      } catch {
+        cleaned = false;
+      }
+    }
+    if (input.githubTool && githubCapabilityTouched) {
+      try {
+        if (
+          !(await input.githubTool.revokeCapability({
+            attemptId: claim,
+            runId: input.runId,
+          }))
+        ) {
+          cleaned = false;
+        }
+      } catch {
+        cleaned = false;
+      }
+    }
+    try {
+      if (
+        !(await input.deleteAttemptRedaction({
+          attemptId: claim,
+          runId: input.runId,
+        }))
+      ) {
+        cleaned = false;
+      }
+    } catch {
+      cleaned = false;
+    }
+    return cleaned;
+  };
+
+  if (input.githubTool) {
+    githubCapabilityTouched = true;
+    try {
+      githubCapability = (
+        await input.githubTool.issueCapability({
+          attemptId,
+          runId: input.runId,
+        })
+      ).rawCapability;
+    } catch {
+      return await cleanupFailedStart(
+        input.sandbox,
+        credentialPath,
+        sessionId,
+        new DaytonaProcessError(
+          "GitHub step capability could not be issued.",
+          "process_start_failed",
+          true
+        ),
+        deleteAttemptSecurity,
+        (claim) =>
+          input.releasePreparation({
+            attemptId: claim,
+            runId: input.runId,
+          }),
+        attemptId
+      );
+    }
+  }
 
   try {
     if (
       !(await input.persistAttemptRedaction({
         attemptId,
-        credential: auth.value,
         runId: input.runId,
+        secrets: input.githubTool
+          ? [auth.value, githubCapability]
+          : [auth.value],
       }))
     ) {
       throw new Error("Attempt redaction persistence was rejected.");
@@ -662,8 +856,7 @@ export async function startDaytonaProcess(input: {
         "process_start_failed",
         true
       ),
-      (claim) =>
-        input.deleteAttemptRedaction({ attemptId: claim, runId: input.runId }),
+      deleteAttemptSecurity,
       (claim) =>
         input.releasePreparation({
           attemptId: claim,
@@ -687,8 +880,7 @@ export async function startDaytonaProcess(input: {
         "Daytona could not prepare the run process session.",
         error
       ),
-      (claim) =>
-        input.deleteAttemptRedaction({ attemptId: claim, runId: input.runId }),
+      deleteAttemptSecurity,
       (claim) =>
         input.releasePreparation({
           attemptId: claim,
@@ -723,11 +915,41 @@ export async function startDaytonaProcess(input: {
               "Daytona could not create the run process session.",
               error
             ),
+        deleteAttemptSecurity,
         (claim) =>
-          input.deleteAttemptRedaction({
+          input.releasePreparation({
             attemptId: claim,
             runId: input.runId,
           }),
+        attemptId
+      );
+    }
+  }
+
+  if (input.githubTool) {
+    githubFileStagingAttempted = true;
+    try {
+      stagedGitHubTool = await stageGitHubTool(
+        input.sandbox.fs as GitHubToolFileSystem,
+        {
+          attemptId,
+          rawCapability: githubCapability,
+          runId: input.runId,
+          url: input.githubTool.url,
+        }
+      );
+      githubCapability = "";
+    } catch {
+      return await cleanupFailedStart(
+        input.sandbox,
+        credentialPath,
+        sessionId,
+        new DaytonaProcessError(
+          "Daytona could not safely stage the GitHub tool.",
+          "process_start_failed",
+          true
+        ),
+        deleteAttemptSecurity,
         (claim) =>
           input.releasePreparation({
             attemptId: claim,
@@ -764,8 +986,7 @@ export async function startDaytonaProcess(input: {
             "Daytona could not safely stage the harness credential.",
             error
           ),
-      (claim) =>
-        input.deleteAttemptRedaction({ attemptId: claim, runId: input.runId }),
+      deleteAttemptSecurity,
       (claim) =>
         input.releasePreparation({
           attemptId: claim,
@@ -788,11 +1009,7 @@ export async function startDaytonaProcess(input: {
           "Daytona could not create the run process session.",
           error
         ),
-        (claim) =>
-          input.deleteAttemptRedaction({
-            attemptId: claim,
-            runId: input.runId,
-          }),
+        deleteAttemptSecurity,
         (claim) =>
           input.releasePreparation({
             attemptId: claim,
@@ -822,18 +1039,28 @@ export async function startDaytonaProcess(input: {
       command: asyncCommand(
         auth.name,
         credentialPath,
+        attemptDirectory,
         configDirectory,
         input.executionPermission,
         workspace,
         buildHarnessCommand({
+          attemptDirectory,
           configDirectory,
           executionPermission: input.executionPermission,
+          githubTool: Boolean(stagedGitHubTool),
           harness: spec.id,
           instructions: input.instructions,
           model: input.model,
           task: input.task,
           workspace,
-        })
+        }),
+        stagedGitHubTool && input.githubTool
+          ? {
+              capabilityPath: stagedGitHubTool.capabilityPath,
+              toolDirectory: stagedGitHubTool.toolDirectory,
+              url: input.githubTool.url,
+            }
+          : undefined
       ),
       runAsync: true,
       suppressInputEcho: true,
@@ -858,8 +1085,7 @@ export async function startDaytonaProcess(input: {
             "Daytona could not start the asynchronous harness command.",
             error
           ),
-      (claim) =>
-        input.deleteAttemptRedaction({ attemptId: claim, runId: input.runId }),
+      deleteAttemptSecurity,
       (claim) =>
         input.releasePreparation({
           attemptId: claim,
@@ -887,8 +1113,7 @@ export async function startDaytonaProcess(input: {
         "process_start_failed",
         true
       ),
-      (claim) =>
-        input.deleteAttemptRedaction({ attemptId: claim, runId: input.runId }),
+      deleteAttemptSecurity,
       (claim) =>
         input.releasePreparation({
           attemptId: claim,
@@ -907,8 +1132,7 @@ export async function startDaytonaProcess(input: {
         "process_start_failed",
         false
       ),
-      (claim) =>
-        input.deleteAttemptRedaction({ attemptId: claim, runId: input.runId }),
+      deleteAttemptSecurity,
       (claim) =>
         input.releasePreparation({
           attemptId: claim,
@@ -1126,7 +1350,6 @@ export async function stopDaytonaProcess(
       sandbox,
       daytonaRunCredentialPath(input.runId, input.attemptId)
     );
-    return { kind: sessionAbsent ? "provider_not_found" : "stopped" };
   } catch (error) {
     if (classifyDaytonaProviderError(error) === "retryable") {
       return { kind: "provider_unavailable" };
@@ -1140,6 +1363,29 @@ export async function stopDaytonaProcess(
       kind: "sandbox_reset_required",
     };
   }
+  if (sandbox.fs) {
+    try {
+      await sandbox.fs.deleteFile(
+        githubToolCapabilityPath(input.runId, input.attemptId)
+      );
+    } catch (error) {
+      const failure = classifyDaytonaProviderError(error);
+      if (failure === "retryable") {
+        return { kind: "provider_unavailable" };
+      }
+      if (failure !== "not_found") {
+        return {
+          error: providerError(
+            "sandbox_reset_required",
+            "Daytona could not confirm deterministic capability removal; reset the sandbox.",
+            error
+          ),
+          kind: "sandbox_reset_required",
+        };
+      }
+    }
+  }
+  return { kind: sessionAbsent ? "provider_not_found" : "stopped" };
 }
 
 /** Deletes only deterministic per-run paths after terminal or expired starts. */
@@ -1170,6 +1416,26 @@ export async function sweepDaytonaCredentials(
       "credential_cleanup_failed",
       true
     );
+  }
+  if (sandbox.fs) {
+    const capabilityPaths = [
+      ...new Set(
+        attempts.map(({ attemptId, runId }) =>
+          githubToolCapabilityPath(runId, attemptId)
+        )
+      ),
+    ];
+    try {
+      await Promise.all(
+        capabilityPaths.map((path) => sandbox.fs?.deleteFile(path))
+      );
+    } catch {
+      throw new DaytonaProcessError(
+        "Daytona could not confirm stale capability-file removal.",
+        "credential_cleanup_failed",
+        true
+      );
+    }
   }
 }
 

@@ -119,6 +119,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.11",
+    "@github/copilot": "1.0.80",
     "@playwright/test": "^1.62.1",
     "@tailwindcss/postcss": "^4.3.3",
     "@tailwindcss/typography": "^0.5.20",

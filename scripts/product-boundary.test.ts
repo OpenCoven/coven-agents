@@ -71,8 +71,12 @@ const applicationRouteFiles = [
   "app/api/credentials/device/route.ts",
   "app/api/credentials/route.ts",
   "app/api/diagnostics/sandbox/route.ts",
+  "app/api/github/callback/route.ts",
+  "app/api/github/connection/route.ts",
+  "app/api/github/install/route.ts",
   "app/api/harnesses/route.ts",
   "app/api/health/route.ts",
+  "app/api/internal/github-tool/route.ts",
   "app/api/internal/runner-reconcile/route.ts",
   "app/api/internal/runner-resource-inventory/route.ts",
   "app/api/internal/stripe-reconcile/route.ts",
@@ -215,6 +219,13 @@ const environmentKeys = [
   "DEMO_RECORDING_CREDENTIAL",
   "DEMO_RECORDING_TIMEOUT_MS",
   "GLOBAL_DAILY_RUN_CAP",
+  "GITHUB_APP_CLIENT_ID",
+  "GITHUB_APP_CLIENT_SECRET",
+  "GITHUB_APP_ID",
+  "GITHUB_APP_PRIVATE_KEY",
+  "GITHUB_APP_SLUG",
+  "GITHUB_STATE_SIGNING_SECRET",
+  "GITHUB_TEAMS_ENABLED",
   "OPERATOR_DIAGNOSTIC_TOKEN",
   "POSTGRES_URL",
   "REDIS_URL",
@@ -307,6 +318,7 @@ const productionDependencies = [
 ] as const;
 const developmentDependencies = [
   "@biomejs/biome",
+  "@github/copilot",
   "@playwright/test",
   "@tailwindcss/postcss",
   "@tailwindcss/typography",
@@ -921,6 +933,48 @@ test("browser execution uses only current same-origin routes and headers", () =>
   assert.deepEqual(routes, [...browserTransportRoutes]);
   assert.deepEqual(headerNames, [...browserTransportHeaderNames]);
   assert.deepEqual(importedSpecifiers(source), [...browserTransportImports]);
+});
+
+test("the cookieless GitHub tool route is an exact pre-session proxy exemption", () => {
+  const betaSource = readFileSync(
+    new URL("lib/beta.ts", repositoryRoot),
+    "utf8"
+  );
+  const proxySource = readFileSync(new URL("proxy.ts", repositoryRoot), "utf8");
+  const exemption = "isCookielessGitHubToolRoute(pathname, base)";
+  const exemptionIndex = proxySource.indexOf(exemption);
+  const sessionIndex = proxySource.indexOf("await getToken(");
+
+  assert.match(betaSource, /"\/api\/internal\/github-tool"/u);
+  assert.doesNotMatch(
+    betaSource,
+    /startsWith\([^)]*\/api\/internal\/github-tool/u
+  );
+  assert.ok(exemptionIndex >= 0);
+  assert.ok(sessionIndex > exemptionIndex);
+});
+
+test("the cookieless GitHub tool remains bearer-only behind exact IP admission", () => {
+  const routeSource = readFileSync(
+    new URL("app/api/internal/github-tool/route.ts", repositoryRoot),
+    "utf8"
+  );
+  const dependencySource = readFileSync(
+    new URL("lib/github/tool-route-dependencies.ts", repositoryRoot),
+    "utf8"
+  );
+  const httpSource = readFileSync(
+    new URL("lib/github/http.ts", repositoryRoot),
+    "utf8"
+  );
+
+  assert.match(routeSource, /ipAddress\(request\)/u);
+  assert.match(httpSource, /route: "github_tool"/u);
+  assert.match(httpSource, /\^Bearer /u);
+  assert.doesNotMatch(
+    `${routeSource}\n${dependencySource}\n${httpSource}`,
+    /authorizeSubscriber|@\/app\/\(auth\)|cookie.*author/iu
+  );
 });
 
 test("package dependencies and scripts match the current application contract", () => {

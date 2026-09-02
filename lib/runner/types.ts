@@ -7,6 +7,7 @@ import type {
   RunEvent,
   RunSnapshot,
 } from "@opencoven/agent-contracts";
+import type { GitHubBrokerPolicy } from "@/lib/github/capability";
 import type { RunnerExecutionProvenance } from "./execution-provenance";
 
 /**
@@ -76,7 +77,8 @@ export type RunnerSandboxTrust = "clean" | "restricted" | "unrestricted";
 export type RunnerExecutionPermission =
   | "unrestricted"
   | "workspace_read"
-  | "workspace_write";
+  | "workspace_write"
+  | "github_only";
 export type RunnerAgentStatus = "idle" | "running" | "error";
 export type RunnerSandboxLifecycle =
   | "unprovisioned"
@@ -164,11 +166,13 @@ export type RunnerRunRecord = Omit<
   dispatchState: RunnerDispatchState;
   error: RunError | null;
   executionPermission: RunnerExecutionPermission;
+  githubBrokerPolicy: GitHubBrokerPolicy | null;
   executionProvenance: RunnerExecutionProvenance | null;
   logCursor: number;
   queueSequence: number;
   requestHash: string;
   startedAt: Date | null;
+  teamStepId: string | null;
   tenant: string;
   version: number;
 };
@@ -227,11 +231,13 @@ export type StartRunnerRunInput = {
   admission?: RunnerAdmissionLimits;
   authVersion: number;
   executionPermission?: RunnerExecutionPermission;
+  githubBrokerPolicy?: GitHubBrokerPolicy | null;
   id: string;
   initialDispatch?: Pick<DispatchClaimInput, "leaseExpiresAt" | "leaseToken">;
   operationId: string;
   requestHash: string;
   task: string;
+  teamStepId?: string | null;
 };
 
 export type RunnerSnapshotPatch = {

@@ -5,6 +5,7 @@ import {
   agentRunnerHealthSchema,
   agentsEnvelopeSchema,
   type CreateAgentInput,
+  canonicalUuidSchema,
   okEnvelopeSchema,
   type RunEvent,
   type RunSnapshot,
@@ -34,7 +35,7 @@ const strictHarnessesEnvelopeSchema = harnessesEnvelopeSchema.strict();
 const strictOkEnvelopeSchema = okEnvelopeSchema.strict();
 const prewarmEnvelopeSchema = z
   .object({
-    agentId: z.string().uuid(),
+    agentId: canonicalUuidSchema,
     warm: warmStateSchema,
   })
   .strict();

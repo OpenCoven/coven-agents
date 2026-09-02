@@ -69,20 +69,11 @@ export const BUILT_IN_SKILLS: readonly BuiltInTeamSkill[] = [
       "github.pull_requests.write",
     ],
   },
-  {
-    description:
-      "Update the connected GitHub Project with the final sanitized delivery state.",
-    id: "github-project-update",
-    instructions:
-      "Apply only the approved Project item additions or field updates using sanitized final delivery evidence. Never remove Project items or alter Project configuration.",
-    name: "GitHub Project update",
-    requiredCapabilities: ["github.projects.read", "github.projects.write"],
-  },
 ];
 
 export const GITHUB_DELIVERY_TEAM: BuiltInTeam = {
   description:
-    "Moves an approved GitHub issue through implementation, pull request delivery, review, and Project reconciliation.",
+    "Moves an approved GitHub issue through implementation, pull request delivery, and review.",
   id: "github-delivery",
   members: [
     {
@@ -116,14 +107,6 @@ export const GITHUB_DELIVERY_TEAM: BuiltInTeam = {
       responsibility:
         "Challenge the implementation and pull request with concrete failure scenarios.",
       skillIds: ["github-pr-review"],
-    },
-    {
-      agentTemplateId: "scribe",
-      name: "Project Steward",
-      required: false,
-      responsibility:
-        "Reconcile the GitHub Project item with the final sanitized delivery outcome.",
-      skillIds: ["github-project-update"],
     },
   ],
   name: "GitHub delivery team",

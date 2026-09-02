@@ -1,3 +1,5 @@
+import { isAbsolute, relative, resolve } from "node:path";
+import { GITHUB_TOOL_SERVER_DEADLINE_MS } from "@opencoven/agent-contracts";
 import { type HarnessSpec, harnessSpec } from "./registry";
 
 export interface Invocation {
@@ -9,13 +11,35 @@ export interface Invocation {
 export type HarnessExecutionPermission =
   | "unrestricted"
   | "workspace_read"
-  | "workspace_write";
+  | "workspace_write"
+  | "github_only";
+export const COVEN_GITHUB_TOOL_PATH = "/tmp/coven-tools/v1/coven-github";
+export const COVEN_GITHUB_MCP_PATH = "/tmp/coven-tools/v1/coven-github-mcp";
+export const COVEN_GITHUB_MCP_MODEL_TOOL = "CovenGitHub-execute";
+export const COVEN_GITHUB_MCP_PERMISSION = "CovenGitHub(execute)";
+export const COVEN_GITHUB_MCP_TIMEOUT_MS =
+  GITHUB_TOOL_SERVER_DEADLINE_MS + 25_000;
+
+function environmentReference(name: string): string {
+  return `\${${name}}`;
+}
+
+export const COVEN_GITHUB_CAPABILITY_ENV_REFERENCE = environmentReference(
+  "COVEN_GITHUB_CAPABILITY"
+);
+export const COVEN_GITHUB_TOOL_URL_ENV_REFERENCE = environmentReference(
+  "COVEN_GITHUB_TOOL_URL"
+);
 
 export interface InvocationRequest {
+  /** Guaranteed-empty, non-workspace working directory for restricted runs. */
+  attemptDir?: string;
   /** Fresh configuration directory outside caller-controlled workspace files. */
   configDir?: string;
   /** Working directory the harness runs in. Callers resolve and sandbox this. */
   cwd: string;
+  /** Expose only the server-brokered coven-github executable. */
+  githubTool?: boolean;
   harness: string;
   instructions: string;
   /** `auto` lets the harness pick, so no `--model` flag is passed. */
@@ -35,30 +59,109 @@ function modelArgs(model: string): string[] {
   return model === "auto" ? [] : ["--model", model];
 }
 
+function containsPath(parent: string, child: string): boolean {
+  const path = relative(resolve(parent), resolve(child));
+  return path === "" || (!path.startsWith("..") && !isAbsolute(path));
+}
+
 function copilotArgs(request: InvocationRequest): string[] {
   const permissionMode = request.permissionMode ?? "unrestricted";
-  if (permissionMode !== "unrestricted" && !request.configDir) {
+  const restricted = permissionMode !== "unrestricted";
+  const workspaceRestricted =
+    permissionMode === "workspace_read" || permissionMode === "workspace_write";
+  const githubTool = request.githubTool ?? false;
+  if (githubTool && permissionMode === "unrestricted") {
+    throw new Error(
+      "A restricted GitHub tool cannot be added to unrestricted execution."
+    );
+  }
+  if (permissionMode === "github_only" && !githubTool) {
+    throw new Error("GitHub-only execution requires the typed GitHub tool.");
+  }
+  if ((restricted || githubTool) && !request.configDir) {
     throw new Error(
       "Restricted Copilot runs require an isolated config directory."
     );
   }
-  const permissionArgs =
+  if (
+    restricted &&
+    (!request.attemptDir ||
+      !request.configDir ||
+      !isAbsolute(request.attemptDir) ||
+      !isAbsolute(request.configDir) ||
+      !isAbsolute(request.cwd) ||
+      containsPath(request.cwd, request.attemptDir) ||
+      containsPath(request.attemptDir, request.cwd) ||
+      containsPath(request.cwd, request.configDir) ||
+      containsPath(request.configDir, request.cwd) ||
+      containsPath(request.configDir, request.attemptDir) ||
+      containsPath(request.attemptDir, request.configDir))
+  ) {
+    throw new Error(
+      "Restricted Copilot runs require an isolated attempt directory."
+    );
+  }
+  const availableTools =
     permissionMode === "workspace_read"
-      ? ["--available-tools", "view,grep,glob"]
+      ? ["view", "rg", "glob"]
       : permissionMode === "workspace_write"
-        ? ["--available-tools", "view,edit,grep,glob", "--allow-tool", "write"]
-        : ["--yolo"];
-  const restrictedArgs =
-    permissionMode === "unrestricted"
-      ? []
+        ? ["view", "apply_patch", "rg", "glob"]
+        : permissionMode === "github_only"
+          ? []
+          : null;
+  if (githubTool) {
+    availableTools?.push(COVEN_GITHUB_MCP_MODEL_TOOL);
+  }
+  const permissionArgs =
+    availableTools === null
+      ? ["--yolo"]
       : [
-          "--disable-builtin-mcps",
-          "--no-custom-instructions",
-          "--disallow-temp-dir",
-          "--no-bash-env",
+          "--available-tools",
+          availableTools.join(","),
+          ...(permissionMode === "workspace_write"
+            ? ["--allow-tool", "write"]
+            : []),
+          ...(githubTool ? ["--allow-tool", COVEN_GITHUB_MCP_PERMISSION] : []),
         ];
+  const restrictedArgs = restricted
+    ? [
+        "--disable-builtin-mcps",
+        "--no-custom-instructions",
+        "--disallow-temp-dir",
+        "--no-bash-env",
+        "--secret-env-vars",
+        "COPILOT_GITHUB_TOKEN",
+      ]
+    : [];
   const configArgs = request.configDir
     ? ["--config-dir", request.configDir]
+    : [];
+  const directoryArgs = restricted
+    ? [
+        "-C",
+        request.attemptDir as string,
+        ...(workspaceRestricted ? ["--add-dir", request.cwd] : []),
+      ]
+    : [];
+  const mcpArgs = githubTool
+    ? [
+        "--additional-mcp-config",
+        JSON.stringify({
+          mcpServers: {
+            CovenGitHub: {
+              args: [],
+              command: COVEN_GITHUB_MCP_PATH,
+              env: {
+                COVEN_GITHUB_CAPABILITY: COVEN_GITHUB_CAPABILITY_ENV_REFERENCE,
+                COVEN_GITHUB_TOOL_URL: COVEN_GITHUB_TOOL_URL_ENV_REFERENCE,
+              },
+              timeout: COVEN_GITHUB_MCP_TIMEOUT_MS,
+              tools: ["execute"],
+              type: "local",
+            },
+          },
+        }),
+      ]
     : [];
   return [
     "-s",
@@ -67,6 +170,8 @@ function copilotArgs(request: InvocationRequest): string[] {
     ...permissionArgs,
     "--no-ask-user",
     ...configArgs,
+    ...directoryArgs,
+    ...mcpArgs,
     ...restrictedArgs,
     "--no-auto-update",
     "--no-color",
@@ -126,12 +231,22 @@ export function buildInvocation(request: InvocationRequest): Invocation {
     throw new Error(`Unsupported harness: ${request.harness}`);
   }
   const permissionMode = request.permissionMode ?? "unrestricted";
-  if (permissionMode !== "unrestricted" && spec.id !== "copilot") {
+  if (
+    (permissionMode !== "unrestricted" || request.githubTool) &&
+    spec.id !== "copilot"
+  ) {
     throw new Error(
       `${spec.label} cannot enforce ${permissionMode} permissions.`
     );
   }
-  return { args: build(request), command: spec.command, cwd: request.cwd };
+  return {
+    args: build(request),
+    command: spec.command,
+    cwd:
+      permissionMode === "unrestricted"
+        ? request.cwd
+        : (request.attemptDir as string),
+  };
 }
 
 /**

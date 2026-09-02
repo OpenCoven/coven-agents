@@ -79,6 +79,9 @@ export interface IdempotencyStore {
   complete: (input: IdempotencyCompleteInput) => Promise<"completed" | "lost">;
   release: (input: IdempotencyReleaseInput) => Promise<"lost" | "released">;
   renew?: (input: IdempotencyRenewInput) => Promise<IdempotencyRenewResult>;
+  replaceCompleted?: (
+    input: IdempotencyCompleteInput
+  ) => Promise<"lost" | "replaced">;
 }
 
 export type IdempotencyTimers = {

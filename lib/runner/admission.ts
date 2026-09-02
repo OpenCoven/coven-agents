@@ -17,14 +17,17 @@ import {
 import {
   type RunnerExecutionAuthorizers,
   type RunnerExecutor,
+  type RunnerGitHubTool,
   runnerDispatchAuthorizers,
 } from "./executor";
+import { encodeRunnerAttemptRedactionSecrets } from "./redaction-secrets";
 import type { RunnerStore } from "./store";
 import {
   DEFAULT_RUNNER_ADMISSION_LIMITS,
   type RunnerAdmissionLimits,
   type RunnerAgentRecord,
   type RunnerClaimedDispatch,
+  type RunnerDaytonaAttemptId,
   type RunnerDispatchAuthority,
   type RunnerOperator,
   type RunnerPrincipal,
@@ -162,6 +165,21 @@ export type RunnerDispatchDependencies = Readonly<{
   ) => RunnerCredentialAcquireInput | Promise<RunnerCredentialAcquireInput>;
   dispatchLeaseMs?: number;
   executor: RunnerExecutor;
+  githubTool?: Readonly<{
+    issueCapability: (
+      input: Readonly<{
+        attemptId: RunnerDaytonaAttemptId;
+        run: RunnerRunRecord;
+      }>
+    ) => Promise<Readonly<{ rawCapability: string }>>;
+    revokeCapability: (
+      input: Readonly<{
+        attemptId: RunnerDaytonaAttemptId;
+        run: RunnerRunRecord;
+      }>
+    ) => Promise<boolean>;
+    url: string;
+  }>;
   limits: RunnerAdmissionLimits;
   operator: RunnerOperator;
   randomToken?: () => string;
@@ -312,11 +330,13 @@ export async function admitRunnerRun(
       ...(input.agentSnapshot ? { agentSnapshot: input.agentSnapshot } : {}),
       authVersion: input.authVersion,
       executionPermission: input.executionPermission ?? "unrestricted",
+      githubBrokerPolicy: input.githubBrokerPolicy ?? null,
       id: input.id,
       ...(initialDispatch ? { initialDispatch } : {}),
       operationId: input.operationId,
       requestHash: input.requestHash,
       task: input.task,
+      teamStepId: input.teamStepId ?? null,
     });
   } catch {
     return {
@@ -461,6 +481,7 @@ export async function terminalizeUnstartedDispatchFailure(
     | "capacity_refused"
     | "credential_unavailable"
     | "dispatch_failed"
+    | "github_broker_unavailable"
     | "harness_unsupported"
     | "no_credential"
     | "sandbox_trust_conflict"
@@ -542,6 +563,9 @@ export async function dispatchRunnerClaim(
   dependencies: RunnerDispatchDependencies
 ): Promise<RunnerDispatchResult> {
   const { authority, run } = claimed;
+  const workspaceRestricted =
+    run.executionPermission === "workspace_read" ||
+    run.executionPermission === "workspace_write";
   const associated = await dependencies.store.getDispatchAgent(
     dependencies.operator,
     authority
@@ -561,10 +585,7 @@ export async function dispatchRunnerClaim(
       ? { kind: "refused", reason: "harness", runId: run.id }
       : { kind: "retained", reason: "cleanup_pending", runId: run.id };
   }
-  if (
-    run.executionPermission !== "unrestricted" &&
-    !run.agentWorkspace?.trim()
-  ) {
+  if (workspaceRestricted && !run.agentWorkspace?.trim()) {
     return (await terminalizeUnstartedDispatchFailure(
       dependencies,
       authority,
@@ -574,6 +595,22 @@ export async function dispatchRunnerClaim(
       false
     ))
       ? { kind: "refused", reason: "workspace", runId: run.id }
+      : { kind: "retained", reason: "cleanup_pending", runId: run.id };
+  }
+  if (
+    (run.githubBrokerPolicy !== null && !dependencies.githubTool) ||
+    (run.executionPermission === "github_only" &&
+      run.githubBrokerPolicy === null)
+  ) {
+    return (await terminalizeUnstartedDispatchFailure(
+      dependencies,
+      authority,
+      run,
+      "github_broker_unavailable",
+      "GitHub broker authority is unavailable for this team step.",
+      false
+    ))
+      ? { kind: "refused", reason: "authority", runId: run.id }
       : { kind: "retained", reason: "cleanup_pending", runId: run.id };
   }
 
@@ -642,7 +679,7 @@ export async function dispatchRunnerClaim(
       ? { kind: "retryable", reason: "sandbox_unavailable", runId: run.id }
       : { kind: "retained", reason: "cleanup_pending", runId: run.id };
   }
-  if (run.executionPermission !== "unrestricted") {
+  if (workspaceRestricted) {
     let inspection: Awaited<
       ReturnType<RunnerExecutor["inspectWorkspaceSafety"]>
     >;
@@ -903,13 +940,28 @@ export async function dispatchRunnerClaim(
             )
           ).kind === "deleted",
         executionPermission: run.executionPermission,
+        ...(run.githubBrokerPolicy && dependencies.githubTool
+          ? {
+              githubTool: {
+                issueCapability: ({ attemptId }) =>
+                  dependencies.githubTool?.issueCapability({
+                    attemptId,
+                    run,
+                  }) as ReturnType<RunnerGitHubTool["issueCapability"]>,
+                revokeCapability: ({ attemptId }) =>
+                  dependencies.githubTool?.revokeCapability({
+                    attemptId,
+                    run,
+                  }) as Promise<boolean>,
+                url: dependencies.githubTool.url,
+              },
+            }
+          : {}),
         instructions: run.agentInstructions,
         model: run.agentModel,
-        persistAttemptRedaction: async ({
-          attemptId,
-          credential: credentialForRedaction,
-          runId,
-        }) => {
+        persistAttemptRedaction: async ({ attemptId, runId, secrets }) => {
+          const credentialForRedaction =
+            encodeRunnerAttemptRedactionSecrets(secrets);
           const envelope = await (
             dependencies.sealAttemptRedaction ??
             sealRunnerAttemptRedactionFromEnvironment

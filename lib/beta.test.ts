@@ -93,6 +93,27 @@ test("the machine-triggered reconciliation path is exempt", () => {
   );
 });
 
+test("only the exact cookieless GitHub tool path is exempt with base-path symmetry", () => {
+  const gate = readBetaGate(ON);
+  for (const [pathname, basePath] of [
+    ["/api/internal/github-tool", ""],
+    ["/api/internal/github-tool", "/demo"],
+    ["/demo/api/internal/github-tool", "/demo"],
+  ] as const) {
+    assert.equal(isBetaExempt(pathname, basePath), true, pathname);
+    assert.equal(betaVerdict(gate, pathname, null, basePath), "allow");
+  }
+  for (const pathname of [
+    "/api/internal/github-tool/",
+    "/api/internal/github-tooling",
+    "/api/internal/github-tool/extra",
+    "/demo/api/internal/github-tooling",
+  ]) {
+    assert.equal(isBetaExempt(pathname, "/demo"), false, pathname);
+    assert.equal(betaVerdict(gate, pathname, null, "/demo"), "deny");
+  }
+});
+
 test("the runner resource inventory machine route is exactly exempt", () => {
   assert.equal(isBetaExempt("/api/internal/runner-resource-inventory"), true);
   assert.equal(

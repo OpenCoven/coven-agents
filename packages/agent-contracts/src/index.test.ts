@@ -9,11 +9,15 @@ import {
   agentDefinitionSchema,
   agentOwnerSchema,
   agentRunnerHealthSchema,
+  CANONICAL_UUID_PATTERN,
+  canonicalUuidSchema,
   commandEvidenceSchema,
   compareAgentTimestamps,
   createAgentInputSchema,
   currentAgentDefinitionSchema,
   fileEvidenceSchema,
+  githubToolRequestSchema,
+  isCanonicalUuid,
   runErrorEnvelopeSchema,
   runEventSchema,
   runEventsSchema,
@@ -138,6 +142,42 @@ test("rejects empty tasks", () => {
     startRunInputSchema.safeParse({ task: "Run the tests." }).success,
     false
   );
+});
+
+test("GitHub operation IDs require canonical lowercase hyphenated UUIDs", () => {
+  const operation = {
+    issueNumber: "42",
+    kind: "issue.get",
+    owner: "OpenCoven",
+    repo: "coven-agents",
+  };
+  const canonical = "53af1a29-4e98-43d6-ac5b-3b9dcba5e730";
+  assert.equal(
+    githubToolRequestSchema.safeParse({
+      operation,
+      operationId: canonical,
+    }).success,
+    true
+  );
+  assert.equal(canonicalUuidSchema.safeParse(canonical).success, true);
+  assert.equal(isCanonicalUuid(canonical), true);
+  assert.equal(CANONICAL_UUID_PATTERN.test(canonical), true);
+  for (const operationId of [
+    canonical.toUpperCase(),
+    canonical.replaceAll("-", ""),
+    `{${canonical}}`,
+    "53af1a29-4e98-63d6-ac5b-3b9dcba5e730",
+    "53af1a29-4e98-43d6-7c5b-3b9dcba5e730",
+    "00000000-0000-0000-0000-000000000000",
+  ]) {
+    assert.equal(
+      githubToolRequestSchema.safeParse({ operation, operationId }).success,
+      false,
+      operationId
+    );
+    assert.equal(canonicalUuidSchema.safeParse(operationId).success, false);
+    assert.equal(isCanonicalUuid(operationId), false);
+  }
 });
 
 test("publishes the version and exact runner capabilities", () => {
