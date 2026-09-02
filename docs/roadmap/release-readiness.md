@@ -144,9 +144,11 @@ Before enabling new subscription Checkout:
 1. Keep `SUBSCRIPTION_CHECKOUT_ENABLED=off` during deployment and migration.
 2. Confirm `STRIPE_PRICE_ID` identifies the intended live recurring Price,
    interval, currency, amount, and Product.
-3. Confirm the production restricted key has only the permissions documented
-   in the subscription billing policy and can complete the test-mode Customer,
-   subscription, Checkout Session, invoice-line, and recovery paths.
+3. Use a test-mode restricted key to complete the documented Customer,
+   subscription, Checkout Session, invoice-line, and recovery paths. Then
+   create a separate live-mode restricted key with the same reviewed
+   permissions and verify that it can read the configured live Product and
+   Price. Do not attempt to use a live key against test-mode resources.
 4. Configure the webhook endpoint at the canonical application origin for:
    `checkout.session.completed`,
    `checkout.session.async_payment_succeeded`, `invoice.paid`, and

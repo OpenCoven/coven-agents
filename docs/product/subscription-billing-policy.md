@@ -187,8 +187,11 @@ should be a least-privilege Stripe restricted key. The current integration
 requires Customer read/write, Subscription read, Checkout Session
 read/write/expire, Invoice and invoice-line read for webhook reconciliation,
 and the minimum additional access needed to construct and verify the installed
-SDK operations. Operators must verify the actual restricted-key permissions in
-Stripe test mode before promotion rather than copying an unrestricted account
+SDK operations. Operators must first exercise those permissions with a
+test-mode restricted key, then create a separate live-mode restricted key with
+the same reviewed access. The live key and live Price must be configured
+together and verified as live objects before promotion; a live key cannot be
+tested against Stripe test-mode resources. Never copy an unrestricted account
 key into deployment configuration.
 
 ## Checkout responsibilities
