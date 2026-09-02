@@ -10,7 +10,11 @@ test("internal GitHub tool route exposes only the capability-authenticated POST 
     ),
   ].map((match) => match[1]);
   assert.deepEqual(exported, ["POST"]);
-  assert.match(source, /productionGitHubToolHandler\(\)\(request\)/u);
+  assert.match(source, /ipAddress\(request\) \?\? null/u);
+  assert.match(
+    source,
+    /productionGitHubToolHandler\(\)\(request,\s*ipAddress\(request\) \?\? null\)/u
+  );
   assert.doesNotMatch(
     source,
     /auth\(|session|cookie|RUNNER_RECONCILE_SECRET|COPILOT_GITHUB_TOKEN/iu
@@ -29,6 +33,8 @@ test("production GitHub tool composition uses app installation authority and the
   assert.match(source, /createGitHubGatewayStore/u);
   assert.match(source, /databaseFor\(GITHUB_TOOL_OPERATOR\)/u);
   assert.match(source, /createGitHubToolHttpHandler/u);
+  assert.match(source, /enforceAbusePolicy/u);
+  assert.match(source, /refreshGitHubConnectionAuthority/u);
   assert.doesNotMatch(
     source,
     /COPILOT_GITHUB_TOKEN|AUTH_GITHUB_SECRET|authorizeSubscriber|authenticate:|@\/app\/\(auth\)/u

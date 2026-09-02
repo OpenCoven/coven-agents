@@ -1207,7 +1207,7 @@ test("restricted process launches use the persisted permission instead of task t
   assert.ok(
     restrictedCreateIndex >= 0 && restrictedStageIndex > restrictedCreateIndex
   );
-  assert.match(readLaunch ?? "", /--available-tools' 'view,grep,glob/u);
+  assert.match(readLaunch ?? "", /--available-tools' 'view,rg,glob/u);
   assert.doesNotMatch(readLaunch ?? "", /--yolo/u);
   assert.doesNotMatch(readLaunch ?? "", /--allow-tool' 'write/u);
   assert.match(readLaunch ?? "", /--disable-builtin-mcps/u);

@@ -33,6 +33,7 @@ import type { RunnerPrincipal } from "@/lib/runner/types";
 import type {
   ConnectGitHubInstallationConnectionsResult,
   FencedGitHubInstallationConnectionsInput,
+  GitHubConnectionPhaseControl,
   GitHubConnectionRecord,
   GitHubConnectionSnapshot,
   RefreshGitHubInstallationConnectionsResult,
@@ -44,10 +45,14 @@ import {
   type GitHubConnectionAppClient,
   type GitHubInstallation,
   GitHubProviderError,
-  type GitHubRepositorySelection,
+  normalizedAppPermission,
 } from "./app-auth";
+import { clampUserPermission } from "./authority-types";
 import type { GitHubAppConfig, GitHubEnvironmentState } from "./config";
-import type { GitHubUserAuthorizationClient } from "./user-auth";
+import type {
+  GitHubUserAuthorizationClient,
+  GitHubUserInstallationAuthority,
+} from "./user-auth";
 
 const INSTALL_STATE_VERSION = "v1";
 const USER_AUTHORIZATION_STATE_VERSION = "v2";
@@ -124,7 +129,8 @@ export type GitHubConnectionStore = Readonly<{
   ) => Promise<{ removed: number; revokedCapabilities: number }>;
   readGitHubConnectionSnapshot: (
     principal: RunnerPrincipal,
-    limit: number
+    limit: number,
+    control?: GitHubConnectionPhaseControl
   ) => Promise<GitHubConnectionSnapshot>;
   refreshGitHubInstallationConnections: (
     principal: RunnerPrincipal,
@@ -132,7 +138,10 @@ export type GitHubConnectionStore = Readonly<{
   ) => Promise<RefreshGitHubInstallationConnectionsResult>;
   removeGitHubInstallationConnectionsIfCurrent: (
     principal: RunnerPrincipal,
-    input: { expectedGeneration: number; installationId: string }
+    input: GitHubConnectionPhaseControl & {
+      expectedGeneration: number;
+      installationId: string;
+    }
   ) => Promise<RemoveGitHubInstallationConnectionsResult>;
 }>;
 
@@ -161,6 +170,11 @@ export type GitHubConnectionHandlers = Readonly<{
   getConnection: (request: Request, ip: string | null) => Promise<Response>;
   install: (request: Request, ip: string | null) => Promise<Response>;
 }>;
+
+export type GitHubConnectionAuthorityRefreshResult =
+  | Readonly<{ kind: "current"; snapshot: GitHubConnectionSnapshot }>
+  | Readonly<{ kind: "stale" }>
+  | Readonly<{ kind: "unusable" }>;
 
 type GitHubErrorCode =
   | "abuse_control_unavailable"
@@ -647,7 +661,6 @@ export function createGitHubConnectionHandlers(
         return errorResponse(dependencies, "github_provider_unavailable");
       }
       const { connections: local } = snapshot;
-      let { generation } = snapshot;
       if (local.length > GITHUB_MAX_REPOSITORIES) {
         return errorResponse(dependencies, "github_installation_unusable");
       }
@@ -655,60 +668,25 @@ export function createGitHubConnectionHandlers(
         return publicConnections([]);
       }
 
-      const provider = dependencies.createProvider(configured);
-      const refreshed: GitHubConnectionRecord[] = [];
-      const installationIds = [
-        ...new Set(local.map(({ installationId }) => installationId)),
-      ].sort();
-      for (const installationId of installationIds) {
-        try {
-          // biome-ignore lint/performance/noAwaitInLoops: bounded installations must each be revalidated before disclosure
-          const authority = await verifiedInstallationAuthority(
-            provider,
-            configured,
-            installationId,
-            local
-              .filter(
-                (connection) => connection.installationId === installationId
-              )
-              .map(({ repositoryId }) => repositoryId)
-          );
-          const replacement = await store.refreshGitHubInstallationConnections(
-            subscriber.principal,
-            {
-              ...replacementInput(subscriber.principal, authority),
-              expectedGeneration: generation,
-            }
-          );
-          if (replacement.kind === "stale") {
-            return errorResponse(dependencies, "request_in_progress");
-          }
-          ({ generation } = replacement);
-          refreshed.push(...replacement.connections);
-        } catch (error) {
-          if (terminalInstallationError(error)) {
-            let removal: RemoveGitHubInstallationConnectionsResult;
-            try {
-              removal =
-                await store.removeGitHubInstallationConnectionsIfCurrent(
-                  subscriber.principal,
-                  {
-                    expectedGeneration: generation,
-                    installationId,
-                  }
-                );
-            } catch {
-              return errorResponse(dependencies, "github_provider_unavailable");
-            }
-            if (removal.kind === "stale") {
-              return errorResponse(dependencies, "request_in_progress");
-            }
-            return errorResponse(dependencies, "github_installation_unusable");
-          }
-          return providerOrStoreError(dependencies, error);
-        }
+      let refreshed: GitHubConnectionAuthorityRefreshResult;
+      try {
+        refreshed = await refreshGitHubConnectionAuthority({
+          config: configured,
+          principal: subscriber.principal,
+          provider: dependencies.createProvider(configured),
+          snapshot,
+          store,
+        });
+      } catch (error) {
+        return providerOrStoreError(dependencies, error);
       }
-      return publicConnections(refreshed);
+      if (refreshed.kind === "stale") {
+        return errorResponse(dependencies, "request_in_progress");
+      }
+      if (refreshed.kind === "unusable") {
+        return errorResponse(dependencies, "github_installation_unusable");
+      }
+      return publicConnections(refreshed.snapshot.connections);
     },
     async install(request, ip) {
       const subscriber = await authorize();
@@ -750,6 +728,122 @@ export function createGitHubConnectionHandlers(
       return redirectResponse(location.toString(), 302);
     },
   };
+}
+
+export async function refreshGitHubConnectionAuthority(
+  input: Readonly<{
+    abortSignal?: AbortSignal;
+    config: GitHubAppConfig;
+    deadlineAt?: number;
+    principal: RunnerPrincipal;
+    provider: GitHubConnectionAppClient;
+    snapshot?: GitHubConnectionSnapshot;
+    store: GitHubConnectionStore;
+  }>
+): Promise<GitHubConnectionAuthorityRefreshResult> {
+  const control: GitHubConnectionPhaseControl = {
+    abortSignal: input.abortSignal,
+    deadlineAt: input.deadlineAt,
+  };
+  const assertLive = () => {
+    input.abortSignal?.throwIfAborted();
+    if (
+      input.deadlineAt !== undefined &&
+      (!Number.isSafeInteger(input.deadlineAt) ||
+        input.deadlineAt <= Date.now())
+    ) {
+      throw new Error("GitHub connection authority deadline exceeded.");
+    }
+  };
+  assertLive();
+  const initial =
+    input.snapshot ??
+    (await input.store.readGitHubConnectionSnapshot(
+      input.principal,
+      GITHUB_MAX_REPOSITORIES + 1,
+      control
+    ));
+  assertLive();
+  if (initial.connections.length > GITHUB_MAX_REPOSITORIES) {
+    return { kind: "unusable" };
+  }
+  let { generation } = initial;
+  const installationIds = [
+    ...new Set(initial.connections.map(({ installationId }) => installationId)),
+  ].sort();
+  const verified = await Promise.all(
+    installationIds.map(async (installationId) => {
+      assertLive();
+      try {
+        const authority = await verifiedInstallationAuthority(
+          input.provider,
+          input.config,
+          installationId,
+          {
+            existing: initial.connections.filter(
+              (connection) => connection.installationId === installationId
+            ),
+          }
+        );
+        assertLive();
+        return {
+          authority,
+          installationId,
+          kind: "current" as const,
+        };
+      } catch (error) {
+        if (!terminalInstallationError(error)) {
+          throw error;
+        }
+        return { installationId, kind: "unusable" as const };
+      }
+    })
+  );
+  for (const current of verified) {
+    const { installationId } = current;
+    if (current.kind === "unusable") {
+      const removal =
+        // biome-ignore lint/performance/noAwaitInLoops: generation-fenced writes must remain serialized
+        await input.store.removeGitHubInstallationConnectionsIfCurrent(
+          input.principal,
+          {
+            ...control,
+            expectedGeneration: generation,
+            installationId,
+          }
+        );
+      if (removal.kind === "stale") {
+        return { kind: "stale" };
+      }
+      return { kind: "unusable" };
+    }
+    const replacement = await input.store.refreshGitHubInstallationConnections(
+      input.principal,
+      {
+        ...control,
+        ...replacementInput(input.principal, current.authority),
+        expectedGeneration: generation,
+      }
+    );
+    if (replacement.kind === "stale") {
+      return { kind: "stale" };
+    }
+    ({ generation } = replacement);
+  }
+  const snapshot = await input.store.readGitHubConnectionSnapshot(
+    input.principal,
+    GITHUB_MAX_REPOSITORIES + 1,
+    control
+  );
+  assertLive();
+  if (
+    snapshot.generation !== generation ||
+    snapshot.connections.length < 1 ||
+    snapshot.connections.length > GITHUB_MAX_REPOSITORIES
+  ) {
+    return { kind: "stale" };
+  }
+  return { kind: "current", snapshot };
 }
 
 async function installationSetupCallback(
@@ -1043,8 +1137,9 @@ async function completeUserAuthorization(
     return { code: "github_installation_unusable", kind: "error" };
   }
 
+  let userAuthority: GitHubUserInstallationAuthority;
   try {
-    await input.dependencies
+    userAuthority = await input.dependencies
       .createUserAuthorizationClient(input.config)
       .proveInstallationAccess({
         code: input.callback.code,
@@ -1067,7 +1162,8 @@ async function completeUserAuthorization(
     authority = await verifiedInstallationAuthority(
       input.dependencies.createProvider(input.config),
       input.config,
-      input.claims.installationId
+      input.claims.installationId,
+      { userAuthority }
     );
   } catch (error) {
     if (!terminalInstallationError(error)) {
@@ -1121,16 +1217,31 @@ async function completeUserAuthorization(
 
 type VerifiedInstallationAuthority = Readonly<{
   installation: GitHubInstallation;
-  selection: GitHubRepositorySelection;
+  repositories: ReplaceGitHubInstallationConnectionsInput["repositories"];
 }>;
 
 async function verifiedInstallationAuthority(
   provider: GitHubConnectionAppClient,
   config: GitHubAppConfig,
   installationId: string,
-  repositoryIds?: readonly string[]
+  input:
+    | Readonly<{
+        existing: readonly GitHubConnectionRecord[];
+      }>
+    | Readonly<{
+        userAuthority: GitHubUserInstallationAuthority;
+      }>
 ): Promise<VerifiedInstallationAuthority> {
   const installation = await provider.getInstallation(installationId);
+  const appIssuesPermission = normalizedAppPermission(
+    installation.permissions.issues
+  );
+  const appPullRequestsPermission = normalizedAppPermission(
+    installation.permissions.pull_requests
+  );
+  const appOrganizationProjectsPermission = normalizedAppPermission(
+    installation.permissions.organization_projects
+  );
   if (
     installation.id !== installationId ||
     installation.appId !== config.appId ||
@@ -1138,23 +1249,14 @@ async function verifiedInstallationAuthority(
     installation.suspendedAt !== null ||
     installation.repositorySelection !== "selected" ||
     !permissionAtLeast(installation.permissions.metadata, "read") ||
-    !permissionAtLeast(installation.permissions.issues, "write") ||
-    !permissionAtLeast(installation.permissions.pull_requests, "write") ||
-    (installation.account.type === "Organization" &&
-      !permissionAtLeast(
-        installation.permissions.organization_projects,
-        "write"
-      ))
+    (appIssuesPermission === "none" && appPullRequestsPermission === "none")
   ) {
     throw new GitHubProviderError("github_installation_unusable", {
       retryable: false,
       status: 409,
     });
   }
-  const selection = await provider.listInstallationRepositories(
-    installationId,
-    repositoryIds
-  );
+  const selection = await provider.listInstallationRepositories(installationId);
   if (
     selection.repositorySelection !== "selected" ||
     selection.repositories.length < 1 ||
@@ -1167,7 +1269,123 @@ async function verifiedInstallationAuthority(
       status: 409,
     });
   }
-  return { installation, selection };
+  const selectedById = new Map(
+    selection.repositories.map((repository) => [repository.id, repository])
+  );
+  const repositories: ReplaceGitHubInstallationConnectionsInput["repositories"] =
+    [];
+  if ("userAuthority" in input) {
+    for (const userRepository of input.userAuthority.repositories) {
+      const selected = selectedById.get(userRepository.id);
+      if (!selected) {
+        continue;
+      }
+      if (
+        selected.name !== userRepository.name ||
+        selected.nodeId !== userRepository.nodeId ||
+        selected.owner !== userRepository.owner
+      ) {
+        throw new GitHubProviderError("github_provider_invalid_response", {
+          retryable: false,
+          status: 502,
+        });
+      }
+      repositories.push({
+        appIssuesPermission,
+        appOrganizationProjectsPermission,
+        appPullRequestsPermission,
+        githubUserId: input.userAuthority.user.id,
+        githubUserLogin: input.userAuthority.user.login,
+        id: deterministicConnectionId(config.appId, selected.id),
+        repositoryId: selected.id,
+        repositoryName: selected.name,
+        repositoryNodeId: selected.nodeId,
+        repositoryOwner: selected.owner,
+        userPermissionCeiling: userRepository.permission,
+        userPermissionCurrent: userRepository.permission,
+        userProjectManagementCeiling: false,
+        userProjectManagementCurrent: false,
+      });
+    }
+  } else {
+    const selectedExisting = input.existing.flatMap((existing) => {
+      const selected = selectedById.get(existing.repositoryId);
+      return selected ? [{ existing, selected }] : [];
+    });
+    const [authorityOwner] = selectedExisting;
+    if (
+      authorityOwner &&
+      selectedExisting.some(
+        ({ existing }) =>
+          existing.githubUserId !== authorityOwner.existing.githubUserId ||
+          existing.githubUserLogin !== authorityOwner.existing.githubUserLogin
+      )
+    ) {
+      throw new GitHubProviderError("github_provider_invalid_response", {
+        retryable: false,
+        status: 502,
+      });
+    }
+    const observedByRepository = new Map(
+      authorityOwner
+        ? (
+            await provider.getRepositoryUserPermissions({
+              installationId,
+              repositories: selectedExisting.map(({ selected }) => selected),
+              user: {
+                id: authorityOwner.existing.githubUserId,
+                login: authorityOwner.existing.githubUserLogin,
+              },
+            })
+          ).map(({ permission, repositoryId }) => [repositoryId, permission])
+        : []
+    );
+    if (observedByRepository.size !== selectedExisting.length) {
+      throw new GitHubProviderError("github_provider_invalid_response", {
+        retryable: false,
+        status: 502,
+      });
+    }
+    for (const { existing, selected } of selectedExisting) {
+      const observed = observedByRepository.get(existing.repositoryId);
+      if (!observed) {
+        throw new GitHubProviderError("github_provider_invalid_response", {
+          retryable: false,
+          status: 502,
+        });
+      }
+      const current = clampUserPermission(
+        existing.userPermissionCeiling,
+        observed
+      );
+      if (!current) {
+        continue;
+      }
+      repositories.push({
+        appIssuesPermission,
+        appOrganizationProjectsPermission,
+        appPullRequestsPermission,
+        githubUserId: existing.githubUserId,
+        githubUserLogin: existing.githubUserLogin,
+        id: existing.id,
+        repositoryId: selected.id,
+        repositoryName: selected.name,
+        repositoryNodeId: selected.nodeId,
+        repositoryOwner: selected.owner,
+        userPermissionCeiling: existing.userPermissionCeiling,
+        userPermissionCurrent: current,
+        userProjectManagementCeiling: existing.userProjectManagementCeiling,
+        userProjectManagementCurrent: false,
+      });
+    }
+  }
+  if (repositories.length < 1) {
+    throw new GitHubProviderError("github_installation_unusable", {
+      retryable: false,
+      status: 409,
+    });
+  }
+  return { installation, repositories };
 }
 
 function replacementInput(
@@ -1179,13 +1397,13 @@ function replacementInput(
     accountLogin: authority.installation.account.login,
     accountType: authority.installation.account.type,
     installationId: authority.installation.id,
-    repositories: authority.selection.repositories
+    repositories: authority.repositories
       .map((repository) => ({
-        id: deterministicConnectionId(principal.tenant, repository.id),
-        repositoryId: repository.id,
-        repositoryName: repository.name,
-        repositoryNodeId: repository.nodeId,
-        repositoryOwner: repository.owner,
+        ...repository,
+        id: deterministicConnectionId(
+          principal.tenant,
+          repository.repositoryId
+        ),
       }))
       .sort((left, right) =>
         compareAscii(left.repositoryId, right.repositoryId)

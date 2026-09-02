@@ -30,6 +30,7 @@ export const ABUSE_ROUTES = Object.freeze([
   "github_callback",
   "github_connection_read",
   "github_connection_delete",
+  "github_tool",
   "usage_read",
   "analytics_read",
   "model_list",

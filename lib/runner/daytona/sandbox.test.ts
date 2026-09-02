@@ -9,7 +9,11 @@ import {
 } from "@daytona/sdk";
 import type { RunnerStore } from "../store";
 import type { RunnerAgentRecord, RunnerPrincipal } from "../types";
-import { daytonaProbeSessionName, daytonaSandboxName } from "./names";
+import {
+  daytonaProbeSessionName,
+  daytonaSandboxLabels,
+  daytonaSandboxName,
+} from "./names";
 import { probeDaytonaHarnesses } from "./process";
 import {
   classifyDaytonaProviderError,
@@ -148,21 +152,32 @@ test("dispatch replaces a sandbox when gateway egress configuration identity cha
     sandboxLifecycle: "ready",
     version: 4,
   });
-  const reservedAgent = agent({
+  const resettingAgent = agent({
     ...currentAgent,
-    daytonaSandboxId: null,
     sandboxGeneration: 3,
-    sandboxLifecycle: "provisioning",
+    sandboxLifecycle: "resetting",
     version: 5,
+  });
+  const resetAgent = agent({
+    ...resettingAgent,
+    daytonaSandboxId: null,
+    sandboxLifecycle: "unprovisioned",
+    version: 6,
+  });
+  const reservedAgent = agent({
+    ...resetAgent,
+    sandboxGeneration: 4,
+    sandboxLifecycle: "provisioning",
+    version: 7,
   });
   const attachedAgent = agent({
     ...reservedAgent,
     daytonaSandboxId: "replacement",
     sandboxLifecycle: "ready",
-    version: 6,
+    version: 8,
   });
   const oldSandbox = Object.assign(
-    sandbox(SandboxState.STARTED, {
+    sandbox(SandboxState.STOPPED, {
       delete: () => {
         calls.push("delete");
         return Promise.resolve();
@@ -172,7 +187,11 @@ test("dispatch replaces a sandbox when gateway egress configuration identity cha
   );
   const replacement = Object.assign(sandbox(SandboxState.STARTED), {
     id: "replacement",
-    labels: { configurationId: "new-configuration" },
+    labels: {
+      ...daytonaSandboxLabels(principal.tenant, currentAgent.id),
+      configurationId: "new-configuration",
+      sandboxGeneration: String(reservedAgent.sandboxGeneration),
+    },
   });
   const configuration = {
     ...config,
@@ -214,6 +233,20 @@ test("dispatch replaces a sandbox when gateway egress configuration identity cha
             value: attachedAgent,
           });
         },
+        beginDaytonaSandboxResetForDispatch: () => {
+          calls.push("begin-reset");
+          return Promise.resolve({
+            kind: "updated" as const,
+            value: resettingAgent,
+          });
+        },
+        finishDaytonaSandboxResetForDispatch: () => {
+          calls.push("finish-reset");
+          return Promise.resolve({
+            kind: "updated" as const,
+            value: resetAgent,
+          });
+        },
         getDispatchAgent: () => {
           calls.push("get-dispatch");
           return Promise.resolve({
@@ -233,12 +266,14 @@ test("dispatch replaces a sandbox when gateway egress configuration identity cha
     }
   );
 
-  assert.equal(result.agent.sandboxGeneration, 3);
+  assert.equal(result.agent.sandboxGeneration, 4);
   assert.equal(result.sandbox, replacement);
   assert.deepEqual(calls, [
     "get-dispatch",
     "get:stored",
+    "begin-reset",
     "delete",
+    "finish-reset",
     "reserve",
     `get:${daytonaSandboxName(principal.tenant, currentAgent.id)}`,
     "create",
@@ -696,7 +731,7 @@ test("terminal shutdown transition failures are explicitly non-retryable", async
   );
 });
 
-test("stale provisioning reconciles its deterministic name before creating", async () => {
+test("stale provisioning refuses a deterministic sandbox from the previous generation", async () => {
   const stale = agent({
     sandboxGeneration: 4,
     sandboxLifecycle: "provisioning",
@@ -709,43 +744,116 @@ test("stale provisioning reconciles its deterministic name before creating", asy
     sandboxUpdatedAt: new Date(),
     version: 9,
   });
-  const existing = sandbox(SandboxState.STARTED);
-  const attached = agent({
+  const resetting = agent({
     ...reserved,
-    daytonaSandboxId: existing.id,
-    sandboxLifecycle: "ready",
+    sandboxGeneration: 6,
+    sandboxLifecycle: "resetting",
     version: 10,
   });
-  let createCalls = 0;
-  const result = await ensureDaytonaSandbox(principal, stale, config, {
-    daytona: {
-      create: () => {
-        createCalls += 1;
-        return Promise.reject(new Error("must not create"));
+  const reset = agent({
+    ...resetting,
+    sandboxLifecycle: "unprovisioned",
+    version: 11,
+  });
+  const replacementReservation = agent({
+    ...reset,
+    sandboxGeneration: 7,
+    sandboxLifecycle: "provisioning",
+    version: 12,
+  });
+  const currentConfiguration = {
+    ...config,
+    configurationId: "current-configuration",
+  };
+  const calls: string[] = [];
+  const existing = Object.assign(
+    sandbox(SandboxState.STARTED, {
+      delete: () => {
+        calls.push("delete");
+        return Promise.resolve();
       },
-      get: (identifier) => {
-        assert.equal(
-          identifier,
-          daytonaSandboxName(principal.tenant, stale.id)
-        );
-        return Promise.resolve(existing);
-      },
-    },
-    store: store({
-      attachDaytonaSandbox: () =>
-        Promise.resolve({ kind: "updated" as const, value: attached }),
-      reserveDaytonaSandbox: (
-        _principal: unknown,
-        input: { provisioningStaleBefore: Date }
-      ) => {
-        assert.ok(input.provisioningStaleBefore > stale.sandboxUpdatedAt);
-        return Promise.resolve({ kind: "reserved" as const, value: reserved });
+      start: () => {
+        calls.push("stale-start");
+        return Promise.resolve();
       },
     }),
+    {
+      labels: {
+        ...daytonaSandboxLabels(principal.tenant, stale.id),
+        configurationId: currentConfiguration.configurationId,
+        sandboxGeneration: String(stale.sandboxGeneration),
+      },
+    }
+  );
+  const replacement = Object.assign(sandbox(SandboxState.STARTED), {
+    id: "replacement",
+    labels: {
+      ...daytonaSandboxLabels(principal.tenant, stale.id),
+      configurationId: currentConfiguration.configurationId,
+      sandboxGeneration: String(replacementReservation.sandboxGeneration),
+    },
   });
+  const attached = agent({
+    ...replacementReservation,
+    daytonaSandboxId: replacement.id,
+    sandboxLifecycle: "ready",
+    version: 13,
+  });
+  let lookups = 0;
+  let reservations = 0;
+  const result = await ensureDaytonaSandbox(
+    principal,
+    stale,
+    currentConfiguration,
+    {
+      daytona: {
+        create: (parameters) => {
+          calls.push("create");
+          assert.equal(
+            parameters.labels?.sandboxGeneration,
+            String(replacementReservation.sandboxGeneration)
+          );
+          return Promise.resolve(replacement);
+        },
+        get: (identifier) => {
+          calls.push("get");
+          assert.equal(
+            identifier,
+            daytonaSandboxName(principal.tenant, stale.id)
+          );
+          lookups += 1;
+          return lookups === 1
+            ? Promise.resolve(existing)
+            : Promise.reject(new DaytonaNotFoundError("deleted"));
+        },
+      },
+      store: store({
+        attachDaytonaSandbox: () => {
+          calls.push("attach");
+          return Promise.resolve({ kind: "updated" as const, value: attached });
+        },
+        beginDaytonaSandboxReset: () =>
+          Promise.resolve({ kind: "updated" as const, value: resetting }),
+        finishDaytonaSandboxReset: () =>
+          Promise.resolve({ kind: "updated" as const, value: reset }),
+        reserveDaytonaSandbox: (
+          _principal: unknown,
+          input: { provisioningStaleBefore: Date }
+        ) => {
+          assert.ok(input.provisioningStaleBefore > stale.sandboxUpdatedAt);
+          reservations += 1;
+          return Promise.resolve({
+            kind: "reserved" as const,
+            value: reservations === 1 ? reserved : replacementReservation,
+          });
+        },
+      }),
+    }
+  );
   assert.equal(result.agent, attached);
-  assert.equal(result.sandbox, existing);
-  assert.equal(createCalls, 0);
+  assert.equal(result.sandbox, replacement);
+  assert.deepEqual(calls, ["get", "delete", "get", "create", "attach"]);
+  assert.equal(calls.includes("stale-start"), false);
 });
 
 test("an attach-loss leaves a reconciled sandbox intact", async () => {
@@ -754,15 +862,28 @@ test("an attach-loss leaves a reconciled sandbox intact", async () => {
     sandboxLifecycle: "provisioning",
     version: 1,
   });
+  const currentConfiguration = {
+    ...config,
+    configurationId: "current-configuration",
+  };
   let deletes = 0;
-  const existing = sandbox(SandboxState.STARTED, {
-    delete: () => {
-      deletes += 1;
-      return Promise.resolve();
-    },
-  });
+  const existing = Object.assign(
+    sandbox(SandboxState.STARTED, {
+      delete: () => {
+        deletes += 1;
+        return Promise.resolve();
+      },
+    }),
+    {
+      labels: {
+        ...daytonaSandboxLabels(principal.tenant, reserved.id),
+        configurationId: currentConfiguration.configurationId,
+        sandboxGeneration: String(reserved.sandboxGeneration),
+      },
+    }
+  );
   await assert.rejects(
-    ensureDaytonaSandbox(principal, agent(), config, {
+    ensureDaytonaSandbox(principal, agent(), currentConfiguration, {
       daytona: {
         create: () => Promise.reject(new Error("must not create")),
         get: () => Promise.resolve(existing),
@@ -915,11 +1036,28 @@ test("an older creator cannot delete a sandbox adopted by a newer generation", a
     sandboxGeneration: 2,
     version: 2,
   });
-  const adopted = agent({
+  const resetting = agent({
     ...newReservation,
-    daytonaSandboxId: "sandbox-id",
-    sandboxLifecycle: "ready",
+    sandboxGeneration: 3,
+    sandboxLifecycle: "resetting",
     version: 3,
+  });
+  const reset = agent({
+    ...resetting,
+    sandboxLifecycle: "unprovisioned",
+    version: 4,
+  });
+  const replacementReservation = agent({
+    ...reset,
+    sandboxGeneration: 4,
+    sandboxLifecycle: "provisioning",
+    version: 5,
+  });
+  const adopted = agent({
+    ...replacementReservation,
+    daytonaSandboxId: "replacement",
+    sandboxLifecycle: "ready",
+    version: 6,
   });
   let attachCalls = 0;
   let deletes = 0;
@@ -931,16 +1069,39 @@ test("an older creator cannot delete a sandbox adopted by a newer generation", a
   const oldAttach = new Promise<{ kind: "stale_version" }>((resolve) => {
     releaseOldAttach = () => resolve({ kind: "stale_version" });
   });
-  const created = sandbox(SandboxState.STARTED, {
-    delete: () => {
-      deletes += 1;
-      return Promise.resolve();
+  const currentConfiguration = {
+    ...config,
+    configurationId: "current-configuration",
+  };
+  const created = Object.assign(
+    sandbox(SandboxState.STARTED, {
+      delete: () => {
+        deletes += 1;
+        return Promise.resolve();
+      },
+    }),
+    {
+      labels: {
+        ...daytonaSandboxLabels(principal.tenant, oldReservation.id),
+        configurationId: currentConfiguration.configurationId,
+        sandboxGeneration: String(oldReservation.sandboxGeneration),
+      },
+    }
+  );
+  const replacement = Object.assign(sandbox(SandboxState.STARTED), {
+    id: "replacement",
+    labels: {
+      ...daytonaSandboxLabels(principal.tenant, newReservation.id),
+      configurationId: currentConfiguration.configurationId,
+      sandboxGeneration: String(replacementReservation.sandboxGeneration),
     },
   });
   const providerLookups = [
     Promise.reject(new DaytonaNotFoundError("missing")),
     Promise.resolve(created),
+    Promise.reject(new DaytonaNotFoundError("deleted")),
   ];
+  let reserveCalls = 0;
   const lifecycleStore = store({
     attachDaytonaSandbox: () => {
       attachCalls += 1;
@@ -949,15 +1110,25 @@ test("an older creator cannot delete a sandbox adopted by a newer generation", a
         ? oldAttach
         : Promise.resolve({ kind: "updated" as const, value: adopted });
     },
-    reserveDaytonaSandbox: () =>
-      Promise.resolve(
-        attachCalls === 0
-          ? { kind: "reserved" as const, value: oldReservation }
-          : { kind: "reserved" as const, value: newReservation }
-      ),
+    beginDaytonaSandboxReset: () =>
+      Promise.resolve({ kind: "updated" as const, value: resetting }),
+    finishDaytonaSandboxReset: () =>
+      Promise.resolve({ kind: "updated" as const, value: reset }),
+    reserveDaytonaSandbox: () => {
+      reserveCalls += 1;
+      return Promise.resolve({
+        kind: "reserved" as const,
+        value:
+          reserveCalls === 1
+            ? oldReservation
+            : reserveCalls === 2
+              ? newReservation
+              : replacementReservation,
+      });
+    },
   });
 
-  const old = ensureDaytonaSandbox(principal, agent(), config, {
+  const old = ensureDaytonaSandbox(principal, agent(), currentConfiguration, {
     daytona: {
       create: () => Promise.resolve(created),
       get: () => providerLookups.shift() as Promise<Sandbox>,
@@ -965,19 +1136,27 @@ test("an older creator cannot delete a sandbox adopted by a newer generation", a
     store: lifecycleStore,
   });
   await oldAttachReached;
-  const newer = await ensureDaytonaSandbox(principal, oldReservation, config, {
-    daytona: {
-      create: () => Promise.reject(new Error("must not create")),
-      get: () => Promise.resolve(created),
-    },
-    store: lifecycleStore,
-  });
+  const newer = await ensureDaytonaSandbox(
+    principal,
+    oldReservation,
+    currentConfiguration,
+    {
+      daytona: {
+        create: () => Promise.resolve(replacement),
+        get: () => providerLookups.shift() as Promise<Sandbox>,
+      },
+      store: lifecycleStore,
+    }
+  );
   releaseOldAttach();
   await assert.rejects(old, /generation changed/u);
 
-  assert.equal(deletes, 0);
-  assert.equal(newer.agent.daytonaSandboxId, created.id);
-  assert.equal(newer.agent.sandboxGeneration, newReservation.sandboxGeneration);
+  assert.equal(deletes, 1);
+  assert.equal(newer.agent.daytonaSandboxId, replacement.id);
+  assert.equal(
+    newer.agent.sandboxGeneration,
+    replacementReservation.sandboxGeneration
+  );
 });
 
 test("warming probes only the sandbox and persists success or failure through fences", async () => {
@@ -1920,31 +2099,267 @@ test("a timeout after Daytona may have accepted creation remains durable until d
   assert.equal(marked, 1);
   assert.equal(resetCalls, 0);
 
-  const discovered = sandbox(SandboxState.STARTED);
+  let starts = 0;
+  const discovered = Object.assign(
+    sandbox(SandboxState.STOPPED, {
+      start: () => {
+        starts += 1;
+        return Promise.resolve();
+      },
+    }),
+    {
+      labels: {
+        ...daytonaSandboxLabels(principal.tenant, ambiguous.id),
+        configurationId: "current-configuration",
+        sandboxGeneration: String(ambiguous.sandboxGeneration),
+      },
+    }
+  );
+  const currentConfiguration = {
+    ...config,
+    configurationId: "current-configuration",
+  };
   const attached = agent({
     ...ambiguous,
     daytonaSandboxId: discovered.id,
     sandboxLifecycle: "ready",
     version: 3,
   });
-  const reconciled = await ensureDaytonaSandbox(principal, ambiguous, config, {
-    daytona: {
-      create: () => Promise.reject(new Error("must not create")),
-      get: (identifier) => {
-        assert.equal(
-          identifier,
-          daytonaSandboxName(principal.tenant, ambiguous.id)
-        );
-        return Promise.resolve(discovered);
+  const reconciled = await ensureDaytonaSandbox(
+    principal,
+    ambiguous,
+    currentConfiguration,
+    {
+      daytona: {
+        create: () => Promise.reject(new Error("must not create")),
+        get: (identifier) => {
+          assert.equal(
+            identifier,
+            daytonaSandboxName(principal.tenant, ambiguous.id)
+          );
+          return Promise.resolve(discovered);
+        },
       },
-    },
-    store: store({
-      attachDaytonaSandbox: () =>
-        Promise.resolve({ kind: "updated" as const, value: attached }),
-    }),
-  });
+      store: store({
+        attachDaytonaSandbox: () =>
+          Promise.resolve({ kind: "updated" as const, value: attached }),
+      }),
+    }
+  );
   assert.equal(reconciled.agent, attached);
   assert.equal(reconciled.sandbox, discovered);
+  assert.equal(starts, 1);
+});
+
+test("ambiguous recovery deletes and reprovisions stale configuration or generation before attachment", async () => {
+  const baseEnvironment = {
+    APP_ORIGIN: "https://app.example",
+    AUTH_URL: "https://app.example",
+    DAYTONA_API_KEY: "test-key",
+    DAYTONA_DOMAIN_ALLOW_LIST:
+      "github.com,api.github.com,app.example,next.example",
+    DAYTONA_SNAPSHOT: "coven-agents-copilot-1",
+    GITHUB_TEAMS_ENABLED: "on",
+    NODE_ENV: "production",
+  } as NodeJS.ProcessEnv;
+  const currentConfiguration = daytonaSandboxConfiguration({
+    ...baseEnvironment,
+    APP_ORIGIN: "https://next.example",
+    AUTH_URL: "https://next.example",
+  });
+  const priorConfiguration = daytonaSandboxConfiguration(baseEnvironment);
+
+  for (const staleLabels of [
+    {
+      configurationId: priorConfiguration.configurationId,
+      sandboxGeneration: "1",
+    },
+    {
+      configurationId: currentConfiguration.configurationId,
+      sandboxGeneration: "0",
+    },
+  ]) {
+    const calls: string[] = [];
+    const ambiguous = agent({
+      sandboxGeneration: 1,
+      sandboxLifecycle: "provisioning_ambiguous",
+      version: 2,
+    });
+    const resetting = agent({
+      ...ambiguous,
+      sandboxGeneration: 2,
+      sandboxLifecycle: "resetting",
+      version: 3,
+    });
+    const reset = agent({
+      ...resetting,
+      sandboxLifecycle: "unprovisioned",
+      version: 4,
+    });
+    const reserved = agent({
+      ...reset,
+      sandboxGeneration: 3,
+      sandboxLifecycle: "provisioning",
+      version: 5,
+    });
+    const attached = agent({
+      ...reserved,
+      daytonaSandboxId: "replacement",
+      sandboxLifecycle: "ready",
+      version: 6,
+    });
+    const stale = Object.assign(
+      sandbox(SandboxState.STARTED, {
+        delete: () => {
+          calls.push("delete");
+          return Promise.resolve();
+        },
+        start: () => {
+          calls.push("stale-start");
+          return Promise.resolve();
+        },
+      }),
+      {
+        labels: {
+          ...daytonaSandboxLabels(principal.tenant, ambiguous.id),
+          ...staleLabels,
+        },
+      }
+    );
+    const replacement = Object.assign(
+      sandbox(SandboxState.STOPPED, {
+        start: () => {
+          calls.push("replacement-start");
+          return Promise.resolve();
+        },
+      }),
+      {
+        id: "replacement",
+        labels: {
+          ...daytonaSandboxLabels(principal.tenant, ambiguous.id),
+          configurationId: currentConfiguration.configurationId,
+          sandboxGeneration: String(reserved.sandboxGeneration),
+        },
+      }
+    );
+    let lookups = 0;
+
+    // biome-ignore lint/performance/noAwaitInLoops: each mismatch owns an isolated durable generation
+    const result = await ensureDaytonaSandbox(
+      principal,
+      ambiguous,
+      currentConfiguration,
+      {
+        daytona: {
+          create: (parameters) => {
+            calls.push("create");
+            assert.equal(
+              parameters.labels?.configurationId,
+              currentConfiguration.configurationId
+            );
+            assert.equal(
+              parameters.labels?.sandboxGeneration,
+              String(reserved.sandboxGeneration)
+            );
+            return Promise.resolve(replacement);
+          },
+          get: () => {
+            lookups += 1;
+            calls.push(`get:${lookups}`);
+            return lookups === 1
+              ? Promise.resolve(stale)
+              : Promise.reject(new DaytonaNotFoundError("deleted"));
+          },
+        },
+        store: store({
+          attachDaytonaSandbox: () => {
+            calls.push("attach");
+            return Promise.resolve({
+              kind: "updated" as const,
+              value: attached,
+            });
+          },
+          beginDaytonaSandboxReset: () => {
+            calls.push("begin-reset");
+            return Promise.resolve({
+              kind: "updated" as const,
+              value: resetting,
+            });
+          },
+          finishDaytonaSandboxReset: () => {
+            calls.push("finish-reset");
+            return Promise.resolve({ kind: "updated" as const, value: reset });
+          },
+          reserveDaytonaSandbox: () => {
+            calls.push("reserve");
+            return Promise.resolve({
+              kind: "reserved" as const,
+              value: reserved,
+            });
+          },
+        }),
+      }
+    );
+
+    assert.equal(result.agent, attached);
+    assert.equal(result.sandbox, replacement);
+    assert.deepEqual(calls, [
+      "get:1",
+      "begin-reset",
+      "delete",
+      "finish-reset",
+      "reserve",
+      "get:2",
+      "create",
+      "attach",
+      "replacement-start",
+    ]);
+    assert.equal(calls.includes("stale-start"), false);
+  }
+});
+
+test("a stale ambiguous recovery cannot delete a sandbox owned by a newer durable generation", async () => {
+  const ambiguous = agent({
+    sandboxGeneration: 1,
+    sandboxLifecycle: "provisioning_ambiguous",
+    version: 2,
+  });
+  let deletes = 0;
+  const newer = Object.assign(
+    sandbox(SandboxState.STARTED, {
+      delete: () => {
+        deletes += 1;
+        return Promise.resolve();
+      },
+    }),
+    {
+      labels: {
+        ...daytonaSandboxLabels(principal.tenant, ambiguous.id),
+        configurationId: "current-configuration",
+        sandboxGeneration: "2",
+      },
+    }
+  );
+
+  await assert.rejects(
+    ensureDaytonaSandbox(
+      principal,
+      ambiguous,
+      { ...config, configurationId: "current-configuration" },
+      {
+        daytona: {
+          create: () => Promise.reject(new Error("must not create")),
+          get: () => Promise.resolve(newer),
+        },
+        store: store({
+          beginDaytonaSandboxReset: () =>
+            Promise.resolve({ kind: "stale_version" as const }),
+        }),
+      }
+    ),
+    /generation changed|stale/i
+  );
+  assert.equal(deletes, 0);
 });
 
 test("definite Daytona creation rejection resets the reservation", async () => {

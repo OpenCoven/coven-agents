@@ -2,6 +2,7 @@ import "server-only";
 
 import type { KeyObject } from "node:crypto";
 import { GitHubProviderError } from "./app-auth";
+import type { GitHubUserRepositoryPermission } from "./authority-types";
 
 const GITHUB_API_ORIGIN = "https://api.github.com";
 const GITHUB_OAUTH_ORIGIN = "https://github.com";
@@ -10,11 +11,14 @@ const DEFAULT_TIMEOUT_MS = 5000;
 const DEFAULT_MAX_RESPONSE_BYTES = 1024 * 1024;
 const DEFAULT_MAX_PAGES = 10;
 const DEFAULT_MAX_INSTALLATIONS = 1000;
+const DEFAULT_MAX_REPOSITORIES = 16;
 const MAX_TOKEN_BYTES = 4096;
 const MAX_CODE_BYTES = 1024;
 const MAX_REDIRECT_URI_BYTES = 2048;
 const DECIMAL_ID = /^[1-9][0-9]{0,19}$/u;
 const CLIENT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+const NAME = /^[A-Za-z0-9_.-]{1,100}$/u;
+const NODE_ID = /^[A-Za-z0-9_=-]{1,256}$/u;
 const OAUTH_CODE = /^[A-Za-z0-9._~-]+$/u;
 const PKCE_VERIFIER = /^[A-Za-z0-9._~-]{43,128}$/u;
 const OAUTH_USER_PATTERN = /^ghu_[A-Za-z0-9]{20,4092}$/u;
@@ -33,7 +37,18 @@ export type GitHubUserAuthorizationClient = Readonly<{
       installationId: string;
       redirectUri: string;
     }>
-  ) => Promise<void>;
+  ) => Promise<GitHubUserInstallationAuthority>;
+}>;
+
+export type GitHubUserInstallationAuthority = Readonly<{
+  repositories: readonly Readonly<{
+    id: string;
+    name: string;
+    nodeId: string;
+    owner: string;
+    permission: GitHubUserRepositoryPermission;
+  }>[];
+  user: Readonly<{ id: string; login: string }>;
 }>;
 
 export function createGitHubUserAuthorizationClient(
@@ -45,6 +60,7 @@ export function createGitHubUserAuthorizationClient(
     fetch?: FetchLike;
     maxInstallations?: number;
     maxPages?: number;
+    maxRepositories?: number;
     maxResponseBytes?: number;
     timeoutMs?: number;
   }>
@@ -64,6 +80,10 @@ export function createGitHubUserAuthorizationClient(
   const maxInstallations = positiveInteger(
     input.maxInstallations ?? DEFAULT_MAX_INSTALLATIONS,
     "GitHub user installation bound"
+  );
+  const maxRepositories = positiveInteger(
+    input.maxRepositories ?? DEFAULT_MAX_REPOSITORIES,
+    "GitHub user repository bound"
   );
   const maxPages = positiveInteger(
     input.maxPages ?? DEFAULT_MAX_PAGES,
@@ -239,6 +259,7 @@ export function createGitHubUserAuthorizationClient(
       if (currentTotal > maxInstallations) {
         throw responseTooLarge();
       }
+
       if (totalCount !== null && totalCount !== currentTotal) {
         throw invalidResponse();
       }
@@ -282,6 +303,106 @@ export function createGitHubUserAuthorizationClient(
     });
   }
 
+  async function userIdentity(
+    token: string
+  ): Promise<GitHubUserInstallationAuthority["user"]> {
+    const body = object(
+      await requestJson(
+        `${GITHUB_API_ORIGIN}/user`,
+        {
+          headers: apiHeaders(["Bearer", token].join(" ")),
+          method: "GET",
+        },
+        "user"
+      )
+    );
+    return {
+      id: decimalString(body.id),
+      login: namedString(body.login),
+    };
+  }
+
+  async function userRepositories(
+    installationId: string,
+    token: string
+  ): Promise<GitHubUserInstallationAuthority["repositories"]> {
+    let observed = 0;
+    let totalCount: number | null = null;
+    let selection: "all" | "selected" | null = null;
+    const repositories: GitHubUserInstallationAuthority["repositories"][number][] =
+      [];
+    const ids = new Set<string>();
+    for (let page = 1; page <= maxPages; page += 1) {
+      let pageValue: unknown;
+      try {
+        // biome-ignore lint/performance/noAwaitInLoops: each bounded page depends on the prior count
+        pageValue = await requestJson(
+          `${GITHUB_API_ORIGIN}/user/installations/${installationId}/repositories?page=${page}&per_page=100`,
+          {
+            headers: apiHeaders(["Bearer", token].join(" ")),
+            method: "GET",
+          },
+          "user"
+        );
+      } catch (error) {
+        if (
+          error instanceof GitHubProviderError &&
+          error.code === "github_user_authorization_rejected" &&
+          (error.status === 403 || error.status === 404)
+        ) {
+          throw inaccessibleInstallation();
+        }
+        throw error;
+      }
+      const body = object(pageValue);
+      const currentSelection = repositorySelection(body.repository_selection);
+      if (selection !== null && selection !== currentSelection) {
+        throw invalidResponse();
+      }
+      selection = currentSelection;
+      if (selection !== "selected") {
+        throw invalidResponse();
+      }
+      const currentTotal = nonNegativeInteger(body.total_count);
+      if (currentTotal > maxRepositories) {
+        throw responseTooLarge();
+      }
+      if (totalCount !== null && totalCount !== currentTotal) {
+        throw invalidResponse();
+      }
+      totalCount = currentTotal;
+      if (!Array.isArray(body.repositories) || body.repositories.length > 100) {
+        throw invalidResponse();
+      }
+      for (const value of body.repositories) {
+        const repository = parseUserRepository(value);
+        if (ids.has(repository.id)) {
+          throw invalidResponse();
+        }
+        ids.add(repository.id);
+        repositories.push(repository);
+        observed += 1;
+        if (
+          observed > maxRepositories ||
+          totalCount === null ||
+          observed > totalCount
+        ) {
+          throw invalidResponse();
+        }
+      }
+      if (observed >= currentTotal) {
+        return repositories;
+      }
+      if (body.repositories.length === 0) {
+        throw invalidResponse();
+      }
+    }
+    throw new GitHubProviderError("github_provider_pagination_exhausted", {
+      retryable: false,
+      status: 502,
+    });
+  }
+
   async function revokeToken(token: string): Promise<void> {
     await withClientSecret(input.clientSecret, async (clientSecret) => {
       const basic = Buffer.from(
@@ -308,9 +429,24 @@ export function createGitHubUserAuthorizationClient(
         await exchangeCode(proof);
       let token = exchangedToken;
       let operationError: unknown = exchangeError ?? undefined;
+      let authority: GitHubUserInstallationAuthority | undefined;
       if (operationError === undefined) {
         try {
           await assertAccessibleInstallation(proof.installationId, token);
+          const [userResult, repositoryResult] = await Promise.allSettled([
+            userIdentity(token),
+            userRepositories(proof.installationId, token),
+          ]);
+          if (userResult.status === "rejected") {
+            throw userResult.reason;
+          }
+          if (repositoryResult.status === "rejected") {
+            throw repositoryResult.reason;
+          }
+          authority = {
+            repositories: repositoryResult.value,
+            user: userResult.value,
+          };
         } catch (error) {
           operationError = error;
         }
@@ -330,6 +466,10 @@ export function createGitHubUserAuthorizationClient(
       if (operationError !== undefined) {
         throw operationError;
       }
+      if (!authority) {
+        throw invalidResponse();
+      }
+      return authority;
     },
   };
 
@@ -344,6 +484,60 @@ export function createGitHubUserAuthorizationClient(
       throw invalidResponse();
     }
     return { id: decimalString(installation.id) };
+  }
+
+  function parseUserRepository(
+    value: unknown
+  ): GitHubUserInstallationAuthority["repositories"][number] {
+    const repository = object(value);
+    const owner = object(repository.owner);
+    const ownerLogin = namedString(owner.login);
+    const name = namedString(repository.name);
+    if (repository.full_name !== `${ownerLogin}/${name}`) {
+      throw invalidResponse();
+    }
+    if (
+      typeof repository.node_id !== "string" ||
+      !NODE_ID.test(repository.node_id)
+    ) {
+      throw invalidResponse();
+    }
+    const permissions = object(repository.permissions);
+    const keys = Object.keys(permissions);
+    if (
+      keys.some(
+        (key) => !["admin", "maintain", "pull", "push", "triage"].includes(key)
+      ) ||
+      typeof permissions.admin !== "boolean" ||
+      typeof permissions.pull !== "boolean" ||
+      typeof permissions.push !== "boolean" ||
+      (permissions.maintain !== undefined &&
+        typeof permissions.maintain !== "boolean") ||
+      (permissions.triage !== undefined &&
+        typeof permissions.triage !== "boolean") ||
+      permissions.pull !== true ||
+      ((permissions.admin === true || permissions.maintain === true) &&
+        permissions.push !== true)
+    ) {
+      throw invalidResponse();
+    }
+    const permission: GitHubUserRepositoryPermission =
+      permissions.admin === true
+        ? "admin"
+        : permissions.maintain === true
+          ? "maintain"
+          : permissions.push === true
+            ? "write"
+            : permissions.triage === true
+              ? "triage"
+              : "read";
+    return {
+      id: decimalString(repository.id),
+      name,
+      nodeId: repository.node_id,
+      owner: ownerLogin,
+      permission,
+    };
   }
 }
 
@@ -560,6 +754,20 @@ function decimalString(value: unknown): string {
     throw invalidResponse();
   }
   return rendered;
+}
+
+function namedString(value: unknown): string {
+  if (typeof value !== "string" || !NAME.test(value)) {
+    throw invalidResponse();
+  }
+  return value;
+}
+
+function repositorySelection(value: unknown): "all" | "selected" {
+  if (value !== "all" && value !== "selected") {
+    throw invalidResponse();
+  }
+  return value;
 }
 
 function nonNegativeInteger(value: unknown): number {

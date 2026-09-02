@@ -103,9 +103,9 @@ function copilotArgs(request: InvocationRequest): string[] {
   }
   const availableTools =
     permissionMode === "workspace_read"
-      ? ["view", "grep", "glob"]
+      ? ["view", "rg", "glob"]
       : permissionMode === "workspace_write"
-        ? ["view", "edit", "grep", "glob"]
+        ? ["view", "apply_patch", "rg", "glob"]
         : permissionMode === "github_only"
           ? []
           : null;

@@ -179,6 +179,152 @@ test("repository enumeration exchanges a metadata-only token immediately before 
   );
 });
 
+test("repository collaborator permission is read through an exact repository-scoped installation token", async () => {
+  const requests: CapturedRequest[] = [];
+  const client = clientFor(
+    sequenceFetch(requests, [
+      response({
+        expires_at: "2026-08-31T19:00:00.000Z",
+        token: INSTALLATION_TOKEN,
+      }),
+      response({
+        permission: "write",
+        role_name: "maintain",
+        user: {
+          id: "112233",
+          login: "BunsDev",
+        },
+      }),
+    ])
+  ) as unknown as {
+    getRepositoryUserPermission: (input: {
+      installationId: string;
+      repository: {
+        id: string;
+        name: string;
+        owner: string;
+      };
+      user: { id: string; login: string };
+    }) => Promise<string>;
+  };
+
+  assert.equal(
+    await client.getRepositoryUserPermission({
+      installationId: INSTALLATION_ID,
+      repository: {
+        id: "24680",
+        name: "coven-agents",
+        owner: "OpenCoven",
+      },
+      user: { id: "112233", login: "BunsDev" },
+    }),
+    "maintain"
+  );
+  assert.deepEqual(JSON.parse(requests[0]?.body ?? ""), {
+    permissions: { metadata: "read" },
+    repository_ids: [24_680],
+  });
+  assert.equal(
+    requests[1]?.url,
+    "https://api.github.com/repos/OpenCoven/coven-agents/collaborators/BunsDev/permission"
+  );
+});
+
+test("repository collaborator permission preserves standard triage and maintain roles while custom roles use their safe base", async () => {
+  for (const [permission, roleName, expected] of [
+    ["read", "triage", "triage"],
+    ["write", "maintain", "maintain"],
+    ["read", "custom-reader", "read"],
+    ["write", "custom-writer", "write"],
+  ] as const) {
+    const client = clientFor(
+      sequenceFetch(
+        [],
+        [
+          response({
+            expires_at: "2026-08-31T19:00:00.000Z",
+            token: INSTALLATION_TOKEN,
+          }),
+          response({
+            permission,
+            role_name: roleName,
+            user: { id: "112233", login: "BunsDev" },
+          }),
+        ]
+      )
+    );
+    const actual =
+      // biome-ignore lint/performance/noAwaitInLoops: each provider role owns an isolated installation token
+      await client.getRepositoryUserPermission({
+        installationId: INSTALLATION_ID,
+        repository: {
+          id: "24680",
+          name: "coven-agents",
+          owner: "OpenCoven",
+        },
+        user: { id: "112233", login: "BunsDev" },
+      });
+    assert.equal(actual, expected);
+  }
+});
+
+test("bulk collaborator permission refresh reuses one metadata token across the bounded repository set", async () => {
+  const requests: CapturedRequest[] = [];
+  const client = clientFor(
+    sequenceFetch(requests, [
+      response({
+        expires_at: "2026-08-31T19:00:00.000Z",
+        token: INSTALLATION_TOKEN,
+      }),
+      response({
+        permission: "read",
+        role_name: "triage",
+        user: { id: "112233", login: "BunsDev" },
+      }),
+      response({
+        permission: "write",
+        role_name: "maintain",
+        user: { id: "112233", login: "BunsDev" },
+      }),
+    ])
+  ) as unknown as {
+    getRepositoryUserPermissions: (input: {
+      installationId: string;
+      repositories: Array<{ id: string; name: string; owner: string }>;
+      user: { id: string; login: string };
+    }) => Promise<Array<{ permission: string; repositoryId: string }>>;
+  };
+
+  assert.deepEqual(
+    await client.getRepositoryUserPermissions({
+      installationId: INSTALLATION_ID,
+      repositories: [
+        { id: "24680", name: "coven-agents", owner: "OpenCoven" },
+        { id: "24681", name: "coven-web", owner: "OpenCoven" },
+      ],
+      user: { id: "112233", login: "BunsDev" },
+    }),
+    [
+      { permission: "triage", repositoryId: "24680" },
+      { permission: "maintain", repositoryId: "24681" },
+    ]
+  );
+  assert.equal(
+    requests.filter(({ url }) => url.includes("/access_tokens")).length,
+    1
+  );
+  assert.deepEqual(JSON.parse(requests[0]?.body ?? ""), {
+    permissions: { metadata: "read" },
+    repository_ids: [24_680, 24_681],
+  });
+  assert.equal(
+    new Set(
+      requests.slice(1).map(({ headers }) => headers.get("authorization"))
+    ).size,
+    1
+  );
+});
+
 test("gateway operations mint only the requested repository-scoped permission set", async () => {
   const requests: CapturedRequest[] = [];
   const client = clientFor(

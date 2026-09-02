@@ -106,7 +106,7 @@ test("explicit workspace permissions restrict tools without inspecting task text
   });
 
   assert.doesNotMatch(readCommand, /--yolo/u);
-  assert.match(readCommand, /--available-tools' 'view,grep,glob/u);
+  assert.match(readCommand, /--available-tools' 'view,rg,glob/u);
   assert.doesNotMatch(readCommand, /--available-tools' '[^']*edit/iu);
   assert.doesNotMatch(readCommand, /--allow-tool' 'write/iu);
   assert.doesNotMatch(readCommand, /--allow-tool' 'shell/iu);
@@ -121,7 +121,7 @@ test("explicit workspace permissions restrict tools without inspecting task text
   );
 
   assert.doesNotMatch(writeCommand, /--yolo|shell|github-mcp|web_/iu);
-  assert.match(writeCommand, /--available-tools' 'view,edit,grep,glob/u);
+  assert.match(writeCommand, /--available-tools' 'view,apply_patch,rg,glob/u);
   assert.match(writeCommand, /--allow-tool' 'write/u);
 });
 

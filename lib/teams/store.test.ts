@@ -139,7 +139,12 @@ function githubConnectionRow(
     accountId: "18446744073709551615",
     accountLogin: "OpenCoven",
     accountType: "Organization",
+    appIssuesPermission: "write",
+    appOrganizationProjectsPermission: "write",
+    appPullRequestsPermission: "write",
     createdAt: NOW,
+    githubUserId: "112233",
+    githubUserLogin: "BunsDev",
     id: CONNECTION_A,
     installationId: "18446744073709551614",
     repositoryId: "18446744073709551613",
@@ -148,8 +153,27 @@ function githubConnectionRow(
     repositoryOwner: "OpenCoven",
     tenant: principal.tenant,
     updatedAt: NOW,
+    userPermissionCeiling: "write",
+    userPermissionCurrent: "write",
+    userProjectManagementCeiling: false,
+    userProjectManagementCurrent: false,
     version: 0,
     ...overrides,
+  };
+}
+
+function githubConnectionAuthority(connection: GitHubConnectionRecord) {
+  return {
+    appIssuesPermission: connection.appIssuesPermission,
+    appOrganizationProjectsPermission:
+      connection.appOrganizationProjectsPermission,
+    appPullRequestsPermission: connection.appPullRequestsPermission,
+    githubUserId: connection.githubUserId,
+    githubUserLogin: connection.githubUserLogin,
+    userPermissionCeiling: connection.userPermissionCeiling,
+    userPermissionCurrent: connection.userPermissionCurrent,
+    userProjectManagementCeiling: connection.userProjectManagementCeiling,
+    userProjectManagementCurrent: connection.userProjectManagementCurrent,
   };
 }
 
@@ -2360,21 +2384,7 @@ test("GitHub capability persistence accepts only hashes, bounded budgets, and al
 });
 
 test("GitHub connection stores decimal metadata without an access token field", async () => {
-  const row = {
-    accountId: "18446744073709551615",
-    accountLogin: "OpenCoven",
-    accountType: "Organization" as const,
-    createdAt: NOW,
-    id: CONNECTION_A,
-    installationId: "18446744073709551614",
-    repositoryId: "18446744073709551613",
-    repositoryName: "coven-agents",
-    repositoryNodeId: "R_kgDOExample",
-    repositoryOwner: "OpenCoven",
-    tenant: principal.tenant,
-    updatedAt: NOW,
-    version: 0,
-  };
+  const row = githubConnectionRow();
   const { statements, store } = scripted(
     [],
     [{ generation: "0" }],
@@ -2395,6 +2405,7 @@ test("GitHub connection stores decimal metadata without an access token field", 
     installationId: row.installationId,
     repositories: [
       {
+        ...githubConnectionAuthority(row),
         id: CONNECTION_A,
         repositoryId: row.repositoryId,
         repositoryName: row.repositoryName,
@@ -2463,6 +2474,28 @@ test("GitHub connection snapshots read a durable shared generation before provid
   );
 });
 
+test("pre-aborted GitHub authority snapshot reads perform no database work", async () => {
+  const controller = new AbortController();
+  controller.abort(new Error("gateway authority deadline exceeded"));
+  const { statements, store } = scripted();
+  const controlled = store as unknown as {
+    readGitHubConnectionSnapshot: (
+      principal: RunnerPrincipal,
+      limit: number,
+      control: { abortSignal: AbortSignal; deadlineAt: number }
+    ) => Promise<unknown>;
+  };
+
+  await assert.rejects(
+    controlled.readGitHubConnectionSnapshot(principal, 17, {
+      abortSignal: controller.signal,
+      deadlineAt: Date.now() + 1000,
+    }),
+    /deadline|aborted/i
+  );
+  assert.equal(statements.length, 0);
+});
+
 test("GitHub reconnect advances the exact generation while stale reconnect and removal are no-ops", async () => {
   const current = githubConnectionRow();
   const replacement = {
@@ -2473,6 +2506,7 @@ test("GitHub reconnect advances the exact generation while stale reconnect and r
     installationId: current.installationId,
     repositories: [
       {
+        ...githubConnectionAuthority(current),
         id: current.id,
         repositoryId: current.repositoryId,
         repositoryName: current.repositoryName,
@@ -2558,6 +2592,7 @@ test("GitHub refresh-existing cannot create authority after the installation dis
     installationId: current.installationId,
     repositories: [
       {
+        ...githubConnectionAuthority(current),
         id: current.id,
         repositoryId: current.repositoryId,
         repositoryName: current.repositoryName,
@@ -2617,6 +2652,7 @@ test("GitHub installation replacement atomically upserts selected repositories, 
     installationId: first.installationId,
     repositories: [
       {
+        ...githubConnectionAuthority(first),
         id: first.id,
         repositoryId: first.repositoryId,
         repositoryName: first.repositoryName,
@@ -2624,6 +2660,7 @@ test("GitHub installation replacement atomically upserts selected repositories, 
         repositoryOwner: first.repositoryOwner,
       },
       {
+        ...githubConnectionAuthority(second),
         id: second.id,
         repositoryId: second.repositoryId,
         repositoryName: second.repositoryName,
@@ -2678,6 +2715,7 @@ test("identical GitHub refreshes are deterministic no-ops", async () => {
     installationId: current.installationId,
     repositories: [
       {
+        ...githubConnectionAuthority(current),
         id: current.id,
         repositoryId: current.repositoryId,
         repositoryName: current.repositoryName,
@@ -2728,6 +2766,7 @@ test("GitHub installation replacement enforces the tenant-wide repository bound 
       installationId: "888",
       repositories: [
         {
+          ...githubConnectionAuthority(githubConnectionRow()),
           id: "70000000-0000-4000-8000-000000000020",
           repositoryId: "2000",
           repositoryName: "new-one",
@@ -2735,6 +2774,7 @@ test("GitHub installation replacement enforces the tenant-wide repository bound 
           repositoryOwner: "OpenCoven",
         },
         {
+          ...githubConnectionAuthority(githubConnectionRow()),
           id: "70000000-0000-4000-8000-000000000021",
           repositoryId: "2001",
           repositoryName: "new-two",

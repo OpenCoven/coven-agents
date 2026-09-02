@@ -16,6 +16,7 @@ import {
 } from "@opencoven/agent-contracts";
 import { type SQL, sql } from "drizzle-orm";
 import { compareAscii } from "@/lib/ascii";
+import { canonicalJsonStringify } from "@/lib/canonical-json";
 import type { RunnerOperator } from "@/lib/runner/types";
 import type {
   GitHubConnectionSnapshot,
@@ -23,6 +24,15 @@ import type {
   TeamStoreStatement,
   TeamStoreTransaction,
 } from "@/lib/teams/store";
+import {
+  appPermissionAtLeast,
+  type GitHubAppRepositoryPermission,
+  type GitHubUserRepositoryPermission,
+  userPermissionAtLeast,
+  userPermissionAtMost,
+  validAppRepositoryPermission,
+  validUserRepositoryPermission,
+} from "./authority-types";
 import {
   githubOperationAuthority,
   githubOperationMarker,
@@ -47,6 +57,7 @@ const GITHUB_CAPABILITIES = new Set<TeamCapability>([
 const MAX_REPOSITORIES = 16;
 export const MAX_GITHUB_CAPABILITY_CALLS = 32;
 export const MAX_GITHUB_CAPABILITY_LIFETIME_MS = 15 * 60_000;
+export const MAX_GITHUB_CAPABILITY_ISSUANCE_MS = 20_000;
 export const MAX_GITHUB_OPERATION_LEASE_MS =
   GITHUB_TOOL_SERVER_DEADLINE_MS + 5000;
 export const GITHUB_GATEWAY_DB_LOCK_TIMEOUT_MS = 1000;
@@ -80,13 +91,22 @@ export type GitHubBrokerRepository = Readonly<{
   accountId: string;
   accountLogin: string;
   accountType: "Organization" | "User";
+  appIssuesPermission: GitHubAppRepositoryPermission;
+  appOrganizationProjectsPermission: GitHubAppRepositoryPermission;
+  appPullRequestsPermission: GitHubAppRepositoryPermission;
   connectionId: string;
+  githubUserId: string;
+  githubUserLogin: string;
   installationId: string;
   repository: string;
   repositoryId: string;
   repositoryName: string;
   repositoryNodeId: string;
   repositoryOwner: string;
+  userPermissionCeiling: GitHubUserRepositoryPermission;
+  userPermissionCurrent: GitHubUserRepositoryPermission;
+  userProjectManagementCeiling: boolean;
+  userProjectManagementCurrent: boolean;
 }>;
 
 export type GitHubBrokerPolicy = Readonly<{
@@ -158,6 +178,23 @@ function brokerRepository(
     !REPOSITORY_PART.test(connection.accountLogin) ||
     !REPOSITORY_PART.test(connection.repositoryOwner) ||
     !REPOSITORY_PART.test(connection.repositoryName) ||
+    !DECIMAL_ID.test(connection.githubUserId) ||
+    !REPOSITORY_PART.test(connection.githubUserLogin) ||
+    !validAppRepositoryPermission(connection.appIssuesPermission) ||
+    !validAppRepositoryPermission(connection.appPullRequestsPermission) ||
+    !validAppRepositoryPermission(
+      connection.appOrganizationProjectsPermission
+    ) ||
+    !validUserRepositoryPermission(connection.userPermissionCeiling) ||
+    !validUserRepositoryPermission(connection.userPermissionCurrent) ||
+    !userPermissionAtMost(
+      connection.userPermissionCurrent,
+      connection.userPermissionCeiling
+    ) ||
+    typeof connection.userProjectManagementCeiling !== "boolean" ||
+    typeof connection.userProjectManagementCurrent !== "boolean" ||
+    (connection.userProjectManagementCurrent &&
+      !connection.userProjectManagementCeiling) ||
     (connection.accountType !== "Organization" &&
       connection.accountType !== "User")
   ) {
@@ -167,14 +204,56 @@ function brokerRepository(
     accountId: connection.accountId,
     accountLogin: connection.accountLogin,
     accountType: connection.accountType,
+    appIssuesPermission: connection.appIssuesPermission,
+    appOrganizationProjectsPermission:
+      connection.appOrganizationProjectsPermission,
+    appPullRequestsPermission: connection.appPullRequestsPermission,
     connectionId: connection.id,
+    githubUserId: connection.githubUserId,
+    githubUserLogin: connection.githubUserLogin,
     installationId: connection.installationId,
     repository: `${connection.repositoryOwner.toLowerCase()}/${connection.repositoryName.toLowerCase()}`,
     repositoryId: connection.repositoryId,
     repositoryName: connection.repositoryName,
     repositoryNodeId: connection.repositoryNodeId,
     repositoryOwner: connection.repositoryOwner,
+    userPermissionCeiling: connection.userPermissionCeiling,
+    userPermissionCurrent: connection.userPermissionCurrent,
+    userProjectManagementCeiling: connection.userProjectManagementCeiling,
+    userProjectManagementCurrent: connection.userProjectManagementCurrent,
   };
+}
+
+function repositoryAllowsCapability(
+  repository: GitHubBrokerRepository,
+  capability: TeamCapability
+): boolean {
+  const write = capability.endsWith(".write");
+  if (capability.startsWith("github.projects.")) {
+    return (
+      repository.accountType === "Organization" &&
+      repository.userProjectManagementCeiling &&
+      repository.userProjectManagementCurrent &&
+      appPermissionAtLeast(
+        repository.appOrganizationProjectsPermission,
+        write ? "write" : "read"
+      )
+    );
+  }
+  const appPermission = capability.startsWith("github.issues.")
+    ? repository.appIssuesPermission
+    : repository.appPullRequestsPermission;
+  return (
+    appPermissionAtLeast(appPermission, write ? "write" : "read") &&
+    userPermissionAtLeast(
+      repository.userPermissionCeiling,
+      write ? "write" : "read"
+    ) &&
+    userPermissionAtLeast(
+      repository.userPermissionCurrent,
+      write ? "write" : "read"
+    )
+  );
 }
 
 export function buildGitHubBrokerPolicy(
@@ -227,14 +306,6 @@ export function buildGitHubBrokerPolicy(
         declaredCapabilities.includes(capability)
     )
   );
-  const allowedCapabilities = declaredCapabilities.filter(
-    (capability) =>
-      capability.endsWith(".read") || approvedCapabilities.includes(capability)
-  );
-  if (allowedCapabilities.length === 0) {
-    throw new Error("GitHub broker policy grants no executable capability.");
-  }
-
   const repositories = input.connectionSnapshot.connections
     .map(brokerRepository)
     .sort((left, right) => compareAscii(left.repository, right.repository));
@@ -243,6 +314,17 @@ export function buildGitHubBrokerPolicy(
     repositories.length
   ) {
     throw new Error("GitHub broker repository allowlist contains duplicates.");
+  }
+  const allowedCapabilities = declaredCapabilities.filter(
+    (capability) =>
+      (capability.endsWith(".read") ||
+        approvedCapabilities.includes(capability)) &&
+      repositories.some((repository) =>
+        repositoryAllowsCapability(repository, capability)
+      )
+  );
+  if (allowedCapabilities.length === 0) {
+    throw new Error("GitHub broker policy grants no executable capability.");
   }
 
   return {
@@ -288,15 +370,32 @@ export type ReplaceGitHubCapabilityInput = Readonly<{
 
 export type GitHubCapabilityIssuerDependencies = Readonly<{
   randomBytes?: (size: number) => Uint8Array;
+  refreshAuthority: (
+    input: Readonly<{
+      abortSignal: AbortSignal;
+      deadlineAt: number;
+      policy: GitHubBrokerPolicy;
+      tenant: string;
+      userId: string;
+    }>
+  ) => Promise<GitHubConnectionSnapshot>;
   replaceCapability: (
     input: ReplaceGitHubCapabilityInput
   ) => Promise<Readonly<{ kind: "conflict" | "created" }>>;
 }>;
 
+class GitHubCapabilityIssuanceError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "GitHubCapabilityIssuanceError";
+  }
+}
+
 export async function issueGitHubStepCapability(
   input: Readonly<{
     attemptId: string;
     capabilityId: string;
+    deadlineAt?: number;
     expiresAt: Date;
     now: Date;
     policy: GitHubBrokerPolicy;
@@ -326,36 +425,125 @@ export async function issueGitHubStepCapability(
     throw new Error("GitHub step capability expiry or binding is invalid.");
   }
 
-  const entropy = (dependencies.randomBytes ?? randomBytes)(32);
-  if (!(entropy instanceof Uint8Array) || entropy.byteLength !== 32) {
-    throw new Error("GitHub step capability entropy must be 256 bits.");
+  const deadlineAt =
+    input.deadlineAt ?? input.now.getTime() + MAX_GITHUB_CAPABILITY_ISSUANCE_MS;
+  const issuanceBudgetMs = deadlineAt - input.now.getTime();
+  if (
+    !Number.isSafeInteger(deadlineAt) ||
+    !Number.isSafeInteger(issuanceBudgetMs) ||
+    issuanceBudgetMs < 1 ||
+    issuanceBudgetMs > MAX_GITHUB_CAPABILITY_ISSUANCE_MS
+  ) {
+    throw new Error("GitHub capability issuance deadline is invalid.");
   }
-  const ownedEntropy = Buffer.from(entropy);
-  const rawToken = ownedEntropy.toString("base64url");
-  ownedEntropy.fill(0);
-  const tokenHash = createHash("sha256").update(rawToken, "utf8").digest("hex");
-  if (!TOKEN_HASH.test(tokenHash)) {
-    throw new Error("GitHub step capability hashing failed.");
-  }
-
-  const replaced = await dependencies.replaceCapability({
-    attemptId: input.attemptId,
-    expiresAt: input.expiresAt,
-    id: input.capabilityId,
-    policy: input.policy,
-    runnerRunId: input.runnerRunId,
-    tenant: input.tenant,
-    tokenHash,
-    userId: input.userId,
+  const realDeadlineAt = Date.now() + issuanceBudgetMs;
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = globalThis.setTimeout(() => {
+      const error = new GitHubCapabilityIssuanceError(
+        "GitHub capability authority deadline exceeded."
+      );
+      controller.abort(error);
+      reject(error);
+    }, issuanceBudgetMs);
   });
-  if (replaced.kind !== "created") {
-    throw new Error("GitHub step capability issuance was fenced.");
+
+  try {
+    const refreshed = await Promise.race([
+      dependencies.refreshAuthority({
+        abortSignal: controller.signal,
+        deadlineAt,
+        policy: input.policy,
+        tenant: input.tenant,
+        userId: input.userId,
+      }),
+      timeout,
+    ]);
+    if (controller.signal.aborted || Date.now() >= realDeadlineAt) {
+      throw new GitHubCapabilityIssuanceError(
+        "GitHub capability authority deadline exceeded."
+      );
+    }
+    const currentPolicy = buildGitHubBrokerPolicy({
+      actorUserId: input.policy.actorUserId,
+      approvedCapabilities: input.policy.approvedCapabilities,
+      authVersion: input.policy.authVersion,
+      connectionSnapshot: refreshed,
+      declaredCapabilities: input.policy.declaredCapabilities,
+      teamRunId: input.policy.teamRunId,
+      teamStepId: input.policy.teamStepId,
+    });
+    if (
+      canonicalJsonStringify(currentPolicy) !==
+      canonicalJsonStringify(input.policy)
+    ) {
+      throw new GitHubCapabilityIssuanceError(
+        "GitHub step capability authority is no longer current."
+      );
+    }
+
+    const entropy = (dependencies.randomBytes ?? randomBytes)(32);
+    if (!(entropy instanceof Uint8Array) || entropy.byteLength !== 32) {
+      throw new GitHubCapabilityIssuanceError(
+        "GitHub step capability entropy must be 256 bits."
+      );
+    }
+    const ownedEntropy = Buffer.from(entropy);
+    const rawToken = ownedEntropy.toString("base64url");
+    ownedEntropy.fill(0);
+    const tokenHash = createHash("sha256")
+      .update(rawToken, "utf8")
+      .digest("hex");
+    if (!TOKEN_HASH.test(tokenHash)) {
+      throw new GitHubCapabilityIssuanceError(
+        "GitHub step capability hashing failed."
+      );
+    }
+
+    const replaced = await Promise.race([
+      dependencies.replaceCapability({
+        abortSignal: controller.signal,
+        attemptId: input.attemptId,
+        deadlineAt,
+        expiresAt: input.expiresAt,
+        id: input.capabilityId,
+        policy: input.policy,
+        runnerRunId: input.runnerRunId,
+        tenant: input.tenant,
+        tokenHash,
+        userId: input.userId,
+      }),
+      timeout,
+    ]);
+    if (controller.signal.aborted || Date.now() >= realDeadlineAt) {
+      throw new GitHubCapabilityIssuanceError(
+        "GitHub capability issuance deadline exceeded."
+      );
+    }
+    if (replaced.kind !== "created") {
+      throw new GitHubCapabilityIssuanceError(
+        "GitHub step capability issuance was fenced."
+      );
+    }
+    return {
+      capabilityId: input.capabilityId,
+      expiresAt: input.expiresAt,
+      rawToken,
+    };
+  } catch (error) {
+    if (error instanceof GitHubCapabilityIssuanceError) {
+      throw error;
+    }
+    throw new GitHubCapabilityIssuanceError(
+      "GitHub step capability authority is no longer current.",
+      { cause: error }
+    );
+  } finally {
+    if (timer !== undefined) {
+      globalThis.clearTimeout(timer);
+    }
   }
-  return {
-    capabilityId: input.capabilityId,
-    expiresAt: input.expiresAt,
-    rawToken,
-  };
 }
 
 export type GitHubGatewayCapabilityRecord = Readonly<{
@@ -423,6 +611,7 @@ export type GitHubOperationExecutionContext = Readonly<{
   accountId: string;
   accountLogin: string;
   accountType: "Organization" | "User";
+  actorUserId: string;
   capability: GitHubGatewayCapabilityRecord;
   connectionId: string;
   installationId: string;
@@ -644,6 +833,7 @@ function contextFromRows(
     accountId: column(row, "accountId"),
     accountLogin: column(row, "accountLogin"),
     accountType: column(row, "accountType"),
+    actorUserId: column(row, "actorUserId"),
     capability: asCapability(row),
     connectionId: column(row, "connectionId"),
     installationId: column(row, "installationId"),
@@ -667,6 +857,9 @@ function capabilityAuthorityIsLive(
   const runnerBrokerPolicy = column<GitHubBrokerPolicy | null>(
     row,
     "runnerBrokerPolicy"
+  );
+  const policyRepository = runnerBrokerPolicy?.repositories.find(
+    ({ repository: policyName }) => policyName === repository
   );
   const stepDeclaredCapabilities = column<readonly TeamCapability[]>(
     row,
@@ -692,8 +885,27 @@ function capabilityAuthorityIsLive(
     column(row, "currentConnectionGeneration") ===
       capability.connectionGeneration &&
     runnerBrokerPolicy !== null &&
-    JSON.stringify(runnerBrokerPolicy) ===
-      JSON.stringify(column(row, "persistedBrokerPolicy")) &&
+    policyRepository !== undefined &&
+    repositoryAllowsCapability(policyRepository, requiredCapability) &&
+    policyRepository.connectionId === column(row, "connectionId") &&
+    policyRepository.githubUserId === column(row, "githubUserId") &&
+    policyRepository.githubUserLogin === column(row, "githubUserLogin") &&
+    policyRepository.userPermissionCeiling ===
+      column(row, "userPermissionCeiling") &&
+    policyRepository.userPermissionCurrent ===
+      column(row, "userPermissionCurrent") &&
+    policyRepository.userProjectManagementCeiling ===
+      column(row, "userProjectManagementCeiling") &&
+    policyRepository.userProjectManagementCurrent ===
+      column(row, "userProjectManagementCurrent") &&
+    policyRepository.appIssuesPermission ===
+      column(row, "appIssuesPermission") &&
+    policyRepository.appPullRequestsPermission ===
+      column(row, "appPullRequestsPermission") &&
+    policyRepository.appOrganizationProjectsPermission ===
+      column(row, "appOrganizationProjectsPermission") &&
+    canonicalJsonStringify(runnerBrokerPolicy) ===
+      canonicalJsonStringify(column(row, "persistedBrokerPolicy")) &&
     runnerBrokerPolicy.connectionGeneration ===
       capability.connectionGeneration &&
     runnerBrokerPolicy.authVersion === capability.authVersion &&
@@ -716,8 +928,8 @@ function capabilityAuthorityIsLive(
       runnerBrokerPolicy.repositories.length &&
     capability.repositoryAllowlist.every((repositoryName) =>
       runnerBrokerPolicy.repositories.some(
-        ({ repository: policyRepository }) =>
-          policyRepository === repositoryName
+        ({ repository: policyRepositoryName }) =>
+          policyRepositoryName === repositoryName
       )
     ) &&
     column(row, "stepStatus") === "running" &&
@@ -811,9 +1023,60 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
                     "operation"."requiredCapability"
                   AND "capability"."repositoryAllowlist" ?
                     "operation"."repository"
+                  AND (
+                    (
+                      "operation"."requiredCapability" =
+                        'github.issues.write'
+                      AND "connection"."appIssuesPermission" = 'write'
+                    )
+                    OR (
+                      "operation"."requiredCapability" =
+                        'github.pull_requests.write'
+                      AND "connection"."appPullRequestsPermission" = 'write'
+                    )
+                    OR (
+                      "operation"."requiredCapability" =
+                        'github.projects.write'
+                      AND "connection"."accountType" = 'Organization'
+                      AND "connection"."appOrganizationProjectsPermission" =
+                        'write'
+                      AND "connection"."userProjectManagementCeiling" = true
+                      AND "connection"."userProjectManagementCurrent" = true
+                    )
+                  )
+                  AND (
+                    "operation"."requiredCapability" =
+                      'github.projects.write'
+                    OR (
+                      "connection"."userPermissionCeiling" IN
+                        ('write', 'maintain', 'admin')
+                      AND "connection"."userPermissionCurrent" IN
+                        ('write', 'maintain', 'admin')
+                    )
+                  )
                   AND "runnerRun"."githubBrokerPolicy" IS NOT NULL
                   AND "runnerRun"."githubBrokerPolicy"->'allowedCapabilities' ?
                     "operation"."requiredCapability"
+                  AND "runnerRun"."githubBrokerPolicy"->'repositories' @>
+                    jsonb_build_array(jsonb_build_object(
+                      'connectionId', "connection"."id"::text,
+                      'githubUserId', "connection"."githubUserId",
+                      'githubUserLogin', "connection"."githubUserLogin",
+                      'userPermissionCeiling',
+                        "connection"."userPermissionCeiling",
+                      'userPermissionCurrent',
+                        "connection"."userPermissionCurrent",
+                      'userProjectManagementCeiling',
+                        "connection"."userProjectManagementCeiling",
+                      'userProjectManagementCurrent',
+                        "connection"."userProjectManagementCurrent",
+                      'appIssuesPermission',
+                        "connection"."appIssuesPermission",
+                      'appPullRequestsPermission',
+                        "connection"."appPullRequestsPermission",
+                      'appOrganizationProjectsPermission',
+                        "connection"."appOrganizationProjectsPermission"
+                    ))
                   AND "runnerRun"."daytonaAttemptId" =
                     "capability"."attemptId"::text
                   AND "runnerRun"."authVersion" = "capability"."authVersion"
@@ -1335,11 +1598,20 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
                 "connection"."accountId",
                 "connection"."accountLogin",
                 "connection"."accountType",
+                "connection"."appIssuesPermission",
+                "connection"."appOrganizationProjectsPermission",
+                "connection"."appPullRequestsPermission",
+                "connection"."githubUserId",
+                "connection"."githubUserLogin",
                 "connection"."installationId",
                 "connection"."repositoryId",
                 "connection"."repositoryName",
                 "connection"."repositoryNodeId",
-                "connection"."repositoryOwner"
+                "connection"."repositoryOwner",
+                "connection"."userPermissionCeiling",
+                "connection"."userPermissionCurrent",
+                "connection"."userProjectManagementCeiling",
+                "connection"."userProjectManagementCurrent"
               FROM "RunnerGitHubCapability" AS "capability"
               JOIN "RunnerRun" AS "runnerRun"
                 ON "runnerRun"."id" = "capability"."runnerRunId"

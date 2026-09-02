@@ -3,14 +3,18 @@ import test from "node:test";
 import { TEMPLATES } from "@/lib/agents/formations";
 import { BUILT_IN_SKILLS, builtInSkill, GITHUB_DELIVERY_TEAM } from "./catalog";
 
-test("GitHub delivery uses the intended five-member handoff sequence", () => {
+test("GitHub delivery omits Project writes until exact user management authority is provable", () => {
   assert.deepEqual(
     GITHUB_DELIVERY_TEAM.members.map(({ name }) => name),
-    ["Issue Triage", "Builder", "PR Shepherd", "Critic", "Project Steward"]
+    ["Issue Triage", "Builder", "PR Shepherd", "Critic"]
   );
   assert.deepEqual(
     GITHUB_DELIVERY_TEAM.members.map(({ agentTemplateId }) => agentTemplateId),
-    ["scout", "builder", "builder", "critic", "scribe"]
+    ["scout", "builder", "builder", "critic"]
+  );
+  assert.equal(
+    BUILT_IN_SKILLS.some(({ id }) => id === "github-project-update"),
+    false
   );
 });
 
@@ -34,10 +38,10 @@ test("GitHub write skills declare explicit write capabilities", () => {
     "github.pull_requests.read",
     "github.pull_requests.write",
   ]);
-  assert.deepEqual(builtInSkill("github-project-update").requiredCapabilities, [
-    "github.projects.read",
-    "github.projects.write",
-  ]);
+  assert.throws(
+    () => builtInSkill("github-project-update"),
+    /Unknown built-in team skill/u
+  );
 });
 
 test("built-in skill lookup fails closed for an unknown id", () => {

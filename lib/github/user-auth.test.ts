@@ -27,12 +27,24 @@ test("user authorization proves an exact accessible installation and revokes onl
     ])
   );
 
-  await client.proveInstallationAccess(proofInput());
+  const authority = await client.proveInstallationAccess(proofInput());
 
-  assert.equal(requests.length, 3);
+  assert.equal(requests.length, 5);
+  assert.deepEqual(authority, {
+    repositories: [
+      {
+        id: "24680",
+        name: "coven-agents",
+        nodeId: "R_24680",
+        owner: "OpenCoven",
+        permission: "write",
+      },
+    ],
+    user: { id: "112233", login: "BunsDev" },
+  });
   assert.deepEqual(
     requests.map(({ redirect }) => redirect),
-    ["error", "error", "error"]
+    ["error", "error", "error", "error", "error"]
   );
   assert.equal(requests[0]?.url, "https://github.com/login/oauth/access_token");
   assert.equal(requests[0]?.method, "POST");
@@ -59,18 +71,149 @@ test("user authorization proves an exact accessible installation and revokes onl
     requests[1]?.headers.get("authorization"),
     `Bearer ${USER_TOKEN}`
   );
+  const cleanup = requests.find(({ method }) => method === "DELETE");
   assert.equal(
-    requests[2]?.url,
+    cleanup?.url,
     `https://api.github.com/applications/${CLIENT_ID}/token`
   );
-  assert.equal(requests[2]?.method, "DELETE");
-  assert.match(requests[2]?.headers.get("authorization") ?? "", /^Basic /u);
-  assert.deepEqual(JSON.parse(requests[2]?.body ?? ""), {
+  assert.match(cleanup?.headers.get("authorization") ?? "", /^Basic /u);
+  assert.deepEqual(JSON.parse(cleanup?.body ?? ""), {
     access_token: USER_TOKEN,
   });
   assert.equal(
     requests.some(({ url }) => url.endsWith("/grant")),
     false
+  );
+});
+
+test("user authorization enumerates exact installation repositories and derives safe collaborator ceilings", async () => {
+  for (const [role, permissions] of [
+    [
+      "read",
+      { admin: false, maintain: false, pull: true, push: false, triage: false },
+    ],
+    [
+      "triage",
+      { admin: false, maintain: false, pull: true, push: false, triage: true },
+    ],
+    [
+      "write",
+      { admin: false, maintain: false, pull: true, push: true, triage: true },
+    ],
+    [
+      "maintain",
+      { admin: false, maintain: true, pull: true, push: true, triage: true },
+    ],
+    [
+      "admin",
+      { admin: true, maintain: true, pull: true, push: true, triage: true },
+    ],
+  ] as const) {
+    const requests: CapturedRequest[] = [];
+    const client = clientFor(
+      authorityFetch(requests, userRepositoriesBody(permissions))
+    );
+
+    // biome-ignore lint/performance/noAwaitInLoops: each collaborator role owns an isolated OAuth proof
+    const authority = (await client.proveInstallationAccess(
+      proofInput()
+    )) as unknown as {
+      repositories: Array<{
+        id: string;
+        permission: string;
+      }>;
+      user: { id: string; login: string };
+    };
+
+    assert.equal(
+      requests.some(
+        ({ url }) =>
+          url ===
+          `https://api.github.com/user/installations/${INSTALLATION_ID}/repositories?page=1&per_page=100`
+      ),
+      true
+    );
+    assert.deepEqual(
+      {
+        repositories: authority.repositories.map(({ id, permission }) => ({
+          id,
+          permission,
+        })),
+        user: authority.user,
+      },
+      {
+        repositories: [{ id: "24680", permission: role }],
+        user: { id: "112233", login: "BunsDev" },
+      }
+    );
+  }
+});
+
+test("user repository enumeration fails closed when bounded pagination is exhausted", async () => {
+  const requests: CapturedRequest[] = [];
+  const client = clientFor(
+    authorityFetch(
+      requests,
+      userRepositoriesBody(
+        { admin: false, pull: true, push: false },
+        { repositoryId: "24680", totalCount: 3 }
+      ),
+      userRepositoriesBody(
+        { admin: false, pull: true, push: false },
+        { repositoryId: "24681", totalCount: 3 }
+      )
+    ),
+    { maxPages: 2 }
+  );
+
+  await assert.rejects(
+    client.proveInstallationAccess(proofInput()),
+    providerError("github_provider_pagination_exhausted", false)
+  );
+  assert.equal(
+    requests.filter(({ url }) =>
+      url.includes(`/user/installations/${INSTALLATION_ID}/repositories?`)
+    ).length,
+    2
+  );
+});
+
+test("user repository permission hashes cannot claim elevated roles without effective push authority", async () => {
+  for (const permissions of [
+    {
+      admin: true,
+      maintain: false,
+      pull: true,
+      push: false,
+      triage: true,
+    },
+    {
+      admin: false,
+      maintain: true,
+      pull: true,
+      push: false,
+      triage: true,
+    },
+  ]) {
+    const client = clientFor(
+      authorityFetch([], userRepositoriesBody(permissions))
+    );
+    // biome-ignore lint/performance/noAwaitInLoops: each malformed permission hash owns an isolated OAuth proof
+    await assert.rejects(
+      client.proveInstallationAccess(proofInput()),
+      providerError("github_provider_invalid_response", false)
+    );
+  }
+});
+
+test("an inaccessible exact installation repository endpoint is classified as denied authority", async () => {
+  const client = clientFor(
+    authorityFetch([], new Response(null, { status: 404 }))
+  );
+
+  await assert.rejects(
+    client.proveInstallationAccess(proofInput()),
+    providerError("github_user_installation_inaccessible", false)
   );
 });
 
@@ -444,6 +587,63 @@ test("concurrent user proofs revoke only their own token authority", async () =>
   );
 });
 
+test("user-token revocation waits for every in-flight authority request to settle", async () => {
+  let cleanupCalls = 0;
+  let releaseRepositories!: () => void;
+  let signalRepositoriesStarted!: () => void;
+  const repositoriesStarted = new Promise<void>((resolve) => {
+    signalRepositoriesStarted = resolve;
+  });
+  const repositoryGate = new Promise<void>((resolve) => {
+    releaseRepositories = resolve;
+  });
+  const client = clientFor(async (input, init = {}) => {
+    if (input === "https://github.com/login/oauth/access_token") {
+      return jsonResponse(tokenBody());
+    }
+    if (input.includes("/user/installations?")) {
+      return jsonResponse(installationsBody([INSTALLATION_ID]));
+    }
+    if (
+      input.startsWith(
+        `https://api.github.com/user/installations/${INSTALLATION_ID}/repositories?`
+      )
+    ) {
+      signalRepositoriesStarted();
+      await repositoryGate;
+      return jsonResponse(
+        userRepositoriesBody({
+          admin: false,
+          pull: true,
+          push: false,
+        })
+      );
+    }
+    if (input === "https://api.github.com/user") {
+      return new Response(null, { status: 503 });
+    }
+    if (init.method === "DELETE") {
+      cleanupCalls += 1;
+      return new Response(null, { status: 204 });
+    }
+    assert.fail(`Unexpected request to ${input}`);
+  });
+
+  const pending = client.proveInstallationAccess(proofInput()).then(
+    () => null,
+    (error: unknown) => error
+  );
+  await repositoriesStarted;
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(cleanupCalls, 0);
+  releaseRepositories();
+  assert.equal(
+    providerError("github_provider_unavailable", true)(await pending),
+    true
+  );
+  assert.equal(cleanupCalls, 1);
+});
+
 test("expiring-token refresh authority is validated but never persisted or sent to another cleanup", async () => {
   const refreshToken = `ghr_${"B".repeat(32)}`;
   const requests: CapturedRequest[] = [];
@@ -457,7 +657,7 @@ test("expiring-token refresh authority is validated but never persisted or sent 
 
   await client.proveInstallationAccess(proofInput());
 
-  assert.equal(requests.length, 3);
+  assert.equal(requests.length, 5);
   const serializedRequests = JSON.stringify(
     requests.map(({ body, headers, method, url }) => ({
       body,
@@ -467,7 +667,8 @@ test("expiring-token refresh authority is validated but never persisted or sent 
     }))
   );
   assert.doesNotMatch(serializedRequests, new RegExp(refreshToken, "u"));
-  assert.deepEqual(JSON.parse(requests[2]?.body ?? ""), {
+  const cleanup = requests.find(({ method }) => method === "DELETE");
+  assert.deepEqual(JSON.parse(cleanup?.body ?? ""), {
     access_token: USER_TOKEN,
   });
 });
@@ -571,6 +772,36 @@ function installationsBody(ids: readonly string[], totalCount = ids.length) {
   };
 }
 
+function userRepositoriesBody(
+  permissions: Readonly<{
+    admin: boolean;
+    maintain?: boolean;
+    pull: boolean;
+    push: boolean;
+    triage?: boolean;
+  }>,
+  options: Readonly<{
+    repositoryId?: string;
+    totalCount?: number;
+  }> = {}
+) {
+  const repositoryId = options.repositoryId ?? "24680";
+  return {
+    repositories: [
+      {
+        full_name: "OpenCoven/coven-agents",
+        id: repositoryId,
+        name: "coven-agents",
+        node_id: `R_${repositoryId}`,
+        owner: { login: "OpenCoven" },
+        permissions,
+      },
+    ],
+    repository_selection: "selected",
+    total_count: options.totalCount ?? 1,
+  };
+}
+
 function jsonResponse(body: unknown, status = 200): Response {
   return Response.json(body, { status });
 }
@@ -599,9 +830,64 @@ function sequenceFetch(
 ): FetchLike {
   return (input, init = {}) => {
     captured.push(capturedRequest(input, init));
+    if (input === "https://api.github.com/user") {
+      return Promise.resolve(jsonResponse({ id: "112233", login: "BunsDev" }));
+    }
+    if (
+      input.startsWith(
+        `https://api.github.com/user/installations/${INSTALLATION_ID}/repositories?`
+      )
+    ) {
+      return Promise.resolve(
+        jsonResponse(
+          userRepositoriesBody({
+            admin: false,
+            maintain: false,
+            pull: true,
+            push: true,
+            triage: true,
+          })
+        )
+      );
+    }
     const next = responses.shift();
     assert.ok(next, `Unexpected request to ${input}`);
     return Promise.resolve(next);
+  };
+}
+
+function authorityFetch(
+  captured: CapturedRequest[],
+  ...repositoryPages: unknown[]
+): FetchLike {
+  return (input, init = {}) => {
+    captured.push(capturedRequest(input, init));
+    if (input === "https://github.com/login/oauth/access_token") {
+      return Promise.resolve(jsonResponse(tokenBody()));
+    }
+    if (input === "https://api.github.com/user") {
+      return Promise.resolve(jsonResponse({ id: "112233", login: "BunsDev" }));
+    }
+    if (
+      input.startsWith(
+        `https://api.github.com/user/installations/${INSTALLATION_ID}/repositories?`
+      )
+    ) {
+      const next = repositoryPages.shift();
+      assert.ok(next, `Unexpected repository authority request to ${input}`);
+      return Promise.resolve(
+        next instanceof Response ? next : jsonResponse(next)
+      );
+    }
+    if (input.includes("/user/installations?")) {
+      return Promise.resolve(
+        jsonResponse(installationsBody([INSTALLATION_ID]))
+      );
+    }
+    if (init.method === "DELETE") {
+      return Promise.resolve(new Response(null, { status: 204 }));
+    }
+    assert.fail(`Unexpected request to ${input}`);
   };
 }
 
@@ -640,7 +926,25 @@ function concurrentTokenFetch(captured: CapturedRequest[]): FetchLike {
         )
       );
     }
-    if (input.includes("/user/installations")) {
+    if (input === "https://api.github.com/user") {
+      return jsonResponse({ id: "112233", login: "BunsDev" });
+    }
+    if (
+      input.startsWith(
+        `https://api.github.com/user/installations/${INSTALLATION_ID}/repositories?`
+      )
+    ) {
+      return jsonResponse(
+        userRepositoriesBody({
+          admin: false,
+          maintain: false,
+          pull: true,
+          push: true,
+          triage: true,
+        })
+      );
+    }
+    if (input.includes("/user/installations?")) {
       const token = new Headers(init.headers)
         .get("authorization")
         ?.split(" ")

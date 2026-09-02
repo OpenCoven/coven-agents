@@ -34,8 +34,10 @@ import {
 } from "./daytona/process";
 import {
   classifyDaytonaProviderError,
+  type DaytonaSandboxConfiguration,
   type DaytonaSandboxLifecycleDependencies,
   type DaytonaSandboxService,
+  daytonaSandboxProvisioningIdentityMatches,
   resetDaytonaSandboxForCancellation,
   SANDBOX_PROVISIONING_TIMEOUT_MS,
   SANDBOX_WARM_TIMEOUT_MS,
@@ -186,6 +188,7 @@ export function daytonaReconciliationProvider(
 type SandboxRecoveryStore = Pick<
   RunnerStore,
   | "attachDaytonaSandboxForRecovery"
+  | "beginDaytonaSandboxResetForRecovery"
   | "deleteDecommissionedAgentForRecovery"
   | "finishDaytonaSandboxWarmForRecovery"
   | "finishDaytonaSandboxResetForRecovery"
@@ -201,6 +204,7 @@ export type ReconcileDaytonaSandboxesDependencies = Readonly<{
   operator: RunnerOperator;
   providerConcurrency?: number;
   provisioningStaleBefore?: Date;
+  sandboxConfiguration: DaytonaSandboxConfiguration;
   store: SandboxRecoveryStore;
   warmStaleBefore?: Date;
 }>;
@@ -331,6 +335,7 @@ export function daytonaRunnerReconciliationDependencies(
       batchSize: dependencies.batchSize,
       daytona: dependencies.daytona,
       providerConcurrency: dependencies.providerConcurrency,
+      sandboxConfiguration: dependencies.sandboxConfiguration,
       store: dependencies.store,
     },
     store: dependencies.store,
@@ -716,6 +721,40 @@ async function recoverSandbox(
       sandbox = await findSandboxForRecovery(agent, dependencies.daytona);
     } catch (error) {
       return classifySandboxRecoveryFailure(error);
+    }
+    if (
+      sandbox &&
+      !daytonaSandboxProvisioningIdentityMatches(
+        sandbox,
+        agent,
+        dependencies.sandboxConfiguration
+      )
+    ) {
+      const resetting =
+        await dependencies.store.beginDaytonaSandboxResetForRecovery(
+          dependencies.operator,
+          fence
+        );
+      if (resetting.kind !== "updated") {
+        return "deferred";
+      }
+      try {
+        await sandbox.delete(60, true);
+      } catch (error) {
+        if (classifyDaytonaProviderError(error) !== "not_found") {
+          return classifySandboxRecoveryFailure(error);
+        }
+      }
+      const reset =
+        await dependencies.store.finishDaytonaSandboxResetForRecovery(
+          dependencies.operator,
+          {
+            agentId: resetting.value.id,
+            expectedGeneration: resetting.value.sandboxGeneration,
+            expectedVersion: resetting.value.version,
+          }
+        );
+      return reset.kind === "updated" ? "recovered" : "deferred";
     }
     const persisted = sandbox
       ? await dependencies.store.attachDaytonaSandboxForRecovery(

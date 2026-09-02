@@ -5,6 +5,61 @@ import test from "node:test";
 
 const migrations = new URL("../db/migrations/", import.meta.url);
 
+test("0032 adds durable immutable and current repository user-authority ceilings", async () => {
+  const migrationUrl = new URL(
+    "0032_github_user_authority_ceiling.sql",
+    migrations
+  );
+  assert.equal(existsSync(migrationUrl), true);
+  const migration = await readFile(migrationUrl, "utf8");
+  for (const column of [
+    "githubUserId",
+    "githubUserLogin",
+    "userPermissionCeiling",
+    "userPermissionCurrent",
+    "userProjectManagementCeiling",
+    "userProjectManagementCurrent",
+    "appIssuesPermission",
+    "appPullRequestsPermission",
+    "appOrganizationProjectsPermission",
+  ]) {
+    assert.match(
+      migration,
+      new RegExp(
+        `ALTER TABLE "RunnerGitHubConnection" ADD COLUMN "${column}"`,
+        "u"
+      )
+    );
+  }
+  assert.match(migration, /UPDATE "RunnerGitHubConnectionFence"/u);
+  assert.match(migration, /UPDATE "RunnerGitHubCapability"[\s\S]*"revokedAt"/u);
+  assert.match(migration, /DELETE FROM "RunnerGitHubConnection"/u);
+  assert.match(migration, /RunnerRun_enforce_team_execution_permission/u);
+  assert.match(
+    migration,
+    /ORDER BY \(\s*lower\("connection"\."repositoryOwner"\) \|\| '\/' \|\|\s*lower\("connection"\."repositoryName"\)\s*\) COLLATE "C"/u
+  );
+
+  const [journalText, snapshotText] = await Promise.all([
+    readFile(new URL("meta/_journal.json", migrations), "utf8"),
+    readFile(new URL("meta/0032_snapshot.json", migrations), "utf8"),
+  ]);
+  const journal = JSON.parse(journalText) as {
+    entries: Array<{ idx: number; tag: string; version: string }>;
+  };
+  const latest = journal.entries.at(-1);
+  assert.equal(latest?.idx, 32);
+  assert.equal(latest?.tag, "0032_github_user_authority_ceiling");
+  assert.equal(latest?.version, "7");
+  const snapshot = JSON.parse(snapshotText) as {
+    tables: Record<string, { columns: Record<string, unknown> }>;
+  };
+  assert.ok(
+    snapshot.tables["public.RunnerGitHubConnection"]?.columns
+      .userPermissionCeiling
+  );
+});
+
 test("0026 adds exact runner broker authority without rewriting old migrations", async () => {
   const [migration, migration24, migration25] = await Promise.all([
     readFile(new URL("0026_github_tool_gateway.sql", migrations), "utf8"),
@@ -383,10 +438,9 @@ test("0031 makes durable repository ordering use C collation", async () => {
   const journal = JSON.parse(journalText) as {
     entries: Array<{ idx: number; tag: string; version: string }>;
   };
-  const latest = journal.entries.at(-1);
-  assert.equal(latest?.idx, 31);
-  assert.equal(latest?.tag, "0031_deterministic_repository_ordering");
-  assert.equal(latest?.version, "7");
+  const entry = journal.entries.find(({ idx }) => idx === 31);
+  assert.equal(entry?.tag, "0031_deterministic_repository_ordering");
+  assert.equal(entry?.version, "7");
 
   const snapshot = JSON.parse(snapshotText) as {
     tables: Record<string, unknown>;

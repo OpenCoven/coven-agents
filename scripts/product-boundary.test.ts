@@ -883,6 +883,29 @@ test("the cookieless GitHub tool route is an exact pre-session proxy exemption",
   assert.ok(sessionIndex > exemptionIndex);
 });
 
+test("the cookieless GitHub tool remains bearer-only behind exact IP admission", () => {
+  const routeSource = readFileSync(
+    new URL("app/api/internal/github-tool/route.ts", repositoryRoot),
+    "utf8"
+  );
+  const dependencySource = readFileSync(
+    new URL("lib/github/tool-route-dependencies.ts", repositoryRoot),
+    "utf8"
+  );
+  const httpSource = readFileSync(
+    new URL("lib/github/http.ts", repositoryRoot),
+    "utf8"
+  );
+
+  assert.match(routeSource, /ipAddress\(request\)/u);
+  assert.match(httpSource, /route: "github_tool"/u);
+  assert.match(httpSource, /\^Bearer /u);
+  assert.doesNotMatch(
+    `${routeSource}\n${dependencySource}\n${httpSource}`,
+    /authorizeSubscriber|@\/app\/\(auth\)|cookie.*author/iu
+  );
+});
+
 test("package dependencies and scripts match the current application contract", () => {
   const manifest = readManifest("package.json");
 

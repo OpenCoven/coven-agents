@@ -13,6 +13,10 @@ import {
   githubToolRequestSchema,
   githubToolResultSchema,
 } from "@opencoven/agent-contracts";
+import type {
+  AbuseAdmission,
+  AbuseEnforcementInput,
+} from "@/lib/abuse/enforce";
 import type { RunnerOperator } from "@/lib/runner/types";
 import type { GitHubAppClient, GitHubPermissionLevel } from "./app-auth";
 import {
@@ -36,7 +40,10 @@ const REQUEST_ID = /^[A-Za-z0-9:-]{1,128}$/u;
 const NODE_ID = /^[A-Za-z0-9_=-]{1,256}$/u;
 const DEFAULT_TIMEOUT_MS = 5000;
 const DEFAULT_MAX_RESPONSE_BYTES = 256 * 1024;
+const DEFAULT_AUTHORITY_REFRESH_TIMEOUT_MS = 15_000;
 const MAX_TOOL_REQUEST_BYTES = 512 * 1024;
+const DEFAULT_PRE_DATABASE_DEADLINE_MS = 5000;
+const MAX_BODY_CANCELLATION_WAIT_MS = 25;
 const MAX_PROJECT_ITEM_PAGES = 500;
 const RAW_CAPABILITY = /^[A-Za-z0-9_-]{43}$/u;
 
@@ -1912,11 +1919,20 @@ function providerFailure(error: unknown): Readonly<{
 
 export function createGitHubToolGateway(
   input: Readonly<{
+    authorityRefreshTimeoutMs?: number;
     clock?: () => Date;
     createId?: () => string;
     databasePhaseTimeoutMs?: number;
     operator: RunnerOperator;
     provider: GitHubOperationProvider;
+    refreshAuthority: (
+      input: Readonly<{
+        abortSignal: AbortSignal;
+        context: GitHubOperationExecutionContext;
+        deadlineAt: number;
+        operation: GitHubToolOperation;
+      }>
+    ) => Promise<void>;
     store: GitHubToolGatewayStore;
   }>
 ) {
@@ -1924,12 +1940,21 @@ export function createGitHubToolGateway(
   const createId = input.createId ?? randomUUID;
   const databasePhaseTimeoutMs =
     input.databasePhaseTimeoutMs ?? GITHUB_GATEWAY_DATABASE_PHASE_TIMEOUT_MS;
+  const authorityRefreshTimeoutMs =
+    input.authorityRefreshTimeoutMs ?? DEFAULT_AUTHORITY_REFRESH_TIMEOUT_MS;
   if (
     !Number.isSafeInteger(databasePhaseTimeoutMs) ||
     databasePhaseTimeoutMs < 1 ||
     databasePhaseTimeoutMs >= GITHUB_TOOL_SERVER_DEADLINE_MS
   ) {
     throw new Error("GitHub gateway database phase timeout is invalid.");
+  }
+  if (
+    !Number.isSafeInteger(authorityRefreshTimeoutMs) ||
+    authorityRefreshTimeoutMs < 1 ||
+    authorityRefreshTimeoutMs >= GITHUB_TOOL_SERVER_DEADLINE_MS
+  ) {
+    throw new Error("GitHub authority refresh timeout is invalid.");
   }
   return {
     execute: async (
@@ -2053,6 +2078,23 @@ export function createGitHubToolGateway(
       let providerResult: GitHubProviderOperationResult;
       let dispatchStateUncertain = false;
       try {
+        const authorityRemaining = Math.min(
+          authorityRefreshTimeoutMs,
+          deadlineAt - clock().getTime()
+        );
+        if (!(authorityRemaining > 0)) {
+          throw new Error("GitHub authority refresh deadline exceeded.");
+        }
+        await runDatabasePhase(
+          (abortSignal) =>
+            input.refreshAuthority({
+              abortSignal,
+              context: executionContext,
+              deadlineAt,
+              operation: parsed.operation,
+            }),
+          authorityRemaining
+        );
         providerResult = await input.provider.execute({
           authorizeMutation: async () => {
             let authorization: Awaited<
@@ -2275,18 +2317,16 @@ export function createGitHubToolGateway(
 
 async function readBoundedRequestBody(
   request: Request,
-  maximum: number
+  maximum: number,
+  signal: AbortSignal
 ): Promise<string> {
+  signal.throwIfAborted();
   const contentLength = request.headers.get("content-length");
   if (
     contentLength &&
     (!/^[0-9]+$/u.test(contentLength) || Number(contentLength) > maximum)
   ) {
-    try {
-      await request.body?.cancel();
-    } catch {
-      // Cancellation is best-effort; the request is rejected regardless.
-    }
+    await cancelRequestBody(request);
     throw new GitHubToolGatewayError(
       "request_too_large",
       "GitHub tool request is too large.",
@@ -2302,7 +2342,7 @@ async function readBoundedRequestBody(
   let total = 0;
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await withAbort(reader.read(), signal);
       if (done) {
         break;
       }
@@ -2324,6 +2364,7 @@ async function readBoundedRequestBody(
         );
       }
     }
+    signal.throwIfAborted();
     try {
       body += decoder.decode();
     } catch {
@@ -2335,22 +2376,74 @@ async function readBoundedRequestBody(
     }
     return body;
   } catch (error) {
-    try {
-      await reader.cancel();
-    } catch {
-      // Cancellation is best-effort; preserve the bounded public error.
-    }
+    await boundedCancellation(() => reader.cancel());
     throw error;
   } finally {
-    reader.releaseLock();
+    try {
+      reader.releaseLock();
+    } catch {
+      // A provider that never settles cancellation can retain its pending read.
+    }
   }
 }
 
-function jsonResponse(body: unknown, status: number): Response {
+async function boundedCancellation(
+  cancel: () => Promise<unknown>
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const cancellation = Promise.resolve()
+    .then(cancel)
+    .catch(() => undefined);
+  try {
+    await Promise.race([
+      cancellation,
+      new Promise<void>((resolve) => {
+        timer = globalThis.setTimeout(resolve, MAX_BODY_CANCELLATION_WAIT_MS);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) {
+      globalThis.clearTimeout(timer);
+    }
+  }
+}
+
+function cancelRequestBody(request: Request): Promise<void> {
+  return request.body && !request.body.locked
+    ? boundedCancellation(() => request.body?.cancel() ?? Promise.resolve())
+    : Promise.resolve();
+}
+
+function withAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    return Promise.reject(signal.reason);
+  }
+  return new Promise<T>((resolve, reject) => {
+    const aborted = () => reject(signal.reason);
+    signal.addEventListener("abort", aborted, { once: true });
+    operation.then(
+      (value) => {
+        signal.removeEventListener("abort", aborted);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", aborted);
+        reject(error);
+      }
+    );
+  });
+}
+
+function jsonResponse(
+  body: unknown,
+  status: number,
+  additionalHeaders: Readonly<Record<string, string>> = {}
+): Response {
   return Response.json(body, {
     headers: {
       "cache-control": "no-store",
       "content-type": "application/json; charset=utf-8",
+      ...additionalHeaders,
     },
     status,
   });
@@ -2358,6 +2451,8 @@ function jsonResponse(body: unknown, status: number): Response {
 
 export function createGitHubToolHttpHandler(
   input: Readonly<{
+    bodyDeadlineMs?: number;
+    enforceAbuse: (request: AbuseEnforcementInput) => Promise<AbuseAdmission>;
     execute: (
       request: Readonly<{
         operation: GitHubToolOperation;
@@ -2367,8 +2462,63 @@ export function createGitHubToolHttpHandler(
     ) => Promise<GitHubToolGatewayResponse>;
   }>
 ) {
-  return async (request: Request): Promise<Response> => {
+  const bodyDeadlineMs =
+    input.bodyDeadlineMs ?? DEFAULT_PRE_DATABASE_DEADLINE_MS;
+  if (
+    !Number.isSafeInteger(bodyDeadlineMs) ||
+    bodyDeadlineMs < 1 ||
+    bodyDeadlineMs >= GITHUB_TOOL_SERVER_DEADLINE_MS
+  ) {
+    throw new Error("GitHub tool pre-database deadline is invalid.");
+  }
+  return async (
+    request: Request,
+    ip: string | null = null
+  ): Promise<Response> => {
+    const controller = new AbortController();
+    const timeoutError = new GitHubToolGatewayError(
+      "request_timeout",
+      "GitHub tool request timed out.",
+      { retryable: true, status: 408 }
+    );
+    const deadlineAt = Date.now() + bodyDeadlineMs;
+    let deadlineActive = true;
+    const timer = globalThis.setTimeout(() => {
+      if (deadlineActive) {
+        controller.abort(timeoutError);
+      }
+    }, bodyDeadlineMs);
+    const requestAborted = () => {
+      if (deadlineActive) {
+        controller.abort(timeoutError);
+      }
+    };
+    request.signal.addEventListener("abort", requestAborted, { once: true });
+    if (request.signal.aborted) {
+      requestAborted();
+    }
+    const throwIfPreDatabaseExpired = () => {
+      if (
+        controller.signal.aborted ||
+        request.signal.aborted ||
+        Date.now() >= deadlineAt
+      ) {
+        if (!controller.signal.aborted) {
+          controller.abort(timeoutError);
+        }
+        throw timeoutError;
+      }
+    };
+    const clearDeadline = () => {
+      if (!deadlineActive) {
+        return;
+      }
+      deadlineActive = false;
+      globalThis.clearTimeout(timer);
+      request.signal.removeEventListener("abort", requestAborted);
+    };
     try {
+      throwIfPreDatabaseExpired();
       if (request.method !== "POST") {
         return jsonResponse(
           {
@@ -2381,6 +2531,44 @@ export function createGitHubToolHttpHandler(
           405
         );
       }
+      throwIfPreDatabaseExpired();
+      const admission = await withAbort(
+        input.enforceAbuse({
+          failClosed: true,
+          ip,
+          route: "github_tool",
+        }),
+        controller.signal
+      );
+      throwIfPreDatabaseExpired();
+      if (admission.kind === "denied") {
+        controller.abort();
+        return jsonResponse(
+          {
+            error: {
+              code: "rate_limited",
+              message: "Too many requests. Try again later.",
+              retryable: true,
+            },
+          },
+          admission.responseStatus,
+          { "retry-after": String(admission.retryAfterSeconds) }
+        );
+      }
+      if (admission.kind === "unavailable") {
+        controller.abort();
+        return jsonResponse(
+          {
+            error: {
+              code: "abuse_control_unavailable",
+              message: "GitHub tool execution is unavailable.",
+              retryable: true,
+            },
+          },
+          admission.responseStatus
+        );
+      }
+      throwIfPreDatabaseExpired();
       const authorization = request.headers.get("authorization");
       const match = /^Bearer ([A-Za-z0-9_-]{43})$/u.exec(authorization ?? "");
       if (!match) {
@@ -2392,8 +2580,10 @@ export function createGitHubToolHttpHandler(
       }
       const rawBody = await readBoundedRequestBody(
         request,
-        MAX_TOOL_REQUEST_BYTES
+        MAX_TOOL_REQUEST_BYTES,
+        controller.signal
       );
+      throwIfPreDatabaseExpired();
       let untrusted: unknown;
       try {
         untrusted = JSON.parse(rawBody);
@@ -2412,6 +2602,8 @@ export function createGitHubToolHttpHandler(
           { retryable: false, status: 400 }
         );
       }
+      throwIfPreDatabaseExpired();
+      clearDeadline();
       return jsonResponse(
         await input.execute({
           ...parsed.data,
@@ -2438,6 +2630,11 @@ export function createGitHubToolHttpHandler(
         },
         safe.status
       );
+    } finally {
+      clearDeadline();
+      if (controller.signal.aborted) {
+        await cancelRequestBody(request);
+      }
     }
   };
 }

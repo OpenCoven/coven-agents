@@ -2,6 +2,10 @@ import "server-only";
 
 import { type KeyObject, sign } from "node:crypto";
 import { compareAscii } from "@/lib/ascii";
+import type {
+  GitHubAppRepositoryPermission,
+  GitHubUserRepositoryPermission,
+} from "./authority-types";
 
 const GITHUB_API_ORIGIN = "https://api.github.com";
 const GITHUB_API_VERSION = "2022-11-28";
@@ -15,6 +19,7 @@ const DEFAULT_MAX_RESPONSE_BYTES = 1024 * 1024;
 const DEFAULT_MAX_PAGES = 10;
 export const GITHUB_MAX_REPOSITORIES = 16;
 const MAX_INSTALLATION_TOKEN_BYTES = 4096;
+const REPOSITORY_PERMISSION_CONCURRENCY = 8;
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 export type GitHubPermissionLevel = "admin" | "read" | "write";
@@ -46,8 +51,32 @@ export type GitHubRepositorySelection = Readonly<{
   repositorySelection: "all" | "selected";
 }>;
 
+export type GitHubRepositoryUser = Readonly<{
+  id: string;
+  login: string;
+}>;
+
 export type GitHubAppClient = Readonly<{
   getInstallation: (installationId: string) => Promise<GitHubInstallation>;
+  getRepositoryUserPermissions: (
+    input: Readonly<{
+      installationId: string;
+      repositories: readonly Pick<GitHubRepository, "id" | "name" | "owner">[];
+      user: GitHubRepositoryUser;
+    }>
+  ) => Promise<
+    readonly Readonly<{
+      permission: GitHubUserRepositoryPermission | "none";
+      repositoryId: string;
+    }>[]
+  >;
+  getRepositoryUserPermission: (
+    input: Readonly<{
+      installationId: string;
+      repository: Pick<GitHubRepository, "id" | "name" | "owner">;
+      user: GitHubRepositoryUser;
+    }>
+  ) => Promise<GitHubUserRepositoryPermission | "none">;
   listInstallationRepositories: (
     installationId: string,
     repositoryIds?: readonly string[]
@@ -63,8 +92,20 @@ export type GitHubAppClient = Readonly<{
 }>;
 export type GitHubConnectionAppClient = Pick<
   GitHubAppClient,
-  "getInstallation" | "listInstallationRepositories"
+  | "getInstallation"
+  | "getRepositoryUserPermission"
+  | "getRepositoryUserPermissions"
+  | "listInstallationRepositories"
 >;
+
+export function normalizedAppPermission(
+  value: GitHubPermissionLevel | undefined
+): GitHubAppRepositoryPermission {
+  if (value === "admin" || value === "write") {
+    return "write";
+  }
+  return value === "read" ? "read" : "none";
+}
 
 export class GitHubProviderError extends Error {
   readonly code: string;
@@ -336,6 +377,119 @@ export function createGitHubAppClient(
     }
   }
 
+  async function repositoryUserPermission(
+    authorization: string,
+    repository: Pick<GitHubRepository, "id" | "name" | "owner">,
+    userScope: GitHubRepositoryUser
+  ): Promise<GitHubUserRepositoryPermission | "none"> {
+    const repositoryOwner = namedString(
+      repository.owner,
+      "GitHub repository owner"
+    );
+    const repositoryName = namedString(
+      repository.name,
+      "GitHub repository name"
+    );
+    const userLogin = namedString(userScope.login, "GitHub user login");
+    let value: unknown;
+    try {
+      value = await requestJson(
+        `/repos/${encodeURIComponent(repositoryOwner)}/${encodeURIComponent(repositoryName)}/collaborators/${encodeURIComponent(userLogin)}/permission`,
+        { authorization }
+      );
+    } catch (error) {
+      if (
+        error instanceof GitHubProviderError &&
+        error.code === "github_provider_not_found"
+      ) {
+        return "none";
+      }
+      throw error;
+    }
+    const body = object(value, "GitHub repository user permission");
+    const { permission } = body;
+    if (
+      permission !== "admin" &&
+      permission !== "write" &&
+      permission !== "read" &&
+      permission !== "none"
+    ) {
+      throw invalidResponse();
+    }
+    const roleName = string(body.role_name, "GitHub repository role", {
+      maxBytes: 100,
+    });
+    const user = object(body.user, "GitHub repository collaborator");
+    if (
+      decimalString(user.id, "GitHub repository collaborator id") !==
+        userScope.id ||
+      namedString(user.login, "GitHub repository collaborator login") !==
+        userLogin
+    ) {
+      throw invalidResponse();
+    }
+    if (permission === "read" && roleName === "triage") {
+      return "triage";
+    }
+    if (permission === "write" && roleName === "maintain") {
+      return "maintain";
+    }
+    return permission;
+  }
+
+  function getRepositoryUserPermissions(
+    scope: Parameters<GitHubAppClient["getRepositoryUserPermissions"]>[0]
+  ): ReturnType<GitHubAppClient["getRepositoryUserPermissions"]> {
+    assertDecimalId(scope.installationId, "GitHub installation id");
+    assertDecimalId(scope.user.id, "GitHub user id");
+    namedString(scope.user.login, "GitHub user login");
+    if (
+      scope.repositories.length < 1 ||
+      scope.repositories.length > GITHUB_MAX_REPOSITORIES ||
+      new Set(scope.repositories.map(({ id }) => id)).size !==
+        scope.repositories.length
+    ) {
+      throw new Error("GitHub repository permission scope is invalid.");
+    }
+    for (const repository of scope.repositories) {
+      assertDecimalId(repository.id, "GitHub repository id");
+      namedString(repository.owner, "GitHub repository owner");
+      namedString(repository.name, "GitHub repository name");
+    }
+    return withInstallationToken(
+      scope.installationId,
+      { metadata: "read" },
+      scope.repositories.map(({ id }) => id),
+      async (authorization) => {
+        const permissions: Array<{
+          permission: GitHubUserRepositoryPermission | "none";
+          repositoryId: string;
+        }> = [];
+        for (
+          let offset = 0;
+          offset < scope.repositories.length;
+          offset += REPOSITORY_PERMISSION_CONCURRENCY
+        ) {
+          // biome-ignore lint/performance/noAwaitInLoops: fixed-size batches bound concurrent provider pressure
+          const batch = await Promise.all(
+            scope.repositories
+              .slice(offset, offset + REPOSITORY_PERMISSION_CONCURRENCY)
+              .map(async (repository) => ({
+                permission: await repositoryUserPermission(
+                  authorization,
+                  repository,
+                  scope.user
+                ),
+                repositoryId: repository.id,
+              }))
+          );
+          permissions.push(...batch);
+        }
+        return permissions;
+      }
+    );
+  }
+
   return {
     async getInstallation(installationId) {
       assertDecimalId(installationId, "GitHub installation id");
@@ -343,6 +497,20 @@ export function createGitHubAppClient(
         await appJson(`/app/installations/${installationId}`)
       );
     },
+
+    async getRepositoryUserPermission(scope) {
+      const [result] = await getRepositoryUserPermissions({
+        installationId: scope.installationId,
+        repositories: [scope.repository],
+        user: scope.user,
+      });
+      if (!result) {
+        throw invalidResponse();
+      }
+      return result.permission;
+    },
+
+    getRepositoryUserPermissions,
 
     listInstallationRepositories(installationId, repositoryIds) {
       return withInstallationToken(

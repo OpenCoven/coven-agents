@@ -86,6 +86,132 @@ function providerResponse(): string {
   });
 }
 
+async function restrictedVisibleTools(
+  permissionMode: "workspace_read" | "workspace_write"
+): Promise<{
+  args: readonly string[];
+  visibleTools: string[];
+}> {
+  const scratch = join(
+    dirname(fileURLToPath(import.meta.url)),
+    `.copilot-tools-smoke-${permissionMode}-${process.pid}`
+  );
+  await rm(scratch, { force: true, recursive: true });
+  const attemptDir = join(scratch, "attempt");
+  const workspace = join(scratch, "workspace");
+  await mkdir(attemptDir, { recursive: true });
+  await mkdir(workspace, { recursive: true });
+  await chmod(attemptDir, 0o500);
+  await writeFile(join(workspace, "needle.txt"), "workspace needle\n", {
+    mode: 0o600,
+  });
+  const invocation = buildInvocation({
+    attemptDir,
+    configDir: join(scratch, "copilot-home"),
+    cwd: workspace,
+    harness: "copilot",
+    instructions: "Return smoke complete.",
+    model: "gpt-5.4",
+    permissionMode,
+    stream: true,
+    task: "Do not call tools.",
+  });
+  const requests: Record<string, unknown>[] = [];
+  const provider = createServer((request, response) => {
+    let body = "";
+    request.setEncoding("utf8");
+    request.on("data", (chunk) => {
+      body += chunk;
+    });
+    request.on("end", () => {
+      requests.push(JSON.parse(body) as Record<string, unknown>);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(providerResponse());
+    });
+  });
+  await new Promise<void>((resolve) =>
+    provider.listen(0, "127.0.0.1", resolve)
+  );
+  const address = provider.address();
+  assert.ok(address && typeof address === "object");
+  const app = await pinnedCopilotApp();
+  const child = spawn(process.execPath, [app, ...invocation.args], {
+    cwd: workspace,
+    env: {
+      ...process.env,
+      COPILOT_MODEL: "gpt-5.4",
+      COPILOT_PROVIDER_API_KEY: "smoke",
+      COPILOT_PROVIDER_BASE_URL: `http://127.0.0.1:${address.port}/v1`,
+      COPILOT_PROVIDER_WIRE_API: "responses",
+    },
+    stdio: ["ignore", "ignore", "ignore"],
+  });
+
+  try {
+    const deadline = Date.now() + 45_000;
+    while (Date.now() < deadline && requests.length === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.ok(requests.length > 0);
+    const visibleTools = [
+      ...new Set(
+        requests.flatMap((request) =>
+          Array.isArray(request.tools)
+            ? request.tools.map((tool) =>
+                String((tool as { name?: unknown }).name ?? "")
+              )
+            : []
+        )
+      ),
+    ].sort();
+    return { args: invocation.args, visibleTools };
+  } finally {
+    child.kill("SIGTERM");
+    await new Promise<void>((resolve) => {
+      child.once("exit", () => resolve());
+      setTimeout(() => {
+        child.kill("SIGKILL");
+        resolve();
+      }, 1000).unref();
+    });
+    await new Promise<void>((resolve) => provider.close(() => resolve()));
+    await rm(scratch, { force: true, recursive: true });
+  }
+}
+
+test("Copilot 1.0.80 workspace_read exposes view, rg, and glob without write, shell, or network", {
+  timeout: 60_000,
+}, async () => {
+  const smoke = await restrictedVisibleTools("workspace_read");
+  assert.deepEqual(smoke.visibleTools, ["glob", "rg", "view"]);
+  assert.equal(
+    smoke.visibleTools.some((name) =>
+      /apply_patch|bash|shell|web|url|curl|network/iu.test(name)
+    ),
+    false
+  );
+  assert.equal(smoke.args.includes("--allow-tool"), false);
+});
+
+test("Copilot 1.0.80 workspace_write exposes apply_patch but no shell or network", {
+  timeout: 60_000,
+}, async () => {
+  const smoke = await restrictedVisibleTools("workspace_write");
+  assert.deepEqual(smoke.visibleTools, ["apply_patch", "glob", "rg", "view"]);
+  assert.equal(
+    smoke.visibleTools.some((name) =>
+      /bash|shell|web|url|curl|network/iu.test(name)
+    ),
+    false
+  );
+  assert.deepEqual(
+    smoke.args.filter(
+      (_argument, index) => smoke.args[index - 1] === "--allow-tool"
+    ),
+    ["write"]
+  );
+});
+
 test("Copilot 1.0.80 isolates workspace MCP and exposes only bounded tools", {
   timeout: 60_000,
 }, async () => {
@@ -280,6 +406,7 @@ lines.on("line", (line) => {
     assert.deepEqual(visibleTools.sort(), [
       "CovenGitHub-execute",
       "glob",
+      "rg",
       "view",
     ]);
     assert.equal(

@@ -255,6 +255,7 @@ function sandboxCreateParameters(
     ephemeral: false,
     labels: {
       ...daytonaSandboxLabels(agent.tenant, agent.id),
+      sandboxGeneration: String(agent.sandboxGeneration),
       ...(configuration.configurationId
         ? { configurationId: configuration.configurationId }
         : {}),
@@ -262,6 +263,24 @@ function sandboxCreateParameters(
     name: daytonaSandboxName(agent.tenant, agent.id),
     snapshot: configuration.snapshotName,
   };
+}
+
+export function daytonaSandboxProvisioningIdentityMatches(
+  sandbox: Sandbox,
+  agent: RunnerAgentRecord,
+  configuration: DaytonaSandboxConfiguration
+): boolean {
+  if (!configuration.configurationId) {
+    return false;
+  }
+  const expectedLabels = {
+    ...daytonaSandboxLabels(agent.tenant, agent.id),
+    configurationId: configuration.configurationId,
+    sandboxGeneration: String(agent.sandboxGeneration),
+  };
+  return Object.entries(expectedLabels).every(
+    ([name, value]) => sandbox.labels?.[name] === value
+  );
 }
 
 function sandboxConfigurationMatches(
@@ -582,12 +601,24 @@ type DaytonaSandboxPersistence = Readonly<{
     | { kind: "not_found" }
     | { current?: RunnerAgentRecord; kind: "stale_version" }
   >;
+  beginReset: (
+    reserved: RunnerAgentRecord
+  ) => Promise<
+    | { kind: "updated"; value: RunnerAgentRecord }
+    | { kind: "not_found" | "stale_version" }
+  >;
   fail: (
     reserved: RunnerAgentRecord
   ) => Promise<
     | { kind: "updated"; value: RunnerAgentRecord }
     | { kind: "not_found" }
     | { kind: "stale_version" }
+  >;
+  finishReset: (
+    resetting: RunnerAgentRecord
+  ) => Promise<
+    | { kind: "updated"; value: RunnerAgentRecord }
+    | { kind: "not_found" | "stale_version" }
   >;
   markAmbiguous: (
     reserved: RunnerAgentRecord
@@ -618,11 +649,23 @@ function subscriberSandboxPersistence(
         expectedVersion: reserved.version,
         sandboxId,
       }),
+    beginReset: (reserved) =>
+      dependencies.store.beginDaytonaSandboxReset(principal, {
+        agentId: reserved.id,
+        expectedGeneration: reserved.sandboxGeneration,
+        expectedVersion: reserved.version,
+      }),
     fail: (reserved) =>
       dependencies.store.failDaytonaSandboxReservation(principal, {
         agentId: reserved.id,
         expectedGeneration: reserved.sandboxGeneration,
         expectedVersion: reserved.version,
+      }),
+    finishReset: (resetting) =>
+      dependencies.store.finishDaytonaSandboxReset(principal, {
+        agentId: resetting.id,
+        expectedGeneration: resetting.sandboxGeneration,
+        expectedVersion: resetting.version,
       }),
     markAmbiguous: (reserved) =>
       dependencies.store.markDaytonaSandboxReservationAmbiguous(principal, {
@@ -751,41 +794,21 @@ async function createSandbox(
       );
     }
   }
-  if (!created && !sandboxConfigurationMatches(sandbox, configuration)) {
-    await deleteMismatchedSandbox(sandbox);
-    try {
-      sandbox = await withLifecycleAbort(
-        () =>
-          dependencies.daytona.create(
-            sandboxCreateParameters(reserved.value, configuration),
-            { timeout: providerTimeoutSeconds(dependencies.lifecycle) }
-          ),
-        dependencies.lifecycle
-      );
-      created = true;
-    } catch (createError) {
-      if (
-        createError instanceof DaytonaSandboxLifecycleError &&
-        lifecycleAborted(dependencies.lifecycle)
-      ) {
-        return markSandboxReservationAmbiguous(
-          reserved.value,
-          persistence,
-          createError
-        );
-      }
-      if (
-        classifyDaytonaSandboxCreateError(createError) === "definite_rejection"
-      ) {
-        await failSandboxReservation(reserved.value, persistence);
-        throw createError;
-      }
-      return markSandboxReservationAmbiguous(
-        reserved.value,
-        persistence,
-        createError
-      );
-    }
+  if (
+    !created &&
+    !daytonaSandboxProvisioningIdentityMatches(
+      sandbox,
+      reserved.value,
+      configuration
+    )
+  ) {
+    return resetMismatchedSandboxAndReprovision(
+      reserved.value,
+      sandbox,
+      configuration,
+      dependencies,
+      persistence
+    );
   }
 
   if (lifecycleAborted(dependencies.lifecycle)) {
@@ -796,6 +819,7 @@ async function createSandbox(
         transitionAbortedError()
       );
     }
+
     await failSandboxReservation(reserved.value, persistence);
     throw transitionAbortedError();
   }
@@ -833,6 +857,42 @@ async function createSandbox(
   throwIfTransitionAborted(dependencies.lifecycle);
   await startOrRecoverSandbox(sandbox, dependencies.lifecycle);
   return { agent: persisted, sandbox };
+}
+
+async function resetMismatchedSandboxAndReprovision(
+  reserved: RunnerAgentRecord,
+  sandbox: Sandbox,
+  configuration: DaytonaSandboxConfiguration,
+  dependencies: DaytonaSandboxDependencies,
+  persistence: DaytonaSandboxPersistence
+): Promise<{ agent: RunnerAgentRecord; sandbox: Sandbox }> {
+  const resetting = await persistence.beginReset(reserved);
+  if (resetting.kind !== "updated") {
+    throw new DaytonaSandboxLifecycleError(
+      "Daytona sandbox generation changed before stale cleanup.",
+      { retryable: true }
+    );
+  }
+  try {
+    await deleteMismatchedSandbox(sandbox);
+  } catch (error) {
+    throw new DaytonaSandboxLifecycleError(
+      "Daytona stale sandbox cleanup requires reconciliation.",
+      {
+        cause: error,
+        kind: "cleanup_needed",
+        retryable: classifyDaytonaProviderError(error) !== "non_retryable",
+      }
+    );
+  }
+  const reset = await persistence.finishReset(resetting.value);
+  if (reset.kind !== "updated") {
+    throw new DaytonaSandboxLifecycleError(
+      "Daytona stale sandbox cleanup remains durably fenced.",
+      { kind: "cleanup_needed", retryable: true }
+    );
+  }
+  return createSandbox(reset.value, configuration, dependencies, persistence);
 }
 
 async function failSandboxReservation(
@@ -958,6 +1018,7 @@ export async function resetDaytonaSandboxForCancellation(
 
 async function reconcileAmbiguousDaytonaSandbox(
   agent: RunnerAgentRecord,
+  configuration: DaytonaSandboxConfiguration,
   dependencies: DaytonaSandboxDependencies,
   persistence: DaytonaSandboxPersistence
 ): Promise<{ agent: RunnerAgentRecord; sandbox: Sandbox }> {
@@ -967,7 +1028,19 @@ async function reconcileAmbiguousDaytonaSandbox(
         dependencies.daytona.get(daytonaSandboxName(agent.tenant, agent.id)),
       dependencies.lifecycle
     );
+    if (
+      !daytonaSandboxProvisioningIdentityMatches(sandbox, agent, configuration)
+    ) {
+      return resetMismatchedSandboxAndReprovision(
+        agent,
+        sandbox,
+        configuration,
+        dependencies,
+        persistence
+      );
+    }
     const persisted = await persistSandbox(agent, sandbox, persistence, false);
+    await startOrRecoverSandbox(sandbox, dependencies.lifecycle);
     return { agent: persisted, sandbox };
   } catch (error) {
     if (error instanceof DaytonaSandboxLifecycleError) {
@@ -1004,10 +1077,10 @@ async function ensureDaytonaSandboxWithPersistence(
   if (agent.sandboxLifecycle === "provisioning_ambiguous") {
     const reconciled = await reconcileAmbiguousDaytonaSandbox(
       agent,
+      configuration,
       dependencies,
       persistence
     );
-    await startOrRecoverSandbox(reconciled.sandbox, dependencies.lifecycle);
     return reconciled;
   }
   if (agent.sandboxLifecycle === "provisioning" || !agent.daytonaSandboxId) {
@@ -1036,8 +1109,13 @@ async function ensureDaytonaSandboxWithPersistence(
         { retryable: true }
       );
     }
-    await deleteMismatchedSandbox(sandbox);
-    return createSandbox(agent, configuration, dependencies, persistence);
+    return resetMismatchedSandboxAndReprovision(
+      agent,
+      sandbox,
+      configuration,
+      dependencies,
+      persistence
+    );
   }
   await startOrRecoverSandbox(sandbox, dependencies.lifecycle);
   return { agent, sandbox };
@@ -1098,9 +1176,34 @@ export async function ensureDaytonaSandboxForDispatch(
             sandboxId,
           }
         );
-        return result.kind === "not_live"
-          ? { kind: "stale_version" as const }
-          : result;
+        return result.kind === "updated"
+          ? result
+          : {
+              kind:
+                result.kind === "not_live"
+                  ? ("stale_version" as const)
+                  : result.kind,
+            };
+      },
+      beginReset: async (reserved) => {
+        const result =
+          await dependencies.store.beginDaytonaSandboxResetForDispatch(
+            operator,
+            authority,
+            {
+              agentId: reserved.id,
+              expectedGeneration: reserved.sandboxGeneration,
+              expectedVersion: reserved.version,
+            }
+          );
+        return result.kind === "updated"
+          ? result
+          : {
+              kind:
+                result.kind === "not_live"
+                  ? ("stale_version" as const)
+                  : result.kind,
+            };
       },
       fail: async (reserved) => {
         const result =
@@ -1115,6 +1218,26 @@ export async function ensureDaytonaSandboxForDispatch(
         return result.kind === "not_live"
           ? { kind: "stale_version" as const }
           : result;
+      },
+      finishReset: async (resetting) => {
+        const result =
+          await dependencies.store.finishDaytonaSandboxResetForDispatch(
+            operator,
+            authority,
+            {
+              agentId: resetting.id,
+              expectedGeneration: resetting.sandboxGeneration,
+              expectedVersion: resetting.version,
+            }
+          );
+        return result.kind === "updated"
+          ? result
+          : {
+              kind:
+                result.kind === "not_live"
+                  ? ("stale_version" as const)
+                  : result.kind,
+            };
       },
       markAmbiguous: async (reserved) => {
         const result =

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import test from "node:test";
+import { isDeepStrictEqual } from "node:util";
 import type { AbuseAdmission } from "@/lib/abuse/enforce";
 import type {
   IdempotencyClaimInput,
@@ -15,6 +16,7 @@ import type {
   ReplaceGitHubInstallationConnectionsInput,
 } from "@/lib/teams/store";
 import {
+  type GitHubConnectionAppClient,
   type GitHubInstallation,
   GitHubProviderError,
   type GitHubRepositorySelection,
@@ -434,6 +436,7 @@ test("callback verifies provider authority, persists only provider metadata, and
           installationCalls += 1;
           return Promise.resolve(installation());
         },
+        getRepositoryUserPermission: () => Promise.resolve("write" as const),
         listInstallationRepositories: () => {
           repositoryCalls += 1;
           return Promise.resolve(repositories());
@@ -477,18 +480,36 @@ test("callback verifies provider authority, persists only provider metadata, and
     installationId: INSTALLATION_ID,
     repositories: [
       {
+        appIssuesPermission: "write",
+        appOrganizationProjectsPermission: "write",
+        appPullRequestsPermission: "write",
+        githubUserId: "112233",
+        githubUserLogin: "BunsDev",
         id: store.replacements[0]?.input.repositories[0]?.id,
         repositoryId: "24680",
         repositoryName: "coven-agents",
         repositoryNodeId: "R_one",
         repositoryOwner: "OpenCoven",
+        userPermissionCeiling: "write",
+        userPermissionCurrent: "write",
+        userProjectManagementCeiling: false,
+        userProjectManagementCurrent: false,
       },
       {
+        appIssuesPermission: "write",
+        appOrganizationProjectsPermission: "write",
+        appPullRequestsPermission: "write",
+        githubUserId: "112233",
+        githubUserLogin: "BunsDev",
         id: store.replacements[0]?.input.repositories[1]?.id,
         repositoryId: "24681",
         repositoryName: "coven-web",
         repositoryNodeId: "R_two",
         repositoryOwner: "OpenCoven",
+        userPermissionCeiling: "write",
+        userPermissionCurrent: "write",
+        userProjectManagementCeiling: false,
+        userProjectManagementCurrent: false,
       },
     ],
   });
@@ -533,6 +554,12 @@ test("personal installation connects without organization projects permission", 
             }),
         }),
       createStore: () => store,
+      createUserAuthorizationClient: () => ({
+        proveInstallationAccess: () =>
+          Promise.resolve(
+            userAuthorityFor("24683", "personal-repository", "BunsDev")
+          ),
+      }),
     })
   );
   const authorization = await beginUserAuthorization(handlers);
@@ -551,7 +578,7 @@ test("personal installation connects without organization projects permission", 
   assert.equal(store.removals.length, 0);
 });
 
-test("organization installation without organization projects permission is rejected", async () => {
+test("organization installation without organization projects permission keeps repository authority but fails project writes closed", async () => {
   const store = new MemoryConnectionStore();
   const handlers = createGitHubConnectionHandlers(
     dependencies({
@@ -577,12 +604,18 @@ test("organization installation without organization projects permission is reje
     null
   );
 
-  assert.equal(response.status, 409);
-  assert.equal(await errorCode(response), "github_installation_unusable");
-  assert.equal(store.replacements.length, 0);
-  assert.deepEqual(store.removals, [
-    { installationId: INSTALLATION_ID, tenant: TENANT },
-  ]);
+  assert.equal(response.status, 303);
+  assert.equal(store.replacements.length, 1);
+  assert.equal(
+    store.replacements[0]?.input.repositories[0]
+      ?.appOrganizationProjectsPermission,
+    "none"
+  );
+  assert.equal(
+    store.replacements[0]?.input.repositories[0]?.userProjectManagementCurrent,
+    false
+  );
+  assert.equal(store.removals.length, 0);
 });
 
 test("setup callback requires user authorization before provider access or persistence", async () => {
@@ -696,6 +729,55 @@ test("OAuth callback persists only after exact user installation access is prove
   );
   assert.equal(store.replacements.length, 1);
   assert.equal(store.replacements[0]?.input.installationId, INSTALLATION_ID);
+});
+
+test("OAuth callback intersects app-selected repositories with exact user repository authority", async () => {
+  const store = new MemoryConnectionStore();
+  const handlers = createGitHubConnectionHandlers(
+    dependenciesWithUserAuthorization(
+      { createStore: () => store },
+      {
+        proveInstallationAccess: () =>
+          Promise.resolve({
+            repositories: [
+              {
+                id: "24680",
+                name: "coven-agents",
+                nodeId: "R_one",
+                owner: "OpenCoven",
+                permission: "triage",
+              },
+            ],
+            user: { id: "112233", login: "BunsDev" },
+          } as never),
+      }
+    )
+  );
+  const authorization = await beginUserAuthorization(handlers);
+  const response = await handlers.callback(
+    oauthCallbackRequest(authorization.state),
+    null
+  );
+
+  assert.equal(response.status, 303);
+  assert.deepEqual(store.replacements[0]?.input.repositories, [
+    {
+      appIssuesPermission: "write",
+      appOrganizationProjectsPermission: "write",
+      appPullRequestsPermission: "write",
+      githubUserId: "112233",
+      githubUserLogin: "BunsDev",
+      id: store.replacements[0]?.input.repositories[0]?.id,
+      repositoryId: "24680",
+      repositoryName: "coven-agents",
+      repositoryNodeId: "R_one",
+      repositoryOwner: "OpenCoven",
+      userPermissionCeiling: "triage",
+      userPermissionCurrent: "triage",
+      userProjectManagementCeiling: false,
+      userProjectManagementCurrent: false,
+    },
+  ]);
 });
 
 test("foreign valid installation proof is rejected without metadata persistence", async () => {
@@ -1017,6 +1099,7 @@ test("callback rejects tamper, expiry, user, tenant, and auth-version mismatches
             providerCalls += 1;
             return Promise.resolve(installation());
           },
+          getRepositoryUserPermission: () => Promise.resolve("write" as const),
           listInstallationRepositories: () => Promise.resolve(repositories()),
         }),
         now: () => current.now ?? NOW,
@@ -1124,10 +1207,8 @@ test("missing, suspended, under-permissioned, all-repository, and excessive inst
             Promise.resolve(
               installation({
                 permissions: {
-                  issues: "read",
                   metadata: "read",
                   organization_projects: "write",
-                  pull_requests: "write",
                 },
               })
             ),
@@ -1354,7 +1435,7 @@ test("connection GET revalidates provider authority and returns bounded public m
       createProvider: () =>
         provider({
           listInstallationRepositories: (_installationId, repositoryIds) => {
-            assert.deepEqual(repositoryIds, ["24680"]);
+            assert.equal(repositoryIds, undefined);
             return Promise.resolve({
               repositories: repositories().repositories.slice(0, 1),
               repositorySelection: "selected",
@@ -1424,6 +1505,83 @@ test("connection GET clears revoked installations and fails closed", async () =>
     { installationId: INSTALLATION_ID, tenant: TENANT },
   ]);
   assertNoStore(response);
+});
+
+test("connection GET refreshes a downgraded collaborator ceiling and never restores writes above the immutable ceiling", async () => {
+  const initial = connection({
+    appIssuesPermission: "write",
+    appOrganizationProjectsPermission: "write",
+    appPullRequestsPermission: "write",
+    githubUserId: "112233",
+    githubUserLogin: "BunsDev",
+    userPermissionCeiling: "write",
+    userPermissionCurrent: "write",
+    userProjectManagementCeiling: false,
+    userProjectManagementCurrent: false,
+  } as never);
+  const database = memoryConnectionDatabase([initial]);
+  const store = new MemoryConnectionStore(database);
+  let permissionCalls = 0;
+  const handlers = createGitHubConnectionHandlers(
+    dependencies({
+      createProvider: () => ({
+        getInstallation: () => Promise.resolve(installation()),
+        getRepositoryUserPermission: () => {
+          permissionCalls += 1;
+          return Promise.resolve("read" as const);
+        },
+        listInstallationRepositories: () =>
+          Promise.resolve(repositorySelection("24680", "coven-agents")),
+      }),
+      createStore: () => store,
+    })
+  );
+
+  const response = await handlers.getConnection(
+    new Request("https://app.example/api/github/connection"),
+    null
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(permissionCalls, 1);
+  assert.equal(store.connections()[0]?.userPermissionCeiling, "write");
+  assert.equal(store.connections()[0]?.userPermissionCurrent, "read");
+  assert.equal(store.generation(), 1);
+});
+
+test("connection refresh preserves standard triage and maintain roles without generation churn", async () => {
+  for (const role of ["triage", "maintain"] as const) {
+    const initial = connection({
+      id: "1f06c2c9-deb4-5733-8927-c7865e7e97ca",
+      repositoryNodeId: "R_24680",
+      userPermissionCeiling: role,
+      userPermissionCurrent: role,
+    });
+    const store = new MemoryConnectionStore(
+      memoryConnectionDatabase([initial])
+    );
+    const handlers = createGitHubConnectionHandlers(
+      dependencies({
+        createProvider: () => ({
+          getInstallation: () => Promise.resolve(installation()),
+          getRepositoryUserPermission: () => Promise.resolve(role),
+          listInstallationRepositories: () =>
+            Promise.resolve(repositorySelection("24680", "coven-agents")),
+        }),
+        createStore: () => store,
+      })
+    );
+
+    // biome-ignore lint/performance/noAwaitInLoops: each standard role owns an isolated durable connection
+    const response = await handlers.getConnection(
+      new Request("https://app.example/api/github/connection"),
+      null
+    );
+    assert.equal(response.status, 200);
+    assert.equal(store.connections()[0]?.userPermissionCurrent, role);
+    assert.deepEqual(store.connections()[0], initial);
+    assert.equal(store.generation(), 0);
+  }
 });
 
 test("connection GET preserves authority for ambiguous throttling, malformed, timeout, and 5xx failures", async () => {
@@ -1598,7 +1756,10 @@ test("a stale GET removal cannot erase a newer reconnect", async () => {
         idempotencyStore: new MemoryIdempotencyStore(),
         randomBytes: (size) => new Uint8Array(size).fill(0x33),
       },
-      { proveInstallationAccess: () => Promise.resolve() }
+      {
+        proveInstallationAccess: () =>
+          Promise.resolve(userAuthorityFor("86420", "new-authority")),
+      }
     )
   );
   const authorization = await beginUserAuthorization(reconnectHandlers);
@@ -1666,6 +1827,7 @@ test("concurrent reconnects capture one generation and only one can publish auth
         proveInstallationAccess: async () => {
           signalFirstProof();
           await firstProofGate;
+          return userAuthorityFor("11111", "first-winner");
         },
       }
     )
@@ -1686,6 +1848,7 @@ test("concurrent reconnects capture one generation and only one can publish auth
         proveInstallationAccess: async () => {
           signalSecondProof();
           await secondProofGate;
+          return userAuthorityFor("22222", "stale-loser");
         },
       }
     )
@@ -1753,35 +1916,43 @@ test("disconnect enforces same-origin authority, revokes tenant state, and remai
 });
 
 function dependencies(
-  overrides: Partial<
-    Parameters<typeof createGitHubConnectionHandlers>[0] & {
-      authorizeSubscriber: () => Promise<
-        | RunnerAuthenticatedSubscriber
-        | { kind: "subscription_required" | "unauthorized" }
-      >;
-    }
-  > = {}
+  overrides: Omit<
+    Partial<Parameters<typeof createGitHubConnectionHandlers>[0]>,
+    "auth" | "createProvider"
+  > & {
+    authorizeSubscriber?: () => Promise<
+      | RunnerAuthenticatedSubscriber
+      | { kind: "subscription_required" | "unauthorized" }
+    >;
+    createProvider?: () => TestConnectionProvider;
+  } = {}
 ): Parameters<typeof createGitHubConnectionHandlers>[0] {
   const store = new MemoryConnectionStore();
+  const {
+    authorizeSubscriber,
+    createProvider: createProviderOverride,
+    ...rest
+  } = overrides;
   return {
     appBasePath: () => "",
     appOrigin: () => "https://app.example",
     auth: {
       authorizeSubscriber:
-        overrides.authorizeSubscriber ?? (() => Promise.resolve(subscriber)),
+        authorizeSubscriber ?? (() => Promise.resolve(subscriber)),
     },
-    createProvider: () => provider(),
+    createProvider: () =>
+      normalizeTestConnectionProvider(createProviderOverride?.() ?? provider()),
     createRequestId: () => "request-1",
     createStore: () => store,
     createUserAuthorizationClient: () => ({
-      proveInstallationAccess: () => Promise.resolve(),
+      proveInstallationAccess: () => Promise.resolve(userAuthority()),
     }),
     enforceAbuse: () => Promise.resolve({ kind: "allowed" }),
     getConfig: () => CONFIG,
     idempotencyStore: new MemoryIdempotencyStore(),
     now: () => NOW,
     randomBytes: (size) => new Uint8Array(size).fill(0x11),
-    ...overrides,
+    ...rest,
   };
 }
 
@@ -1908,7 +2079,7 @@ type UserAuthorizationProofClient = Readonly<{
       installationId: string;
       redirectUri: string;
     }>
-  ) => Promise<void>;
+  ) => Promise<unknown>;
 }>;
 
 function dependenciesWithUserAuthorization(
@@ -1917,7 +2088,14 @@ function dependenciesWithUserAuthorization(
 ): Parameters<typeof createGitHubConnectionHandlers>[0] {
   return {
     ...dependencies(overrides),
-    createUserAuthorizationClient: () => client,
+    createUserAuthorizationClient: () => ({
+      proveInstallationAccess: async (input) => {
+        const result = await client.proveInstallationAccess(input);
+        return result === undefined
+          ? userAuthority()
+          : (result as ReturnType<typeof userAuthority>);
+      },
+    }),
   } as Parameters<typeof createGitHubConnectionHandlers>[0];
 }
 
@@ -1961,6 +2139,35 @@ function repositories(): GitHubRepositorySelection {
   };
 }
 
+function userAuthority() {
+  return {
+    repositories: repositories().repositories.map((repository) => ({
+      ...repository,
+      permission: "write" as const,
+    })),
+    user: { id: "112233", login: "BunsDev" },
+  };
+}
+
+function userAuthorityFor(
+  repositoryId: string,
+  repositoryName: string,
+  owner = "OpenCoven"
+) {
+  return {
+    repositories: [
+      {
+        id: repositoryId,
+        name: repositoryName,
+        nodeId: `R_${repositoryId}`,
+        owner,
+        permission: "write" as const,
+      },
+    ],
+    user: { id: "112233", login: "BunsDev" },
+  };
+}
+
 function repositorySelection(
   repositoryId: string,
   repositoryName: string
@@ -1978,17 +2185,57 @@ function repositorySelection(
   };
 }
 
+type TestConnectionProvider = Pick<
+  GitHubConnectionAppClient,
+  "getInstallation" | "listInstallationRepositories"
+> &
+  Partial<
+    Pick<
+      GitHubConnectionAppClient,
+      "getRepositoryUserPermission" | "getRepositoryUserPermissions"
+    >
+  >;
+
+function normalizeTestConnectionProvider(
+  candidate: TestConnectionProvider
+): GitHubConnectionAppClient {
+  const getRepositoryUserPermission =
+    candidate.getRepositoryUserPermission ??
+    (() => Promise.resolve("write" as const));
+  return {
+    ...candidate,
+    getRepositoryUserPermission,
+    getRepositoryUserPermissions:
+      candidate.getRepositoryUserPermissions ??
+      (async ({ installationId, repositories: selected, user }) =>
+        await Promise.all(
+          selected.map(async (repository) => ({
+            permission: await getRepositoryUserPermission({
+              installationId,
+              repository,
+              user,
+            }),
+            repositoryId: repository.id,
+          }))
+        )),
+  };
+}
+
 function provider(
   overrides: Partial<{
     getInstallation: (installationId: string) => Promise<GitHubInstallation>;
+    getRepositoryUserPermission: () => Promise<
+      "admin" | "none" | "read" | "write"
+    >;
     listInstallationRepositories: (
       installationId: string,
       repositoryIds?: readonly string[]
     ) => Promise<GitHubRepositorySelection>;
   }> = {}
-) {
+): TestConnectionProvider {
   return {
     getInstallation: () => Promise.resolve(installation()),
+    getRepositoryUserPermission: () => Promise.resolve("write" as const),
     listInstallationRepositories: () => Promise.resolve(repositories()),
     ...overrides,
   };
@@ -2001,7 +2248,12 @@ function connection(
     accountId: "13579",
     accountLogin: "OpenCoven",
     accountType: "Organization",
+    appIssuesPermission: "write",
+    appOrganizationProjectsPermission: "write",
+    appPullRequestsPermission: "write",
     createdAt: NOW,
+    githubUserId: "112233",
+    githubUserLogin: "BunsDev",
     id: "70000000-0000-4000-8000-000000000001",
     installationId: INSTALLATION_ID,
     repositoryId: "24680",
@@ -2010,6 +2262,10 @@ function connection(
     repositoryOwner: "OpenCoven",
     tenant: TENANT,
     updatedAt: NOW,
+    userPermissionCeiling: "write",
+    userPermissionCurrent: "write",
+    userProjectManagementCeiling: false,
+    userProjectManagementCurrent: false,
     version: 0,
     ...overrides,
   };
@@ -2233,7 +2489,7 @@ function sameTestConnections(
   left: readonly GitHubConnectionRecord[],
   right: readonly GitHubConnectionRecord[]
 ): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+  return isDeepStrictEqual(left, right);
 }
 
 class MemoryIdempotencyStore implements IdempotencyStore {

@@ -365,14 +365,25 @@ function configuredClaimDispatcher(
   findAccount?: ProductionAccountFinder
 ): (claimed: RunnerClaimedDispatch) => Promise<RunnerDispatchResult> {
   return async (claimed) => {
-    const [admission, credentials, githubCapability, sandbox, teamStore] =
-      await Promise.all([
-        import("./admission"),
-        import("@/lib/credentials/runner-credential"),
-        import("@/lib/github/capability"),
-        import("./daytona/sandbox"),
-        import("@/lib/teams/store"),
-      ]);
+    const [
+      admission,
+      credentials,
+      githubApp,
+      githubCapability,
+      githubConfig,
+      githubConnection,
+      sandbox,
+      teamStore,
+    ] = await Promise.all([
+      import("./admission"),
+      import("@/lib/credentials/runner-credential"),
+      import("@/lib/github/app-auth"),
+      import("@/lib/github/capability"),
+      import("@/lib/github/config"),
+      import("@/lib/github/connection"),
+      import("./daytona/sandbox"),
+      import("@/lib/teams/store"),
+    ]);
     const resolvedLimits = limits ?? admission.admissionLimitsFromEnvironment();
     return dispatchProductionClaim(claimed, {
       dispatch: (authorized, context) => {
@@ -396,28 +407,79 @@ function configuredClaimDispatcher(
             ? {
                 githubTool: {
                   issueCapability: async ({ attemptId, run }) => {
-                    if (!run.githubBrokerPolicy) {
+                    const policy = run.githubBrokerPolicy;
+                    if (!policy) {
                       throw new Error(
                         "GitHub capability issuance requires persisted policy."
                       );
                     }
                     const now = new Date();
+                    const dispatchDeadline =
+                      run.dispatchLeaseExpiresAt?.getTime();
+                    if (
+                      !dispatchDeadline ||
+                      dispatchDeadline - now.getTime() <= 5000
+                    ) {
+                      throw new Error(
+                        "GitHub capability issuance requires a live dispatch lease."
+                      );
+                    }
+                    const deadlineAt = Math.min(
+                      dispatchDeadline - 5000,
+                      now.getTime() +
+                        githubCapability.MAX_GITHUB_CAPABILITY_ISSUANCE_MS
+                    );
+                    const authorityStore = teamStore.createTeamStore(
+                      teamStore.drizzleTeamStoreDatabase(database)
+                    );
                     const issued =
                       await githubCapability.issueGitHubStepCapability(
                         {
                           attemptId,
                           capabilityId: randomUUID(),
+                          deadlineAt,
                           expiresAt: new Date(
                             now.getTime() +
                               githubCapability.MAX_GITHUB_CAPABILITY_LIFETIME_MS
                           ),
                           now,
-                          policy: run.githubBrokerPolicy,
+                          policy,
                           runnerRunId: run.id,
                           tenant: run.tenant,
-                          userId: run.githubBrokerPolicy.actorUserId,
+                          userId: policy.actorUserId,
                         },
                         {
+                          refreshAuthority: async ({
+                            abortSignal,
+                            deadlineAt: authorityDeadlineAt,
+                          }) => {
+                            const config = githubConfig.githubAppConfig();
+                            const refreshed =
+                              await githubConnection.refreshGitHubConnectionAuthority(
+                                {
+                                  abortSignal,
+                                  config,
+                                  deadlineAt: authorityDeadlineAt,
+                                  principal: {
+                                    kind: "subscriber",
+                                    tenant: run.tenant,
+                                    userId: policy.actorUserId,
+                                  },
+                                  provider: githubApp.createGitHubAppClient({
+                                    appId: config.appId,
+                                    appSlug: config.appSlug,
+                                    privateKey: config.privateKey,
+                                  }),
+                                  store: authorityStore,
+                                }
+                              );
+                            if (refreshed.kind !== "current") {
+                              throw new Error(
+                                "GitHub connection authority changed before capability issuance."
+                              );
+                            }
+                            return refreshed.snapshot;
+                          },
                           replaceCapability: (input) =>
                             githubCapability
                               .createGitHubGatewayStore(

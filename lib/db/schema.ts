@@ -36,6 +36,10 @@ import {
   STRIPE_RECONCILIATION_REASONS,
   STRIPE_RECONCILIATION_STATUSES,
 } from "../billing/stripe-reconciliation";
+import type {
+  GitHubAppRepositoryPermission,
+  GitHubUserRepositoryPermission,
+} from "../github/authority-types";
 import type { GitHubBrokerPolicy } from "../github/capability";
 
 const runnerMaxCommandResultsSql = sql.raw(
@@ -1236,7 +1240,30 @@ export const runnerGitHubConnection = pgTable(
       enum: ["Organization", "User"],
       length: 16,
     }).notNull(),
+    appIssuesPermission: varchar("appIssuesPermission", {
+      enum: ["none", "read", "write"],
+      length: 8,
+    })
+      .$type<GitHubAppRepositoryPermission>()
+      .notNull(),
+    appOrganizationProjectsPermission: varchar(
+      "appOrganizationProjectsPermission",
+      {
+        enum: ["none", "read", "write"],
+        length: 8,
+      }
+    )
+      .$type<GitHubAppRepositoryPermission>()
+      .notNull(),
+    appPullRequestsPermission: varchar("appPullRequestsPermission", {
+      enum: ["none", "read", "write"],
+      length: 8,
+    })
+      .$type<GitHubAppRepositoryPermission>()
+      .notNull(),
     createdAt: timestamp("createdAt").notNull().defaultNow(),
+    githubUserId: varchar("githubUserId", { length: 20 }).notNull(),
+    githubUserLogin: varchar("githubUserLogin", { length: 100 }).notNull(),
     id: uuid("id").primaryKey().notNull().defaultRandom(),
     installationId: varchar("installationId", { length: 20 }).notNull(),
     repositoryId: varchar("repositoryId", { length: 20 }).notNull(),
@@ -1245,6 +1272,24 @@ export const runnerGitHubConnection = pgTable(
     repositoryOwner: varchar("repositoryOwner", { length: 100 }).notNull(),
     tenant: varchar("tenant", { length: 64 }).notNull(),
     updatedAt: timestamp("updatedAt").notNull().defaultNow(),
+    userPermissionCeiling: varchar("userPermissionCeiling", {
+      enum: ["read", "triage", "write", "maintain", "admin"],
+      length: 16,
+    })
+      .$type<GitHubUserRepositoryPermission>()
+      .notNull(),
+    userPermissionCurrent: varchar("userPermissionCurrent", {
+      enum: ["read", "triage", "write", "maintain", "admin"],
+      length: 16,
+    })
+      .$type<GitHubUserRepositoryPermission>()
+      .notNull(),
+    userProjectManagementCeiling: boolean(
+      "userProjectManagementCeiling"
+    ).notNull(),
+    userProjectManagementCurrent: boolean(
+      "userProjectManagementCurrent"
+    ).notNull(),
     version: integer("version").notNull().default(0),
   },
   (table) => [
@@ -1257,11 +1302,15 @@ export const runnerGitHubConnection = pgTable(
     ),
     check(
       "RGHConn_decimal_ids",
-      sql`${table.installationId} ~ '^(0|[1-9][0-9]{0,19})$' and ${table.accountId} ~ '^(0|[1-9][0-9]{0,19})$' and ${table.repositoryId} ~ '^(0|[1-9][0-9]{0,19})$'`
+      sql`${table.installationId} ~ '^(0|[1-9][0-9]{0,19})$' and ${table.accountId} ~ '^(0|[1-9][0-9]{0,19})$' and ${table.repositoryId} ~ '^(0|[1-9][0-9]{0,19})$' and ${table.githubUserId} ~ '^[1-9][0-9]{0,19}$'`
     ),
     check(
       "RGHConn_accountType_valid",
       sql`${table.accountType} in ('Organization', 'User')`
+    ),
+    check(
+      "RGHConn_authority_valid",
+      sql`${table.appIssuesPermission} in ('none','read','write') and ${table.appPullRequestsPermission} in ('none','read','write') and ${table.appOrganizationProjectsPermission} in ('none','read','write') and ${table.userPermissionCeiling} in ('read','triage','write','maintain','admin') and ${table.userPermissionCurrent} in ('read','triage','write','maintain','admin') and CASE ${table.userPermissionCurrent} WHEN 'read' THEN 1 WHEN 'triage' THEN 2 WHEN 'write' THEN 3 WHEN 'maintain' THEN 4 WHEN 'admin' THEN 5 ELSE 0 END <= CASE ${table.userPermissionCeiling} WHEN 'read' THEN 1 WHEN 'triage' THEN 2 WHEN 'write' THEN 3 WHEN 'maintain' THEN 4 WHEN 'admin' THEN 5 ELSE 0 END and (not ${table.userProjectManagementCurrent} or ${table.userProjectManagementCeiling}) and char_length(${table.githubUserLogin}) between 1 and 100 and ${table.githubUserLogin} ~ '^[A-Za-z0-9_.-]+$'`
     ),
     check("RGHConn_version_valid", sql`${table.version} >= 0`),
   ]

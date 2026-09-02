@@ -20,6 +20,7 @@ const OPERATION = {
   owner: "OpenCoven",
   repo: "coven-agents",
 };
+const currentAuthority = () => Promise.resolve();
 
 function context(
   operation: GitHubToolOperation = OPERATION,
@@ -37,6 +38,7 @@ function context(
     accountId: "123",
     accountLogin: "OpenCoven",
     accountType: "Organization",
+    actorUserId: "99999999-9999-4999-8999-999999999999",
     capability: {
       allowedCapabilities: [requiredCapability] as never,
       approvedCapabilities: write ? ([requiredCapability] as never) : [],
@@ -1560,6 +1562,7 @@ test("gateway hashes the raw capability, reserves once, revalidates mutations, a
         };
       },
     },
+    refreshAuthority: currentAuthority,
     store: {
       authorizeMutation: async (_operator, input) => {
         calls.push(["authorizeMutation", input]);
@@ -1629,6 +1632,144 @@ test("gateway hashes the raw capability, reserves once, revalidates mutations, a
     },
     result: completedOperation.result,
   });
+});
+
+test("gateway revalidates current user authority after reservation and before provider execution", async () => {
+  const rawCapability = Buffer.alloc(32, 0x6a).toString("base64url");
+  const reserved = context();
+  let providerCalls = 0;
+  let refreshCalls = 0;
+  const gateway = createGitHubToolGateway({
+    clock: () => new Date("2026-08-31T20:00:00.000Z"),
+    createId: () => reserved.operation.id,
+    operator: { kind: "runner-operator" },
+    provider: {
+      execute: async () => {
+        providerCalls += 1;
+        throw new Error("stale user authority must not reach GitHub");
+      },
+    },
+    refreshAuthority: async () => {
+      refreshCalls += 1;
+      throw new GitHubToolProviderError("github_operation_authority_changed", {
+        retryable: false,
+        status: 409,
+      });
+    },
+    store: {
+      authorizeMutation: async () => ({ kind: "unauthorized" as const }),
+      completeOperation: async () => {
+        throw new Error("authority failure must not complete");
+      },
+      failOperation: async (_operator, input) => ({
+        kind: "failed" as const,
+        operation: {
+          ...reserved.operation,
+          completedAt: new Date("2026-08-31T20:00:01.000Z"),
+          error: input.error,
+          status: "failed" as const,
+          version: 1,
+        },
+      }),
+      releaseOperationForRetry: async () => ({ kind: "stale" as const }),
+      reserveOperation: async () => ({
+        context: reserved,
+        kind: "reserved" as const,
+      }),
+    },
+  });
+
+  await assert.rejects(
+    gateway.execute({
+      operation: OPERATION,
+      operationId: reserved.operation.operationId,
+      rawCapability,
+    }),
+    (error: unknown) =>
+      error instanceof GitHubToolGatewayError &&
+      error.code === "github_operation_authority_changed" &&
+      error.retryable === false
+  );
+  assert.equal(refreshCalls, 1);
+  assert.equal(providerCalls, 0);
+});
+
+test("a blocked authority refresh is aborted within its gateway phase budget before provider execution", {
+  timeout: 500,
+}, async () => {
+  const rawCapability = Buffer.alloc(32, 0x6b).toString("base64url");
+  const reserved = context();
+  let providerCalls = 0;
+  let refreshAborted = false;
+  const gateway = createGitHubToolGateway({
+    authorityRefreshTimeoutMs: 10,
+    clock: () => new Date("2026-08-31T20:00:00.000Z"),
+    createId: () => reserved.operation.id,
+    operator: { kind: "runner-operator" },
+    provider: {
+      execute: async () => {
+        providerCalls += 1;
+        throw new Error("timed-out authority must not reach GitHub");
+      },
+    },
+    refreshAuthority: async (input: {
+      abortSignal?: AbortSignal;
+      deadlineAt?: number;
+    }) => {
+      assert.equal(
+        input.deadlineAt,
+        new Date("2026-08-31T20:00:00.000Z").getTime() +
+          GITHUB_TOOL_SERVER_DEADLINE_MS
+      );
+      if (!input.abortSignal) {
+        return new Promise<void>(() => undefined);
+      }
+      return new Promise<void>((_resolve, reject) => {
+        input.abortSignal?.addEventListener(
+          "abort",
+          () => {
+            refreshAborted = true;
+            reject(input.abortSignal?.reason);
+          },
+          { once: true }
+        );
+      });
+    },
+    store: {
+      authorizeMutation: async () => ({ kind: "unauthorized" as const }),
+      completeOperation: async () => {
+        throw new Error("authority timeout must not complete");
+      },
+      failOperation: async (_operator, input) => ({
+        kind: "failed" as const,
+        operation: {
+          ...reserved.operation,
+          completedAt: new Date("2026-08-31T20:00:01.000Z"),
+          error: input.error,
+          status: "failed" as const,
+          version: 1,
+        },
+      }),
+      releaseOperationForRetry: async () => ({ kind: "stale" as const }),
+      reserveOperation: async () => ({
+        context: reserved,
+        kind: "reserved" as const,
+      }),
+    },
+  });
+
+  await assert.rejects(
+    gateway.execute({
+      operation: OPERATION,
+      operationId: reserved.operation.operationId,
+      rawCapability,
+    }),
+    (error: unknown) =>
+      error instanceof GitHubToolGatewayError &&
+      error.code === "github_provider_unavailable"
+  );
+  assert.equal(refreshAborted, true);
+  assert.equal(providerCalls, 0);
 });
 
 test("same-operation recovery after completion persistence failure performs at most one provider write", async () => {
@@ -1701,6 +1842,7 @@ test("same-operation recovery after completion persistence failure performs at m
     createId: () => initialContext.operation.id,
     operator: { kind: "runner-operator" },
     provider: sequence.provider,
+    refreshAuthority: currentAuthority,
     store: {
       authorizeMutation: async () => ({
         kind: "authorized" as const,
@@ -1870,6 +2012,7 @@ test("known-sent recovery failures persist terminal write uncertainty for replay
           throw providerError;
         },
       },
+      refreshAuthority: currentAuthority,
       store: {
         authorizeMutation: async () => {
           throw new Error("recovery must not authorize another write");
@@ -1967,6 +2110,7 @@ test("post-authorization provider failure persists known-sent uncertainty", asyn
         });
       },
     },
+    refreshAuthority: currentAuthority,
     store: {
       authorizeMutation: async () => ({
         kind: "authorized" as const,
@@ -2065,6 +2209,7 @@ test("known-sent failure persistence aborts before a delayed terminal commit", {
         });
       },
     },
+    refreshAuthority: currentAuthority,
     store: {
       authorizeMutation: async () => ({ kind: "unauthorized" as const }),
       completeOperation: async () => ({ kind: "stale" as const }),
@@ -2175,6 +2320,7 @@ test("retryable pre-send provider failure releases the write intent and permits 
         };
       },
     },
+    refreshAuthority: currentAuthority,
     store: {
       authorizeMutation: async () => ({
         kind: "authorized" as const,
@@ -2283,6 +2429,7 @@ test("installation-token failure releases the pre-send write without touching th
         throw new Error("installation token rate limited");
       },
     }),
+    refreshAuthority: currentAuthority,
     store: {
       authorizeMutation: async () => {
         throw new Error("token mint must precede mutation dispatch");
@@ -2343,6 +2490,7 @@ test("blocked operation reservation fails inside the server database phase budge
         throw new Error("blocked reservation must not reach provider");
       },
     },
+    refreshAuthority: currentAuthority,
     store: {
       authorizeMutation: async () => ({ kind: "unauthorized" as const }),
       completeOperation: async () => ({ kind: "stale" as const }),
@@ -2425,6 +2573,7 @@ test("ambiguous dispatch-phase persistence never sends or releases the write", {
     databasePhaseTimeoutMs: 5,
     operator: { kind: "runner-operator" },
     provider: sequence.provider,
+    refreshAuthority: currentAuthority,
     store: {
       authorizeMutation: () => new Promise(() => undefined),
       completeOperation: async () => ({ kind: "stale" as const }),
@@ -2501,6 +2650,7 @@ test("blocked mutation authorization returns dispatch uncertainty without provid
         throw new Error("authorization timeout must stop provider execution");
       },
     },
+    refreshAuthority: currentAuthority,
     store: {
       authorizeMutation: (_operator, input) =>
         new Promise((_resolve, reject) => {
@@ -2582,6 +2732,7 @@ test("a proven PostgreSQL lock timeout before dispatch releases the write for re
         throw new Error("lock timeout must stop provider execution");
       },
     },
+    refreshAuthority: currentAuthority,
     store: {
       authorizeMutation: async () => {
         throw Object.assign(new Error("lock timeout"), { code: "55P03" });
@@ -2672,6 +2823,7 @@ test("an exhausted authorization margin releases before marking a write sent", a
         throw new Error("deadline margin must stop provider execution");
       },
     },
+    refreshAuthority: currentAuthority,
     store: {
       authorizeMutation: async () => {
         authorizations += 1;
@@ -2761,6 +2913,7 @@ test("blocked completion persistence returns write uncertainty before the client
           "https://github.com/OpenCoven/coven-agents/issues/42#issuecomment-1",
       }),
     },
+    refreshAuthority: currentAuthority,
     store: {
       authorizeMutation: async () => ({
         kind: "authorized" as const,
@@ -2861,6 +3014,7 @@ test("gateway serializes duplicates and never success-shapes conflicts, active c
           );
         },
       },
+      refreshAuthority: currentAuthority,
       store: {
         authorizeMutation: async () => ({
           kind: "authorized" as const,
@@ -2953,6 +3107,7 @@ test("internal HTTP accepts only bounded strict capability-authenticated POST bo
   const rawCapability = Buffer.alloc(32, 0x4c).toString("base64url");
   const calls: unknown[] = [];
   const handler = createGitHubToolHttpHandler({
+    enforceAbuse: async () => ({ kind: "allowed" as const }),
     execute: async (input) => {
       calls.push(input);
       return {
@@ -3074,6 +3229,298 @@ test("internal HTTP accepts only bounded strict capability-authenticated POST bo
   }
 });
 
+test("internal HTTP returns sanitized denied and unavailable admission responses before body reads or capability lookup", async () => {
+  const rawCapability = Buffer.alloc(32, 0x5c).toString("base64url");
+  for (const [admission, expected] of [
+    [
+      { kind: "denied", responseStatus: 429, retryAfterSeconds: 17 },
+      {
+        body: {
+          error: {
+            code: "rate_limited",
+            message: "Too many requests. Try again later.",
+            retryable: true,
+          },
+        },
+        retryAfter: "17",
+        status: 429,
+      },
+    ],
+    [
+      { kind: "unavailable", responseStatus: 503 },
+      {
+        body: {
+          error: {
+            code: "abuse_control_unavailable",
+            message: "GitHub tool execution is unavailable.",
+            retryable: true,
+          },
+        },
+        retryAfter: null,
+        status: 503,
+      },
+    ],
+  ] as const) {
+    let bodyPulls = 0;
+    let executions = 0;
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          bodyPulls += 1;
+          controller.enqueue(new TextEncoder().encode("{}"));
+          controller.close();
+        },
+      },
+      { highWaterMark: 0 }
+    );
+    const handler = createGitHubToolHttpHandler({
+      enforceAbuse: async (input: unknown) => {
+        assert.deepEqual(input, {
+          failClosed: true,
+          ip: "203.0.113.90",
+          route: "github_tool",
+        });
+        return admission;
+      },
+      execute: async () => {
+        executions += 1;
+        return {} as never;
+      },
+    } as never) as unknown as (
+      request: Request,
+      ip: string | null
+    ) => Promise<Response>;
+
+    const response = await handler(
+      new Request("https://app.example/api/internal/github-tool", {
+        body,
+        duplex: "half",
+        headers: { authorization: ["Bearer", rawCapability].join(" ") },
+        method: "POST",
+      } as RequestInit & { duplex: "half" }),
+      "203.0.113.90"
+    );
+
+    assert.equal(response.status, expected.status);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.equal(response.headers.get("retry-after"), expected.retryAfter);
+    assert.deepEqual(await response.json(), expected.body);
+    assert.equal(bodyPulls, 0);
+    assert.equal(executions, 0);
+  }
+});
+
+test("syntactically valid capability floods are stopped by IP admission before database execution", async () => {
+  const rawCapability = Buffer.alloc(32, 0x5d).toString("base64url");
+  let admissions = 0;
+  let executions = 0;
+  const handler = createGitHubToolHttpHandler({
+    enforceAbuse: async () => {
+      admissions += 1;
+      return admissions <= 2
+        ? ({ kind: "allowed" } as const)
+        : ({
+            kind: "denied",
+            responseStatus: 429,
+            retryAfterSeconds: 60,
+          } as const);
+    },
+    execute: async () => {
+      executions += 1;
+      return {} as never;
+    },
+  } as never) as unknown as (
+    request: Request,
+    ip: string | null
+  ) => Promise<Response>;
+
+  const responses = await Promise.all(
+    Array.from({ length: 8 }, (_, index) =>
+      handler(
+        new Request("https://app.example/api/internal/github-tool", {
+          body: JSON.stringify({
+            operation: OPERATION,
+            operationId: `88888888-8888-4888-8888-${String(index).padStart(12, "0")}`,
+          }),
+          headers: { authorization: ["Bearer", rawCapability].join(" ") },
+          method: "POST",
+        }),
+        "203.0.113.91"
+      )
+    )
+  );
+
+  assert.equal(admissions, 8);
+  assert.equal(executions, 2);
+  assert.deepEqual(
+    responses.map(({ status }) => status),
+    [200, 200, 429, 429, 429, 429, 429, 429]
+  );
+});
+
+test("an absolute pre-database deadline cancels a slow endless body before capability lookup", {
+  timeout: 500,
+}, async () => {
+  const rawCapability = Buffer.alloc(32, 0x5e).toString("base64url");
+  let cancelled = false;
+  let executions = 0;
+  const body = new ReadableStream<Uint8Array>({
+    cancel() {
+      cancelled = true;
+    },
+    pull() {
+      return new Promise(() => undefined);
+    },
+  });
+  const handler = createGitHubToolHttpHandler({
+    bodyDeadlineMs: 10,
+    enforceAbuse: async () => ({ kind: "allowed" as const }),
+    execute: async () => {
+      executions += 1;
+      return {} as never;
+    },
+  } as never) as unknown as (
+    request: Request,
+    ip: string | null
+  ) => Promise<Response>;
+
+  const response = await handler(
+    new Request("https://app.example/api/internal/github-tool", {
+      body,
+      duplex: "half",
+      headers: { authorization: ["Bearer", rawCapability].join(" ") },
+      method: "POST",
+    } as RequestInit & { duplex: "half" }),
+    "203.0.113.92"
+  );
+
+  assert.equal(response.status, 408);
+  assert.deepEqual(await response.json(), {
+    error: {
+      code: "request_timeout",
+      message: "GitHub tool request timed out.",
+      retryable: true,
+    },
+  });
+  assert.equal(cancelled, true);
+  assert.equal(body.locked, false);
+  assert.equal(executions, 0);
+});
+
+test("a pre-aborted request is refused before admission, body access, or capability lookup", async () => {
+  const controller = new AbortController();
+  controller.abort(new Error("client disconnected"));
+  let admissions = 0;
+  let executions = 0;
+  const handler = createGitHubToolHttpHandler({
+    bodyDeadlineMs: 50,
+    enforceAbuse: async () => {
+      admissions += 1;
+      return { kind: "allowed" as const };
+    },
+    execute: async () => {
+      executions += 1;
+      return {} as never;
+    },
+  });
+
+  const response = await handler(
+    new Request("https://app.example/api/internal/github-tool", {
+      body: JSON.stringify({
+        operation: OPERATION,
+        operationId: "88888888-8888-4888-8888-888888888888",
+      }),
+      headers: {
+        authorization: ["Bearer", Buffer.alloc(32).toString("base64url")].join(
+          " "
+        ),
+      },
+      method: "POST",
+      signal: controller.signal,
+    })
+  );
+
+  assert.equal(response.status, 408);
+  assert.equal(admissions, 0);
+  assert.equal(executions, 0);
+});
+
+test("the absolute deadline is checked even when timer delivery is delayed by synchronous admission work", async () => {
+  let executions = 0;
+  const handler = createGitHubToolHttpHandler({
+    bodyDeadlineMs: 10,
+    enforceAbuse: async () => {
+      const blockedUntil = Date.now() + 30;
+      while (Date.now() < blockedUntil) {
+        // Intentionally block timer delivery to prove the absolute clock fence.
+      }
+      return { kind: "allowed" as const };
+    },
+    execute: async () => {
+      executions += 1;
+      return {} as never;
+    },
+  });
+
+  const response = await handler(
+    new Request("https://app.example/api/internal/github-tool", {
+      body: JSON.stringify({
+        operation: OPERATION,
+        operationId: "88888888-8888-4888-8888-888888888888",
+      }),
+      headers: {
+        authorization: ["Bearer", Buffer.alloc(32).toString("base64url")].join(
+          " "
+        ),
+      },
+      method: "POST",
+    })
+  );
+
+  assert.equal(response.status, 408);
+  assert.equal(executions, 0);
+});
+
+test("a non-settling stream cancellation cannot hold the timeout response open", {
+  timeout: 500,
+}, async () => {
+  let cancelCalls = 0;
+  let executions = 0;
+  const body = new ReadableStream<Uint8Array>({
+    cancel() {
+      cancelCalls += 1;
+      return new Promise(() => undefined);
+    },
+    pull() {
+      return new Promise(() => undefined);
+    },
+  });
+  const handler = createGitHubToolHttpHandler({
+    bodyDeadlineMs: 10,
+    enforceAbuse: async () => ({ kind: "allowed" as const }),
+    execute: async () => {
+      executions += 1;
+      return {} as never;
+    },
+  });
+  const response = await handler(
+    new Request("https://app.example/api/internal/github-tool", {
+      body,
+      duplex: "half",
+      headers: {
+        authorization: ["Bearer", Buffer.alloc(32).toString("base64url")].join(
+          " "
+        ),
+      },
+      method: "POST",
+    } as RequestInit & { duplex: "half" })
+  );
+
+  assert.equal(response.status, 408);
+  assert.equal(cancelCalls, 1);
+  assert.equal(executions, 0);
+});
+
 test("invalid UTF-8 split across chunks is cancelled and rejected before reservation", {
   timeout: 500,
 }, async () => {
@@ -3092,6 +3539,7 @@ test("invalid UTF-8 split across chunks is cancelled and rejected before reserva
     },
   });
   const handler = createGitHubToolHttpHandler({
+    enforceAbuse: async () => ({ kind: "allowed" as const }),
     execute: async () => {
       reservations += 1;
       throw new Error("invalid UTF-8 must not reserve");
@@ -3136,6 +3584,7 @@ test("an endless oversized request stream is cancelled before reservation", {
     },
   });
   const handler = createGitHubToolHttpHandler({
+    enforceAbuse: async () => ({ kind: "allowed" as const }),
     execute: async () => {
       reservations += 1;
       throw new Error("oversized body must not reserve");

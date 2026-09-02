@@ -24,6 +24,10 @@ test("disconnect advances generation, revokes capability, and preserves an immut
   const runnerOperationId = "10000000-0000-4000-8000-000000000008";
   const attemptId = "10000000-0000-4000-8000-000000000009";
   const connectionId = "10000000-0000-4000-8000-000000000010";
+  const prefixConnectionId = "10000000-0000-4000-8000-000000000021";
+  const prefixRepositoryId = "790";
+  const shortConnectionId = "10000000-0000-4000-8000-000000000022";
+  const shortRepositoryId = "791";
   const capabilityId = "10000000-0000-4000-8000-000000000011";
   const operationId = "10000000-0000-4000-8000-000000000012";
   const releasedWriteId = "10000000-0000-4000-8000-000000000017";
@@ -47,13 +51,64 @@ test("disconnect advances generation, revokes capability, and preserves an immut
         accountId,
         accountLogin: "OpenCoven",
         accountType: "Organization",
+        appIssuesPermission: "write",
+        appOrganizationProjectsPermission: "write",
+        appPullRequestsPermission: "write",
+        connectionId: prefixConnectionId,
+        githubUserId: "112233",
+        githubUserLogin: "BunsDev",
+        installationId,
+        repository: "a-foo/repo",
+        repositoryId: prefixRepositoryId,
+        repositoryName: "repo",
+        repositoryNodeId: "R_prefix",
+        repositoryOwner: "a-foo",
+        userPermissionCeiling: "write",
+        userPermissionCurrent: "write",
+        userProjectManagementCeiling: false,
+        userProjectManagementCurrent: false,
+      },
+      {
+        accountId,
+        accountLogin: "OpenCoven",
+        accountType: "Organization",
+        appIssuesPermission: "write",
+        appOrganizationProjectsPermission: "write",
+        appPullRequestsPermission: "write",
+        connectionId: shortConnectionId,
+        githubUserId: "112233",
+        githubUserLogin: "BunsDev",
+        installationId,
+        repository: "a/repo",
+        repositoryId: shortRepositoryId,
+        repositoryName: "repo",
+        repositoryNodeId: "R_short",
+        repositoryOwner: "a",
+        userPermissionCeiling: "write",
+        userPermissionCurrent: "write",
+        userProjectManagementCeiling: false,
+        userProjectManagementCurrent: false,
+      },
+      {
+        accountId,
+        accountLogin: "OpenCoven",
+        accountType: "Organization",
+        appIssuesPermission: "write",
+        appOrganizationProjectsPermission: "write",
+        appPullRequestsPermission: "write",
         connectionId,
+        githubUserId: "112233",
+        githubUserLogin: "BunsDev",
         installationId,
         repository: "opencoven/coven-agents",
         repositoryId,
         repositoryName: "coven-agents",
         repositoryNodeId: "R_kgDOExample",
         repositoryOwner: "OpenCoven",
+        userPermissionCeiling: "write",
+        userPermissionCurrent: "write",
+        userProjectManagementCeiling: false,
+        userProjectManagementCurrent: false,
       },
     ],
     teamRunId,
@@ -78,7 +133,7 @@ test("disconnect advances generation, revokes capability, and preserves an immut
     `;
     assert.match(
       ordering?.definition ?? "",
-      /repositoryOwner"\) COLLATE "C"[\s\S]*repositoryName"\) COLLATE "C"/u
+      /repositoryOwner"\) \|\| '\/' \|\|[\s\S]*repositoryName"\)[\s\S]*COLLATE "C"/u
     );
 
     await sql.begin(async (transaction) => {
@@ -134,11 +189,27 @@ test("disconnect advances generation, revokes capability, and preserves an immut
           INSERT INTO "RunnerGitHubConnection" (
             "id", "tenant", "accountId", "accountLogin", "accountType",
             "installationId", "repositoryId", "repositoryName",
-            "repositoryNodeId", "repositoryOwner"
+            "repositoryNodeId", "repositoryOwner", "githubUserId",
+            "githubUserLogin", "userPermissionCeiling",
+            "userPermissionCurrent", "userProjectManagementCeiling",
+            "userProjectManagementCurrent", "appIssuesPermission",
+            "appPullRequestsPermission", "appOrganizationProjectsPermission"
           ) VALUES (
             ${connectionId}, ${tenant}, ${accountId}, 'OpenCoven',
             'Organization', ${installationId}, ${repositoryId},
-            'coven-agents', 'R_kgDOExample', 'OpenCoven'
+            'coven-agents', 'R_kgDOExample', 'OpenCoven', '112233',
+            'BunsDev', 'write', 'write', false, false, 'write', 'write',
+            'write'
+          ), (
+            ${prefixConnectionId}, ${tenant}, ${accountId}, 'OpenCoven',
+            'Organization', ${installationId}, ${prefixRepositoryId},
+            'repo', 'R_prefix', 'a-foo', '112233', 'BunsDev', 'write',
+            'write', false, false, 'write', 'write', 'write'
+          ), (
+            ${shortConnectionId}, ${tenant}, ${accountId}, 'OpenCoven',
+            'Organization', ${installationId}, ${shortRepositoryId},
+            'repo', 'R_short', 'a', '112233', 'BunsDev', 'write', 'write',
+            false, false, 'write', 'write', 'write'
           )
         `;
       await transaction`

@@ -52,11 +52,11 @@ test("workspace-read Copilot runs expose only read tools", () => {
       invocation.args.indexOf("--available-tools"),
       invocation.args.indexOf("--available-tools") + 2
     ),
-    ["--available-tools", "view,grep,glob"]
+    ["--available-tools", "view,rg,glob"]
   );
   assert.equal(invocation.args.includes("--allow-tool"), false);
   assert.equal(
-    invocation.args.some((argument) => argument === "edit"),
+    invocation.args.some((argument) => argument === "apply_patch"),
     false
   );
   assert.equal(
@@ -99,7 +99,7 @@ test("workspace-read Copilot runs expose only read tools", () => {
   }
 });
 
-test("workspace-write Copilot runs add bounded edit permission without shell or network", () => {
+test("workspace-write Copilot runs add bounded apply_patch permission without shell or network", () => {
   const invocation = buildInvocation({
     ...BASE,
     configDir: "/run/coven-agents/attempt/copilot",
@@ -113,7 +113,7 @@ test("workspace-write Copilot runs add bounded edit permission without shell or 
       invocation.args.indexOf("--available-tools"),
       invocation.args.indexOf("--available-tools") + 4
     ),
-    ["--available-tools", "view,edit,grep,glob", "--allow-tool", "write"]
+    ["--available-tools", "view,apply_patch,rg,glob", "--allow-tool", "write"]
   );
   assert.equal(
     invocation.args[invocation.args.indexOf("--available-tools") + 1]?.includes(
@@ -159,7 +159,7 @@ test("GitHub-only Copilot runs expose one exact executable permission and zero w
       "CovenGitHub(execute)",
     ]
   );
-  for (const unavailable of ["view", "edit", "grep", "glob", "write"]) {
+  for (const unavailable of ["view", "apply_patch", "rg", "glob", "write"]) {
     assert.equal(
       invocation.args.some((argument) => argument === unavailable),
       false,
@@ -245,7 +245,7 @@ test("workspace permissions compose with only the exact GitHub executable", () =
     ),
     [
       "--available-tools",
-      "view,grep,glob,CovenGitHub-execute",
+      "view,rg,glob,CovenGitHub-execute",
       "--allow-tool",
       "CovenGitHub(execute)",
     ]
@@ -265,7 +265,7 @@ test("workspace permissions compose with only the exact GitHub executable", () =
     ),
     [
       "--available-tools",
-      "view,edit,grep,glob,CovenGitHub-execute",
+      "view,apply_patch,rg,glob,CovenGitHub-execute",
       "--allow-tool",
       "write",
       "--allow-tool",

@@ -344,6 +344,27 @@ test("GitHub connection handlers establish subscriber identity and admission bef
   }
 });
 
+test("the internal GitHub tool admits its source before bearer parsing, body buffering, or database composition", () => {
+  const routeSource = read("app/api/internal/github-tool/route.ts");
+  const dependencies = read("lib/github/tool-route-dependencies.ts");
+  const handler = functionBlock(
+    read("lib/github/http.ts"),
+    "createGitHubToolHttpHandler"
+  );
+  const admission = handler.indexOf("input.enforceAbuse(");
+  const bearer = handler.indexOf('request.headers.get("authorization")');
+  const body = handler.indexOf("readBoundedRequestBody(");
+
+  assert.match(routeSource, /from "@vercel\/functions"/u);
+  assert.match(routeSource, /ipAddress\(request\)/u);
+  assert.match(dependencies, /enforceAbusePolicy/u);
+  assert.match(handler, /route: "github_tool"/u);
+  assert.ok(admission >= 0);
+  assert.ok(bearer > admission);
+  assert.ok(body > bearer);
+  assert.match(dependencies, /execute: \(request\) => \{[\s\S]*databaseFor/u);
+});
+
 test("Stripe webhook admission precedes body and provider work", () => {
   const routeSource = read("app/api/stripe/webhook/route.ts");
   const webhookSource = read("lib/billing/webhook.ts");

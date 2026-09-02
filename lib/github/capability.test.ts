@@ -32,7 +32,12 @@ const CONNECTIONS = [
     accountId: "123",
     accountLogin: "OpenCoven",
     accountType: "Organization" as const,
+    appIssuesPermission: "write" as const,
+    appOrganizationProjectsPermission: "write" as const,
+    appPullRequestsPermission: "write" as const,
     createdAt: NOW,
+    githubUserId: "112233",
+    githubUserLogin: "BunsDev",
     id: "66666666-6666-4666-8666-666666666666",
     installationId: "456",
     repositoryId: "789",
@@ -41,6 +46,10 @@ const CONNECTIONS = [
     repositoryOwner: "OpenCoven",
     tenant: TENANT,
     updatedAt: NOW,
+    userPermissionCeiling: "write" as const,
+    userPermissionCurrent: "write" as const,
+    userProjectManagementCeiling: false,
+    userProjectManagementCurrent: false,
     version: 0,
   },
 ] as const;
@@ -80,13 +89,22 @@ test("broker policy derives only declared reads and actor-approved declared writ
         accountId: "123",
         accountLogin: "OpenCoven",
         accountType: "Organization",
+        appIssuesPermission: "write",
+        appOrganizationProjectsPermission: "write",
+        appPullRequestsPermission: "write",
         connectionId: "66666666-6666-4666-8666-666666666666",
+        githubUserId: "112233",
+        githubUserLogin: "BunsDev",
         installationId: "456",
         repository: "opencoven/coven-agents",
         repositoryId: "789",
         repositoryName: "coven-agents",
         repositoryNodeId: "R_kgDOExample",
         repositoryOwner: "OpenCoven",
+        userPermissionCeiling: "write",
+        userPermissionCurrent: "write",
+        userProjectManagementCeiling: false,
+        userProjectManagementCurrent: false,
       },
     ],
     teamRunId: TEAM_RUN_ID,
@@ -107,6 +125,93 @@ test("broker policy derives only declared reads and actor-approved declared writ
   assert.deepEqual(readOnly.allowedCapabilities, ["github.issues.read"]);
   assert.deepEqual(readOnly.approvedCapabilities, []);
   assert.equal(githubTaskCapability(readOnly), "read");
+});
+
+test("broker policy intersects app permissions and per-repository user authority", () => {
+  const declaredCapabilities = [
+    "github.issues.read",
+    "github.issues.write",
+    "github.pull_requests.read",
+    "github.pull_requests.write",
+    "github.projects.write",
+  ] as const;
+  const approvedCapabilities = [
+    "github.issues.write",
+    "github.pull_requests.write",
+    "github.projects.write",
+  ] as const;
+
+  for (const role of ["read", "triage"] as const) {
+    const built = buildGitHubBrokerPolicy({
+      actorUserId: USER_ID,
+      approvedCapabilities,
+      authVersion: 7,
+      connectionSnapshot: {
+        connections: [
+          {
+            ...CONNECTIONS[0],
+            appIssuesPermission: "write",
+            appOrganizationProjectsPermission: "write",
+            appPullRequestsPermission: "write",
+            githubUserId: "112233",
+            githubUserLogin: "BunsDev",
+            userPermissionCeiling: role,
+            userPermissionCurrent: role,
+            userProjectManagementCeiling: false,
+            userProjectManagementCurrent: false,
+          },
+        ],
+        generation: 9,
+      } as never,
+      declaredCapabilities,
+      teamRunId: TEAM_RUN_ID,
+      teamStepId: TEAM_STEP_ID,
+    });
+    assert.deepEqual(built.allowedCapabilities, [
+      "github.issues.read",
+      "github.pull_requests.read",
+    ]);
+    assert.equal(githubTaskCapability(built), "read");
+  }
+
+  for (const role of ["write", "maintain", "admin"] as const) {
+    const built = buildGitHubBrokerPolicy({
+      actorUserId: USER_ID,
+      approvedCapabilities,
+      authVersion: 7,
+      connectionSnapshot: {
+        connections: [
+          {
+            ...CONNECTIONS[0],
+            appIssuesPermission: "write",
+            appOrganizationProjectsPermission: "write",
+            appPullRequestsPermission: "write",
+            githubUserId: "112233",
+            githubUserLogin: "BunsDev",
+            userPermissionCeiling: role,
+            userPermissionCurrent: role,
+            userProjectManagementCeiling: false,
+            userProjectManagementCurrent: false,
+          },
+        ],
+        generation: 9,
+      } as never,
+      declaredCapabilities,
+      teamRunId: TEAM_RUN_ID,
+      teamStepId: TEAM_STEP_ID,
+    });
+    assert.deepEqual(built.allowedCapabilities, [
+      "github.issues.read",
+      "github.issues.write",
+      "github.pull_requests.read",
+      "github.pull_requests.write",
+    ]);
+    assert.equal(
+      built.allowedCapabilities.includes("github.projects.write"),
+      false,
+      "organization project writes must fail closed without exact user proof"
+    );
+  }
 });
 
 test("custom approval text or undeclared approvals cannot broaden broker policy", () => {
@@ -168,6 +273,36 @@ test("broker policy requires a current bounded verified repository snapshot", ()
   }
 });
 
+test("broker policy rejects malformed or broadened repository authority snapshots", () => {
+  for (const authority of [
+    {
+      userPermissionCeiling: "read",
+      userPermissionCurrent: "admin",
+    },
+    {
+      userProjectManagementCeiling: false,
+      userProjectManagementCurrent: true,
+    },
+  ]) {
+    assert.throws(
+      () =>
+        buildGitHubBrokerPolicy({
+          actorUserId: USER_ID,
+          approvedCapabilities: [],
+          authVersion: 7,
+          connectionSnapshot: {
+            connections: [{ ...CONNECTIONS[0], ...authority }] as never,
+            generation: 9,
+          },
+          declaredCapabilities: ["github.issues.read"],
+          teamRunId: TEAM_RUN_ID,
+          teamStepId: TEAM_STEP_ID,
+        }),
+      /authority|repository|permission/i
+    );
+  }
+});
+
 test("broker policy repository ordering is deterministic ASCII byte order", () => {
   const connections = [
     {
@@ -225,6 +360,8 @@ test("step capability returns 256-bit entropy once and persists only its SHA-256
         assert.equal(size, 32);
         return rawBytes;
       },
+      refreshAuthority: () =>
+        Promise.resolve({ connections: CONNECTIONS, generation: 9 }),
       replaceCapability: async (input) => {
         writes.push(input);
         return { kind: "created" as const };
@@ -246,8 +383,13 @@ test("step capability returns 256-bit entropy once and persists only its SHA-256
     JSON.stringify(writes).includes(rawBytes.toString("hex")),
     false
   );
-  assert.deepEqual(writes[0], {
+  const { abortSignal, ...persisted } = writes[0] as {
+    abortSignal: AbortSignal;
+  } & Record<string, unknown>;
+  assert.equal(abortSignal.aborted, false);
+  assert.deepEqual(persisted, {
     attemptId: ATTEMPT_ID,
+    deadlineAt: NOW.getTime() + 20_000,
     expiresAt: new Date("2026-08-31T20:10:00.000Z"),
     id: CAPABILITY_ID,
     policy: policy(),
@@ -272,6 +414,8 @@ test("capability issuance rejects weak entropy, expired bounds, and durable conf
   await assert.rejects(
     issueGitHubStepCapability(base, {
       randomBytes: () => Buffer.alloc(31),
+      refreshAuthority: () =>
+        Promise.resolve({ connections: CONNECTIONS, generation: 9 }),
       replaceCapability: async () => ({ kind: "created" as const }),
     }),
     /entropy/i
@@ -281,6 +425,8 @@ test("capability issuance rejects weak entropy, expired bounds, and durable conf
       { ...base, expiresAt: new Date("2026-08-31T20:16:00.001Z") },
       {
         randomBytes: () => Buffer.alloc(32),
+        refreshAuthority: () =>
+          Promise.resolve({ connections: CONNECTIONS, generation: 9 }),
         replaceCapability: async () => ({ kind: "created" as const }),
       }
     ),
@@ -289,10 +435,147 @@ test("capability issuance rejects weak entropy, expired bounds, and durable conf
   await assert.rejects(
     issueGitHubStepCapability(base, {
       randomBytes: () => Buffer.alloc(32),
+      refreshAuthority: () =>
+        Promise.resolve({ connections: CONNECTIONS, generation: 9 }),
       replaceCapability: async () => ({ kind: "conflict" as const }),
     }),
     /fenced/i
   );
+});
+
+test("capability issuance revalidates current user authority before generating or persisting a token", async () => {
+  let entropyCalls = 0;
+  let refreshCalls = 0;
+  let replacementCalls = 0;
+  const currentPolicy = policy(
+    ["github.issues.write"],
+    ["github.issues.write"]
+  );
+
+  await assert.rejects(
+    issueGitHubStepCapability(
+      {
+        attemptId: ATTEMPT_ID,
+        capabilityId: CAPABILITY_ID,
+        expiresAt: new Date("2026-08-31T20:10:00.000Z"),
+        now: NOW,
+        policy: currentPolicy,
+        runnerRunId: RUNNER_RUN_ID,
+        tenant: TENANT,
+        userId: USER_ID,
+      },
+      {
+        randomBytes: () => {
+          entropyCalls += 1;
+          return Buffer.alloc(32);
+        },
+        refreshAuthority: async () => {
+          refreshCalls += 1;
+          return {
+            connections: [],
+            generation: currentPolicy.connectionGeneration + 1,
+          };
+        },
+        replaceCapability: async () => {
+          replacementCalls += 1;
+          return { kind: "created" as const };
+        },
+      } as never
+    ),
+    /authority|generation|connection/i
+  );
+  assert.equal(refreshCalls, 1);
+  assert.equal(entropyCalls, 0);
+  assert.equal(replacementCalls, 0);
+});
+
+test("capability issuance compares refreshed authority structurally across PostgreSQL JSONB key order", async () => {
+  const currentPolicy = policy();
+  const reordered = Object.fromEntries(
+    Object.entries({
+      ...currentPolicy,
+      repositories: currentPolicy.repositories.map((repository) =>
+        Object.fromEntries(Object.entries(repository).reverse())
+      ),
+    }).reverse()
+  ) as unknown as typeof currentPolicy;
+  let replacements = 0;
+
+  await issueGitHubStepCapability(
+    {
+      attemptId: ATTEMPT_ID,
+      capabilityId: CAPABILITY_ID,
+      expiresAt: new Date("2026-08-31T20:10:00.000Z"),
+      now: NOW,
+      policy: reordered,
+      runnerRunId: RUNNER_RUN_ID,
+      tenant: TENANT,
+      userId: USER_ID,
+    },
+    {
+      randomBytes: () => Buffer.alloc(32, 0x44),
+      refreshAuthority: () =>
+        Promise.resolve({ connections: CONNECTIONS, generation: 9 }),
+      replaceCapability: async () => {
+        replacements += 1;
+        return { kind: "created" as const };
+      },
+    }
+  );
+
+  assert.equal(replacements, 1);
+});
+
+test("capability issuance aborts a blocked current-authority refresh before entropy or database replacement", {
+  timeout: 500,
+}, async () => {
+  let aborted = false;
+  let entropyCalls = 0;
+  let replacements = 0;
+  await assert.rejects(
+    issueGitHubStepCapability(
+      {
+        attemptId: ATTEMPT_ID,
+        capabilityId: CAPABILITY_ID,
+        deadlineAt: NOW.getTime() + 10,
+        expiresAt: new Date("2026-08-31T20:10:00.000Z"),
+        now: NOW,
+        policy: policy(),
+        runnerRunId: RUNNER_RUN_ID,
+        tenant: TENANT,
+        userId: USER_ID,
+      } as never,
+      {
+        clock: () => NOW.getTime(),
+        randomBytes: () => {
+          entropyCalls += 1;
+          return Buffer.alloc(32);
+        },
+        refreshAuthority: async (input: {
+          abortSignal?: AbortSignal;
+          deadlineAt?: number;
+        }) =>
+          await new Promise<void>((_resolve, reject) => {
+            input.abortSignal?.addEventListener(
+              "abort",
+              () => {
+                aborted = true;
+                reject(input.abortSignal?.reason);
+              },
+              { once: true }
+            );
+          }),
+        replaceCapability: async () => {
+          replacements += 1;
+          return { kind: "created" as const };
+        },
+      } as never
+    ),
+    /deadline|authority/i
+  );
+  assert.equal(aborted, true);
+  assert.equal(entropyCalls, 0);
+  assert.equal(replacements, 0);
 });
 
 function scripted(...responses: Record<string, unknown>[][]) {
@@ -357,10 +640,15 @@ function authorityRow(overrides: Record<string, unknown> = {}) {
     accountLogin: "OpenCoven",
     accountType: "Organization",
     actorUserId: USER_ID,
+    appIssuesPermission: "write",
+    appOrganizationProjectsPermission: "write",
+    appPullRequestsPermission: "write",
     connectionId: CONNECTIONS[0].id,
     currentAuthVersion: 7,
     currentConnectionGeneration: 9,
     databaseNow: NOW,
+    githubUserId: "112233",
+    githubUserLogin: "BunsDev",
     installationId: "456",
     persistedBrokerPolicy: policy(["github.issues.read"], []),
     repositoryId: "789",
@@ -377,6 +665,10 @@ function authorityRow(overrides: Record<string, unknown> = {}) {
     stepDeclaredCapabilities: ["github.issues.read"],
     stepStatus: "running",
     teamRunStatus: "running",
+    userPermissionCeiling: "write",
+    userPermissionCurrent: "write",
+    userProjectManagementCeiling: false,
+    userProjectManagementCurrent: false,
     ...overrides,
   };
 }
