@@ -27,7 +27,10 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { TEMPLATES } from "@/lib/agents/formations";
-import { visibleGitHubProjectCapabilityExpiry } from "@/lib/github/project-authority";
+import {
+  isGitHubProjectCapabilityCurrent,
+  visibleGitHubProjectCapabilityExpiry,
+} from "@/lib/github/project-authority";
 import { BUILT_IN_SKILLS, GITHUB_DELIVERY_TEAM } from "@/lib/teams/catalog";
 import { TeamApiError, TeamClient } from "@/lib/teams/client";
 import { Btn, Eyebrow, Spinner, StatusDot } from "./primitives";
@@ -229,6 +232,7 @@ export function TeamConsole({
   const [projectAuthorityExpiresAt, setProjectAuthorityExpiresAt] = useState<
     number | null
   >(null);
+  const [projectAuthorityCheckedAt, setProjectAuthorityCheckedAt] = useState(0);
   const [mission, setMission] = useState("");
   const [skillName, setSkillName] = useState("");
   const [skillDescription, setSkillDescription] = useState("");
@@ -249,17 +253,20 @@ export function TeamConsole({
   const teamSubmissionRef = useRef<SubmissionIdentity | null>(null);
   selectedRunIdRef.current = selectedRun?.id ?? null;
   selectedTeamIdRef.current = selectedTeamId;
+  const projectAuthorityCurrent = isGitHubProjectCapabilityCurrent(
+    projectAuthorityExpiresAt,
+    projectAuthorityCheckedAt
+  );
   const availableCapabilities = useMemo(
     () =>
-      projectAuthorityExpiresAt === null
-        ? BASE_CAPABILITIES
-        : [...BASE_CAPABILITIES, ...PROJECT_CAPABILITIES],
-    [projectAuthorityExpiresAt]
+      projectAuthorityCurrent
+        ? [...BASE_CAPABILITIES, ...PROJECT_CAPABILITIES]
+        : BASE_CAPABILITIES,
+    [projectAuthorityCurrent]
   );
 
   useEffect(() => {
     const controller = new AbortController();
-    let expiryTimer: ReturnType<typeof setTimeout> | undefined;
     fetch(`${BASE_PATH}/api/github/connection`, {
       cache: "no-store",
       credentials: "same-origin",
@@ -278,22 +285,15 @@ export function TeamConsole({
         );
       })
       .then((expiresAt) => {
-        if (controller.signal.aborted || expiresAt === null) {
+        if (controller.signal.aborted) {
+          return;
+        }
+        setProjectAuthorityCheckedAt(Date.now());
+        if (expiresAt === null) {
           setProjectAuthorityExpiresAt(null);
           return;
         }
         setProjectAuthorityExpiresAt(expiresAt.getTime());
-        expiryTimer = globalThis.setTimeout(
-          () => {
-            setProjectAuthorityExpiresAt(null);
-            setSkillCapabilities((current) =>
-              current.filter(
-                (capability) => !PROJECT_CAPABILITIES.includes(capability)
-              )
-            );
-          },
-          Math.max(0, expiresAt.getTime() - Date.now())
-        );
       })
       .catch(() => {
         if (!controller.signal.aborted) {
@@ -302,11 +302,39 @@ export function TeamConsole({
       });
     return () => {
       controller.abort();
-      if (expiryTimer !== undefined) {
-        globalThis.clearTimeout(expiryTimer);
-      }
     };
   }, []);
+
+  useEffect(() => {
+    if (projectAuthorityExpiresAt === null) {
+      return;
+    }
+    const clearExpiredAuthority = () => {
+      const now = Date.now();
+      setProjectAuthorityCheckedAt(now);
+      if (isGitHubProjectCapabilityCurrent(projectAuthorityExpiresAt, now)) {
+        return;
+      }
+      setProjectAuthorityExpiresAt(null);
+      setSkillCapabilities((current) =>
+        current.filter(
+          (capability) => !PROJECT_CAPABILITIES.includes(capability)
+        )
+      );
+    };
+    const expiryTimer = globalThis.setTimeout(
+      clearExpiredAuthority,
+      Math.max(0, projectAuthorityExpiresAt - Date.now())
+    );
+    globalThis.addEventListener("focus", clearExpiredAuthority);
+    document.addEventListener("visibilitychange", clearExpiredAuthority);
+    clearExpiredAuthority();
+    return () => {
+      globalThis.clearTimeout(expiryTimer);
+      globalThis.removeEventListener("focus", clearExpiredAuthority);
+      document.removeEventListener("visibilitychange", clearExpiredAuthority);
+    };
+  }, [projectAuthorityExpiresAt]);
 
   useEffect(() => {
     onBusyChange(busy);
@@ -569,11 +597,19 @@ export function TeamConsole({
   };
 
   const createSkill = async () => {
+    const currentCapabilities = isGitHubProjectCapabilityCurrent(
+      projectAuthorityExpiresAt,
+      Date.now()
+    )
+      ? skillCapabilities
+      : skillCapabilities.filter(
+          (capability) => !PROJECT_CAPABILITIES.includes(capability)
+        );
     const input = {
       description: skillDescription,
       instructions: skillInstructions,
       name: skillName,
-      requiredCapabilities: skillCapabilities,
+      requiredCapabilities: currentCapabilities,
     };
     const fingerprint = JSON.stringify(input);
     const submission =

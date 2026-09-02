@@ -4,6 +4,7 @@ import {
   currentGitHubProjectAuthorityExpiresAt,
   type GitHubProjectAuthorityProof,
   isCurrentGitHubProjectAuthority,
+  isGitHubProjectCapabilityCurrent,
   MAX_GITHUB_PROJECT_AUTHORITY_PROOF_LIFETIME_MS,
   visibleGitHubProjectCapabilityExpiry,
 } from "./project-authority";
@@ -122,4 +123,16 @@ test("UI Project capability exposure uses only current bounded server expiry", (
     ),
     null
   );
+  assert.equal(
+    isGitHubProjectCapabilityCurrent(
+      expiresAt.getTime(),
+      expiresAt.getTime() - 1
+    ),
+    true
+  );
+  assert.equal(
+    isGitHubProjectCapabilityCurrent(expiresAt.getTime(), expiresAt.getTime()),
+    false
+  );
+  assert.equal(isGitHubProjectCapabilityCurrent(null, NOW.getTime()), false);
 });

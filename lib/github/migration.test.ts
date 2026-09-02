@@ -8,11 +8,13 @@ const migrations = new URL("../db/migrations/", import.meta.url);
 const GATEWAY_MIGRATION = "0032_github_tool_gateway.sql";
 const GATEWAY_SNAPSHOT = "meta/0032_snapshot.json";
 const PROJECT_AUTHORITY_MIGRATION = "0035_spicy_hammerhead.sql";
+const PROJECT_AUTHORITY_TRIGGER_MIGRATION =
+  "0036_project_authority_trigger.sql";
 
 test("current main and the GitHub gateway form one migration lineage", async () => {
   const migrationNames = (await import("node:fs/promises")).readdir(migrations);
   const names = await migrationNames;
-  for (let index = 25; index <= 35; index += 1) {
+  for (let index = 25; index <= 36; index += 1) {
     const prefix = `${String(index).padStart(4, "0")}_`;
     assert.equal(
       names.filter((name) => name.startsWith(prefix) && name.endsWith(".sql"))
@@ -158,6 +160,65 @@ test("0035 persists bounded Project proof bindings and exact operation Project i
     /NEW\."projectAuthorityBound" = false[\s\S]*RAISE EXCEPTION/u
   );
   assert.match(migration, /project\.item\.field\.update/u);
+});
+
+test("0036 reconstructs exact runner policy authority from the applied 0035 shape", async () => {
+  const migration = await readFile(
+    new URL(PROJECT_AUTHORITY_TRIGGER_MIGRATION, migrations),
+    "utf8"
+  );
+
+  assert.match(
+    migration,
+    /pg_get_functiondef\(\s*'"RunnerRun_enforce_team_execution_permission"\(\)'::regprocedure/u
+  );
+  assert.match(
+    migration,
+    /"userProjectAuthorityAuthVersion" = "stepAuthVersion"/u
+  );
+  assert.match(
+    migration,
+    /"userProjectAuthorityConnectionGeneration" = COALESCE/u
+  );
+  assert.match(
+    migration,
+    /"userProjectAuthorityIssuedAt" <= clock_timestamp\(\)/u
+  );
+  assert.match(
+    migration,
+    /"userProjectAuthorityExpiresAt" > clock_timestamp\(\)/u
+  );
+  for (const field of [
+    "appContentsPermission",
+    "tenant",
+    "userProjectAuthorityAuthVersion",
+    "userProjectAuthorityConnectionGeneration",
+    "userProjectAuthorityExpiresAt",
+    "userProjectAuthorityIssuedAt",
+    "userProjectIds",
+  ]) {
+    assert.match(migration, new RegExp(`'${field}'`, "u"));
+  }
+  assert.match(
+    migration,
+    /NEW\."githubBrokerPolicy"->>'tenant' IS DISTINCT FROM NEW\."tenant"/u
+  );
+  assert.match(
+    migration,
+    /0036 could not locate the current Project authority branch/u
+  );
+  assert.match(
+    migration,
+    /0036 could not locate the broker repository projection/u
+  );
+  assert.match(
+    migration,
+    /0036 could not locate the broker policy key allowlist/u
+  );
+  assert.match(
+    migration,
+    /0036 could not locate the broker policy tenant check/u
+  );
 });
 
 test("0032 adds exact runner broker authority without rewriting old migrations", async () => {
