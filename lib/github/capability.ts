@@ -1017,8 +1017,16 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
                 WHERE "operation"."id" = ${input.id}
                   AND "operation"."version" = ${input.expectedVersion}
                   AND "operation"."status" = 'running'
-                  AND "operation"."providerDispatchPhase" = 'pre_send'
-                  AND "operation"."providerSentAt" IS NULL
+                  AND (
+                    (
+                      "operation"."providerDispatchPhase" = 'pre_send'
+                      AND "operation"."providerSentAt" IS NULL
+                    )
+                    OR (
+                      "operation"."providerDispatchPhase" = 'sent'
+                      AND "operation"."providerSentAt" IS NOT NULL
+                    )
+                  )
                   AND "operation"."writeIntentActive" = true
                   AND "operation"."executionLeaseExpiresAt" > clock_timestamp()
                   AND "operation"."connectionGeneration" =
@@ -1114,9 +1122,21 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
               )
               UPDATE "RunnerGitHubOperation" AS "operation"
               SET "providerDispatchPhase" = 'sent',
-                  "providerSentAt" = clock_timestamp(),
-                  "updatedAt" = clock_timestamp(),
-                  "version" = "version" + 1
+                  "providerSentAt" = CASE
+                    WHEN "operation"."providerDispatchPhase" = 'pre_send'
+                    THEN clock_timestamp()
+                    ELSE "operation"."providerSentAt"
+                  END,
+                  "updatedAt" = CASE
+                    WHEN "operation"."providerDispatchPhase" = 'pre_send'
+                    THEN clock_timestamp()
+                    ELSE "operation"."updatedAt"
+                  END,
+                  "version" = CASE
+                    WHEN "operation"."providerDispatchPhase" = 'pre_send'
+                    THEN "operation"."version" + 1
+                    ELSE "operation"."version"
+                  END
               FROM "authorized"
               WHERE "operation"."id" = "authorized"."id"
               RETURNING "operation".*`

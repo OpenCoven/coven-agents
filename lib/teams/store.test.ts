@@ -454,10 +454,16 @@ test("forward migration persists team authority, approval audit, and execution s
 });
 
 test("GitHub delivery migration enables contents authority and repository commits fail closed", async () => {
-  const migration = await readFile(
-    new URL("../db/migrations/0034_certain_veda.sql", import.meta.url),
-    "utf8"
-  );
+  const [gatewayMigration, migration] = await Promise.all([
+    readFile(
+      new URL("../db/migrations/0032_github_tool_gateway.sql", import.meta.url),
+      "utf8"
+    ),
+    readFile(
+      new URL("../db/migrations/0034_certain_veda.sql", import.meta.url),
+      "utf8"
+    ),
+  ]);
 
   assert.match(
     migration,
@@ -470,6 +476,22 @@ test("GitHub delivery migration enables contents authority and repository commit
   assert.match(
     migration,
     /WHEN "RunnerGitHubOperation"\."kind" = 'repository\.commit' THEN 'github\.contents\.write'/u
+  );
+  assert.match(
+    migration,
+    /RunnerRun_enforce_team_execution_permission[\s\S]*github\.contents\.%/u
+  );
+  assert.match(
+    migration,
+    /RunnerRun_enforce_team_execution_permission[\s\S]*'appContentsPermission'/u
+  );
+  assert.match(
+    gatewayMigration,
+    /"declared"\."value" LIKE 'github\.issues\.%'/u
+  );
+  assert.match(
+    gatewayMigration,
+    /'accountType', "connection"\."accountType",\s+'appIssuesPermission'/u
   );
 });
 

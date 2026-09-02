@@ -13,4 +13,50 @@ ALTER TABLE "RunnerGitHubOperation" ADD CONSTRAINT "RGHOp_binding_valid" CHECK (
 ALTER TABLE "RunnerGitHubOperation" ADD CONSTRAINT "RGHOp_capability_mapping_valid" CHECK ("RunnerGitHubOperation"."requiredCapability" = CASE WHEN "RunnerGitHubOperation"."kind" = 'repository.commit' THEN 'github.contents.write' WHEN "RunnerGitHubOperation"."kind" in ('issue.get','issue.search') THEN 'github.issues.read' WHEN "RunnerGitHubOperation"."kind" in ('issue.create','issue.comment') THEN 'github.issues.write' WHEN "RunnerGitHubOperation"."kind" = 'pull.get' THEN 'github.pull_requests.read' WHEN "RunnerGitHubOperation"."kind" in ('pull.create','pull.comment','pull.review') THEN 'github.pull_requests.write' WHEN "RunnerGitHubOperation"."kind" in ('project.item.add','project.item.field.update') THEN 'github.projects.write' ELSE '' END);--> statement-breakpoint
 ALTER TABLE "RunnerGitHubOperation" ADD CONSTRAINT "RGHOp_kind_valid" CHECK ("RunnerGitHubOperation"."kind" in ('repository.commit', 'issue.get', 'issue.search', 'issue.create', 'issue.comment', 'pull.get', 'pull.create', 'pull.comment', 'pull.review', 'project.item.add', 'project.item.field.update'));--> statement-breakpoint
 ALTER TABLE "RunnerSkill" ADD CONSTRAINT "RSkill_caps_valid" CHECK (jsonb_typeof("RunnerSkill"."requiredCapabilities") = 'array' and jsonb_array_length("RunnerSkill"."requiredCapabilities") <= 8 and "RunnerSkill"."requiredCapabilities" <@ '["workspace.read","workspace.write","github.contents.write","github.issues.read","github.issues.write","github.pull_requests.read","github.pull_requests.write","github.projects.read","github.projects.write"]'::jsonb);--> statement-breakpoint
-ALTER TABLE "RunnerTeamStep" ADD CONSTRAINT "RTStep_approvedCapabilities_valid" CHECK (jsonb_typeof("RunnerTeamStep"."approvedCapabilities") = 'array' and jsonb_array_length("RunnerTeamStep"."approvedCapabilities") <= 8 and "RunnerTeamStep"."approvedCapabilities" <@ '["github.contents.write","github.issues.read","github.issues.write","github.pull_requests.read","github.pull_requests.write","github.projects.read","github.projects.write"]'::jsonb);
+ALTER TABLE "RunnerTeamStep" ADD CONSTRAINT "RTStep_approvedCapabilities_valid" CHECK (jsonb_typeof("RunnerTeamStep"."approvedCapabilities") = 'array' and jsonb_array_length("RunnerTeamStep"."approvedCapabilities") <= 8 and "RunnerTeamStep"."approvedCapabilities" <@ '["github.contents.write","github.issues.read","github.issues.write","github.pull_requests.read","github.pull_requests.write","github.projects.read","github.projects.write"]'::jsonb);--> statement-breakpoint
+DO $migration$
+DECLARE
+  "currentDefinition" text;
+  "contentsDefinition" text;
+  "repositoryDefinition" text;
+BEGIN
+  SELECT pg_get_functiondef(
+    '"RunnerRun_enforce_team_execution_permission"()'::regprocedure
+  )
+  INTO "currentDefinition";
+
+  "contentsDefinition" := replace(
+    "currentDefinition",
+    '              (
+                "declared"."value" LIKE ''github.issues.%''',
+    '              (
+                "declared"."value" LIKE ''github.contents.%''
+                AND "declared"."value" LIKE ''%.write''
+                AND "authority"."appContentsPermission" = ''write''
+                AND "authority"."userPermissionCeiling" IN (''write'', ''maintain'', ''admin'')
+                AND "authority"."userPermissionCurrent" IN (''write'', ''maintain'', ''admin'')
+              )
+              OR (
+                "declared"."value" LIKE ''github.issues.%'''
+  );
+
+  IF "contentsDefinition" = "currentDefinition" THEN
+    RAISE EXCEPTION '0034 could not locate the GitHub issue authority branch';
+  END IF;
+
+  "repositoryDefinition" := replace(
+    "contentsDefinition",
+    '          ''accountType'', "connection"."accountType",
+          ''appIssuesPermission'', "connection"."appIssuesPermission",',
+    '          ''accountType'', "connection"."accountType",
+          ''appContentsPermission'', "connection"."appContentsPermission",
+          ''appIssuesPermission'', "connection"."appIssuesPermission",'
+  );
+
+  IF "repositoryDefinition" = "contentsDefinition" THEN
+    RAISE EXCEPTION '0034 could not locate the broker repository projection';
+  END IF;
+
+  EXECUTE "repositoryDefinition";
+END
+$migration$;

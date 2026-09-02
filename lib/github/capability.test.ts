@@ -1501,7 +1501,7 @@ test("a released pre-send operation can retry with the same operation id without
   assert.doesNotMatch(queryText(retry.statements[2]), /usedCallCount/u);
 });
 
-test("provider mutation authorization rechecks every live fence immediately before the write", async () => {
+test("provider mutation authorization rechecks every live fence before initial and final writes", async () => {
   const sent = operationRow({
     kind: "issue.comment",
     operationMarker:
@@ -1513,7 +1513,7 @@ test("provider mutation authorization rechecks every live fence immediately befo
   });
   const authorized = scripted([sent]);
   const authorization = await authorized.store.authorizeMutation(operator, {
-    expectedVersion: 0,
+    expectedVersion: 1,
     id: OPERATION_ROW_ID,
   });
   assert.equal(authorization.kind, "authorized");
@@ -1529,7 +1529,12 @@ test("provider mutation authorization rechecks every live fence immediately befo
   const query = queryText(authorized.statements[0]);
   assert.match(query, /UPDATE "RunnerGitHubOperation"/u);
   assert.match(query, /"providerDispatchPhase" = 'sent'/u);
-  assert.match(query, /"providerSentAt" = clock_timestamp\(\)/u);
+  assert.match(
+    query,
+    /"providerDispatchPhase" = 'pre_send'[\s\S]*OR[\s\S]*"providerDispatchPhase" = 'sent'/u
+  );
+  assert.match(query, /"providerSentAt" = CASE/u);
+  assert.match(query, /"version" = CASE/u);
   assert.match(
     query,
     /'github\.contents\.write'\s+AND "connection"\."appContentsPermission" = 'write'/u

@@ -530,7 +530,7 @@ test("repository.commit publishes one bounded branch commit through Git data", a
       repositoryIds: ["789"],
     },
   ]);
-  assert.equal(authorizations, 1);
+  assert.equal(authorizations, 2);
   assert.deepEqual(
     sequence.requests.map(({ method, url }) => [method, new URL(url).pathname]),
     [
@@ -592,6 +592,73 @@ test("repository.commit publishes one bounded branch commit through Git data", a
     resultNodeId: commitSha,
     resultUrl: `https://github.com/OpenCoven/coven-agents/commit/${commitSha}`,
   });
+});
+
+test("repository.commit rechecks authority before publishing the branch ref", async () => {
+  const marker =
+    "<!-- coven-github:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->";
+  const baseSha = "1".repeat(40);
+  const baseTreeSha = "2".repeat(40);
+  const blobSha = "3".repeat(40);
+  const treeSha = "4".repeat(40);
+  const commitSha = "5".repeat(40);
+  const operation = {
+    base: "main",
+    branch: "feat/familiar-delivery",
+    files: [
+      {
+        content: "export const delivered = true;\n",
+        operation: "upsert" as const,
+        path: "delivery.ts",
+      },
+    ],
+    kind: "repository.commit" as const,
+    message: "feat: deliver familiar changes",
+    owner: "OpenCoven",
+    repo: "coven-agents",
+  };
+  const sequence = sequenceProvider([
+    Response.json({ message: "Not Found" }, { status: 404 }),
+    Response.json({
+      object: { sha: baseSha, type: "commit" },
+      ref: "refs/heads/main",
+    }),
+    Response.json({ sha: baseSha, tree: { sha: baseTreeSha } }),
+    Response.json({ sha: baseTreeSha, tree: [], truncated: false }),
+    Response.json({ sha: blobSha }),
+    Response.json({ sha: treeSha }),
+    Response.json({
+      html_url: `https://github.com/OpenCoven/coven-agents/commit/${commitSha}`,
+      message: `${operation.message}\n\n${marker}`,
+      parents: [{ sha: baseSha }],
+      sha: commitSha,
+      tree: { sha: treeSha },
+    }),
+  ]);
+  let authorizations = 0;
+
+  await assert.rejects(
+    sequence.provider.execute({
+      authorizeMutation: () => {
+        authorizations += 1;
+        return Promise.resolve(authorizations === 1);
+      },
+      context: context(operation, marker),
+      mode: "execute",
+      operation,
+    }),
+    (error: unknown) =>
+      error instanceof GitHubToolProviderError &&
+      error.code === "github_operation_authority_changed"
+  );
+  assert.equal(authorizations, 2);
+  assert.equal(
+    sequence.requests.some(
+      ({ method, url }) =>
+        method === "POST" && new URL(url).pathname.endsWith("/git/refs")
+    ),
+    false
+  );
 });
 
 test("repository.commit recovers only the exact marked branch tip", async () => {
