@@ -8,6 +8,7 @@ const GITHUB_API_ORIGIN = "https://api.github.com";
 const GITHUB_OAUTH_ORIGIN = "https://github.com";
 const GITHUB_API_VERSION = "2022-11-28";
 const DEFAULT_TIMEOUT_MS = 5000;
+const DEFAULT_EXCHANGE_OBSERVATION_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_RESPONSE_BYTES = 1024 * 1024;
 const DEFAULT_MAX_PAGES = 10;
 const DEFAULT_MAX_INSTALLATIONS = 1000;
@@ -57,6 +58,7 @@ export function createGitHubUserAuthorizationClient(
     appSlug: string;
     clientId: string;
     clientSecret: KeyObject;
+    exchangeObservationTimeoutMs?: number;
     fetch?: FetchLike;
     maxInstallations?: number;
     maxPages?: number;
@@ -97,6 +99,16 @@ export function createGitHubUserAuthorizationClient(
     input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     "GitHub user authorization timeout"
   );
+  const exchangeObservationTimeoutMs = positiveInteger(
+    input.exchangeObservationTimeoutMs ??
+      DEFAULT_EXCHANGE_OBSERVATION_TIMEOUT_MS,
+    "GitHub OAuth exchange observation timeout"
+  );
+  if (exchangeObservationTimeoutMs <= timeoutMs) {
+    throw new Error(
+      "GitHub OAuth exchange observation timeout must exceed the request timeout."
+    );
+  }
 
   function requestJson(
     url: string,
@@ -134,12 +146,20 @@ export function createGitHubUserAuthorizationClient(
     consume: (response: Response) => Promise<T>
   ): Promise<Readonly<{ timedOut: boolean; value: T }>> {
     const controller = new AbortController();
+    const observeLateExchange = stage === "exchange";
     let timedOut = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    timer = globalThis.setTimeout(() => {
+    const timeoutTimer = globalThis.setTimeout(() => {
       timedOut = true;
-      controller.abort();
+      if (!observeLateExchange) {
+        controller.abort();
+      }
     }, timeoutMs);
+    const observationTimer = observeLateExchange
+      ? globalThis.setTimeout(
+          () => controller.abort(),
+          exchangeObservationTimeoutMs
+        )
+      : undefined;
     try {
       let response: Response;
       try {
@@ -168,8 +188,9 @@ export function createGitHubUserAuthorizationClient(
         throw unavailableError();
       }
     } finally {
-      if (timer !== undefined) {
-        globalThis.clearTimeout(timer);
+      globalThis.clearTimeout(timeoutTimer);
+      if (observationTimer !== undefined) {
+        globalThis.clearTimeout(observationTimer);
       }
     }
   }

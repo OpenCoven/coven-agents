@@ -426,7 +426,10 @@ test("OAuth code exchange timeout, status errors, oversize, and malformed JSON f
     code: string;
   }> = [
     {
-      client: clientFor(abortableTimeoutFetch(), { timeoutMs: 5 }),
+      client: clientFor(abortableTimeoutFetch(), {
+        exchangeObservationTimeoutMs: 20,
+        timeoutMs: 5,
+      }),
       code: "github_provider_timeout",
     },
     {
@@ -610,6 +613,7 @@ test("a late exchange response is observed and its token pair is revoked", async
   const refreshToken = `ghr_${"B".repeat(32)}`;
   const requests: CapturedRequest[] = [];
   let releaseExchange!: () => void;
+  const exchangeSignal: { current: AbortSignal | null } = { current: null };
   const exchangeReleased = new Promise<void>((resolve) => {
     releaseExchange = resolve;
   });
@@ -617,7 +621,8 @@ test("a late exchange response is observed and its token pair is revoked", async
     async (input, init = {}) => {
       requests.push(capturedRequest(input, init));
       if (input === "https://github.com/login/oauth/access_token") {
-        await exchangeReleased;
+        exchangeSignal.current = init.signal ?? null;
+        await Promise.race([exchangeReleased, rejectWhenAborted(init)]);
         return jsonResponse(tokenBody(USER_TOKEN, refreshToken));
       }
       if (input === REFRESH_REVOCATION_URL) {
@@ -628,7 +633,7 @@ test("a late exchange response is observed and its token pair is revoked", async
       }
       assert.fail(`Unexpected request to ${input}`);
     },
-    { timeoutMs: 5 }
+    { exchangeObservationTimeoutMs: 50, timeoutMs: 5 }
   );
 
   const pending = client.proveInstallationAccess(proofInput());
@@ -643,6 +648,7 @@ test("a late exchange response is observed and its token pair is revoked", async
   );
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(settled, false);
+  assert.equal(exchangeSignal.current?.aborted, false);
 
   releaseExchange();
   await assert.rejects(pending, providerError("github_provider_timeout", true));
@@ -910,6 +916,7 @@ function clientFor(
     maxInstallations: number;
     maxPages: number;
     maxResponseBytes: number;
+    exchangeObservationTimeoutMs: number;
     timeoutMs: number;
   }> = {}
 ) {
@@ -918,6 +925,7 @@ function clientFor(
     appSlug: APP_SLUG,
     clientId: CLIENT_ID,
     clientSecret: createSecretKey(Buffer.from(CLIENT_SECRET_VALUE, "utf8")),
+    exchangeObservationTimeoutMs: overrides.exchangeObservationTimeoutMs,
     fetch: fetchImpl,
     maxInstallations: overrides.maxInstallations,
     maxPages: overrides.maxPages,
@@ -1185,7 +1193,11 @@ function abortableTimeoutFetch(): FetchLike {
 }
 
 function abortable(init: RequestInit): Promise<Response> {
-  return new Promise<Response>((_resolve, reject) => {
+  return rejectWhenAborted(init);
+}
+
+function rejectWhenAborted(init: RequestInit): Promise<never> {
+  return new Promise<never>((_resolve, reject) => {
     init.signal?.addEventListener(
       "abort",
       () => reject(new DOMException("aborted", "AbortError")),
