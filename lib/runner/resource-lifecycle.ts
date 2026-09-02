@@ -10,9 +10,41 @@ import type {
 export const DEFAULT_RUNNER_RESOURCE_INVENTORY_LIMIT = 50;
 export const MAX_RUNNER_RESOURCE_INVENTORY_LIMIT = 100;
 
+export type RunnerResourceConfigurationDriftField =
+  | "autoArchiveInterval"
+  | "autoDeleteInterval"
+  | "autoDestroyAt"
+  | "autoPauseInterval"
+  | "autoStopInterval"
+  | "cpu"
+  | "disk"
+  | "domainAllowList"
+  | "labels"
+  | "linkedSandbox"
+  | "memory"
+  | "name"
+  | "public"
+  | "snapshot"
+  | "target"
+  | "volumes"
+  | "warmPool";
+
 export type RunnerResourceInventoryResult =
   | Readonly<{
       appOwnedMappings: number;
+      ambiguityReasons: Readonly<{
+        configurationDrift: number;
+        databaseBounded: number;
+        duplicateIdentity: number;
+        duplicateProviderId: number;
+        multipleMappings: number;
+        pendingLifecycle: number;
+        unresolved: number;
+      }>;
+      configurationDrift: readonly Readonly<{
+        count: number;
+        field: RunnerResourceConfigurationDriftField;
+      }>[];
       databaseCapped: boolean;
       examined: number;
       kind: "available";

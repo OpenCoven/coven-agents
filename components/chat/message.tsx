@@ -3,6 +3,10 @@ import type { UseChatHelpers } from "@ai-sdk/react";
 import { useCallback } from "react";
 import { BrandMark } from "@/components/brand/brand-mark";
 import type { Vote } from "@/lib/db/schema";
+import {
+  reasoningActivityStatus,
+  reasoningCardActivities,
+} from "@/lib/reasoning-card";
 import type { ChatMessage } from "@/lib/types";
 import { cn, sanitizeText } from "@/lib/utils";
 import { MessageContent, MessageResponse } from "../ai-elements/message";
@@ -141,32 +145,22 @@ const PurePreviewMessage = ({
     </div>
   );
 
-  const mergedReasoning = message.parts?.reduce(
-    (acc, part) => {
-      if (part.type === "reasoning" && part.text?.trim().length > 0) {
-        return {
-          isStreaming: "state" in part ? part.state === "streaming" : false,
-          rendered: false,
-          text: acc.text ? `${acc.text}\n\n${part.text}` : part.text,
-        };
-      }
-      return acc;
-    },
-    { isStreaming: false, rendered: false, text: "" }
-  ) ?? { isStreaming: false, rendered: false, text: "" };
+  const reasoningActivities = reasoningCardActivities(message.parts ?? []);
+  const reasoningStatus = reasoningActivityStatus(reasoningActivities);
+  const reasoningState = { ...reasoningStatus, rendered: false };
 
   const parts = message.parts?.map((part, index) => {
     const { type } = part;
     const key = `message-${message.id}-part-${index}`;
 
     if (type === "reasoning") {
-      if (!mergedReasoning.rendered && mergedReasoning.text) {
-        mergedReasoning.rendered = true;
+      if (!reasoningState.rendered && reasoningState.present) {
+        reasoningState.rendered = true;
         return (
           <MessageReasoning
-            isLoading={isLoading || mergedReasoning.isStreaming}
+            activities={reasoningActivities}
+            isLoading={isLoading || reasoningState.isStreaming}
             key={key}
-            reasoning={mergedReasoning.text}
           />
         );
       }

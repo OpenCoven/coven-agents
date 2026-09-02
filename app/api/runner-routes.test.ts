@@ -114,8 +114,18 @@ function service(overrides: Partial<RunnerService> = {}): RunnerService {
     getAgent: async () => ({ agent: definition(), kind: "found" }),
     getRun: async () => ({ kind: "found", run: run() }),
     inventoryResources: async () => ({
+      ambiguityReasons: {
+        configurationDrift: 0,
+        databaseBounded: 0,
+        duplicateIdentity: 0,
+        duplicateProviderId: 0,
+        multipleMappings: 0,
+        pendingLifecycle: 0,
+        unresolved: 0,
+      },
       ambiguous: 0,
       appOwnedMappings: 0,
+      configurationDrift: [],
       databaseCapped: false,
       examined: 0,
       kind: "available",
@@ -666,8 +676,18 @@ async function executeFixture(): Promise<void> {
   assert.equal(inventoryResponse.status, 200);
   assert.equal(inventoryResponse.headers.get("cache-control"), "no-store");
   assert.deepEqual(await inventoryResponse.json(), {
+    ambiguityReasons: {
+      configurationDrift: 0,
+      databaseBounded: 0,
+      duplicateIdentity: 0,
+      duplicateProviderId: 0,
+      multipleMappings: 0,
+      pendingLifecycle: 0,
+      unresolved: 0,
+    },
     ambiguous: 0,
     appOwnedMappings: 0,
+    configurationDrift: [],
     databaseCapped: false,
     examined: 0,
     matched: 0,

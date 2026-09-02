@@ -393,10 +393,12 @@ for removal of the superseded provider.
   it uses the existing reconciliation credentials, lists Daytona only by the
   application label, then hydrates only an exact durable provider mapping. It
   compares observations to bounded durable mappings and returns versioned
-  aggregate matched, ambiguous, unowned, and lifecycle-state counts. It does
-  not expose resource identifiers, names, labels, tenant digests, messages, or
-  credentials. An observation with no exact durable mapping, duplicate identity
-  label, pending ownership, or policy drift is not adopted or deleted.
+  aggregate matched, ambiguous, unowned, and lifecycle-state counts. Ambiguous
+  observations are further classified into exclusive reason counts, and exact
+  mapped policy drift is reported only as fixed field-name counts. It does not
+  expose resource identifiers, names, label values, tenant digests, messages,
+  or credentials. An observation with no exact durable mapping, duplicate
+  identity label, pending ownership, or policy drift is not adopted or deleted.
 - The same repository policy explicitly requests 2 CPU cores, 4 GiB memory,
   20 GiB disk, 15-minute auto-stop, and seven-day auto-archive defaults,
   bounded by 4 cores, 8 GiB, 40 GiB, 60 minutes, and 30 days respectively.

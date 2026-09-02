@@ -2,6 +2,7 @@ import "server-only";
 
 import { SandboxState } from "@daytona/sdk";
 import {
+  type RunnerResourceConfigurationDriftField,
   type RunnerResourceInventoryResult,
   runnerResourceInventoryLimit,
 } from "../resource-lifecycle";
@@ -16,6 +17,25 @@ import {
 
 const COVEN_AGENTS_LABEL = Object.freeze({ app: "coven-agents" });
 const INVENTORY_PROVIDER_CONCURRENCY = 4;
+const CONFIGURATION_DRIFT_FIELD_ORDER = [
+  "name",
+  "labels",
+  "snapshot",
+  "target",
+  "cpu",
+  "memory",
+  "disk",
+  "autoStopInterval",
+  "autoArchiveInterval",
+  "autoDeleteInterval",
+  "autoDestroyAt",
+  "autoPauseInterval",
+  "domainAllowList",
+  "public",
+  "volumes",
+  "warmPool",
+  "linkedSandbox",
+] as const satisfies readonly RunnerResourceConfigurationDriftField[];
 
 export type DaytonaSandboxInventoryService = Readonly<{
   get: (sandboxId: string) => Promise<DaytonaSandboxInventoryItem>;
@@ -64,9 +84,26 @@ type SandboxStateCounts = Extract<
 type InventoryMapping = Awaited<
   ReturnType<RunnerStore["scanDaytonaSandboxInventory"]>
 >[number];
+type InventoryAvailable = Extract<
+  RunnerResourceInventoryResult,
+  { kind: "available" }
+>;
+type AmbiguityReasons = InventoryAvailable["ambiguityReasons"];
 
 function emptyStates(): SandboxStateCounts {
   return { active: 0, archived: 0, other: 0, stopped: 0 };
+}
+
+function emptyAmbiguityReasons(): AmbiguityReasons {
+  return {
+    configurationDrift: 0,
+    databaseBounded: 0,
+    duplicateIdentity: 0,
+    duplicateProviderId: 0,
+    multipleMappings: 0,
+    pendingLifecycle: 0,
+    unresolved: 0,
+  };
 }
 
 function recordState(
@@ -105,30 +142,50 @@ function expectedLabels(
   };
 }
 
-function matchesConfiguredSandbox(
+function configurationDriftFields(
   sandbox: DaytonaSandboxInventoryItem,
   agent: InventoryMapping,
   configuration: DaytonaSandboxConfiguration
-): boolean {
-  return (
-    sandbox.name === daytonaSandboxName(agent.tenant, agent.id) &&
-    sameLabels(sandbox.labels, expectedLabels(agent)) &&
-    sandbox.snapshot === configuration.snapshotName &&
-    sandbox.target === configuration.target &&
-    sandbox.cpu === configuration.resources.cpu &&
-    sandbox.memory === configuration.resources.memory &&
-    sandbox.disk === configuration.resources.disk &&
-    sandbox.autoStopInterval === configuration.autoStopInterval &&
-    sandbox.autoArchiveInterval === configuration.autoArchiveInterval &&
-    sandbox.autoDeleteInterval === configuration.autoDeleteInterval &&
-    sandbox.autoDestroyAt === undefined &&
-    sandbox.autoPauseInterval === 0 &&
-    sandbox.domainAllowList === configuration.domainAllowList &&
-    sandbox.public === false &&
-    (sandbox.volumes?.length ?? 0) === 0 &&
-    sandbox.warmPoolId === undefined &&
-    sandbox.linkedSandboxId === undefined
+): RunnerResourceConfigurationDriftField[] {
+  const fields: RunnerResourceConfigurationDriftField[] = [];
+  const record = (
+    field: RunnerResourceConfigurationDriftField,
+    matches: boolean
+  ) => {
+    if (!matches) {
+      fields.push(field);
+    }
+  };
+  record("name", sandbox.name === daytonaSandboxName(agent.tenant, agent.id));
+  record("labels", sameLabels(sandbox.labels, expectedLabels(agent)));
+  record("snapshot", sandbox.snapshot === configuration.snapshotName);
+  record("target", sandbox.target === configuration.target);
+  record("cpu", sandbox.cpu === configuration.resources.cpu);
+  record("memory", sandbox.memory === configuration.resources.memory);
+  record("disk", sandbox.disk === configuration.resources.disk);
+  record(
+    "autoStopInterval",
+    sandbox.autoStopInterval === configuration.autoStopInterval
   );
+  record(
+    "autoArchiveInterval",
+    sandbox.autoArchiveInterval === configuration.autoArchiveInterval
+  );
+  record(
+    "autoDeleteInterval",
+    sandbox.autoDeleteInterval === configuration.autoDeleteInterval
+  );
+  record("autoDestroyAt", sandbox.autoDestroyAt === undefined);
+  record("autoPauseInterval", sandbox.autoPauseInterval === 0);
+  record(
+    "domainAllowList",
+    sandbox.domainAllowList === configuration.domainAllowList
+  );
+  record("public", sandbox.public === false);
+  record("volumes", (sandbox.volumes?.length ?? 0) === 0);
+  record("warmPool", sandbox.warmPoolId === undefined);
+  record("linkedSandbox", sandbox.linkedSandboxId === undefined);
+  return fields;
 }
 
 function expectedLifecycleCandidate(
@@ -254,6 +311,11 @@ export async function inventoryDaytonaSandboxes(
 
   let states = emptyStates();
   let ambiguous = 0;
+  let ambiguityReasons = emptyAmbiguityReasons();
+  const configurationDriftCounts = new Map<
+    RunnerResourceConfigurationDriftField,
+    number
+  >();
   let matched = 0;
   let unowned = 0;
   const databaseCapped = mappings.length === limit;
@@ -262,38 +324,70 @@ export async function inventoryDaytonaSandboxes(
     const mappingsForProviderId = mappingsByProviderId.get(sandbox.id) ?? [];
     const duplicateLabel = (labelCounts.get(sandbox.labels.agentId) ?? 0) > 1;
     const duplicateProviderId = (providerIdCounts.get(sandbox.id) ?? 0) > 1;
-    if (mappingsForProviderId.length === 1 && !duplicateLabel) {
+    if (
+      mappingsForProviderId.length === 1 &&
+      !duplicateLabel &&
+      !duplicateProviderId
+    ) {
       const resolved = hydratedByProviderId.get(sandbox.id);
-      if (
-        !duplicateProviderId &&
-        resolved &&
-        matchesConfiguredSandbox(
+      if (resolved) {
+        const driftFields = configurationDriftFields(
           resolved,
           mappingsForProviderId[0],
           dependencies.configuration
-        )
-      ) {
-        matched += 1;
+        );
+        if (driftFields.length === 0) {
+          matched += 1;
+          continue;
+        }
+        ambiguityReasons = {
+          ...ambiguityReasons,
+          configurationDrift: ambiguityReasons.configurationDrift + 1,
+        };
+        for (const field of driftFields) {
+          configurationDriftCounts.set(
+            field,
+            (configurationDriftCounts.get(field) ?? 0) + 1
+          );
+        }
+        ambiguous += 1;
         continue;
       }
     }
-    if (
-      mappingsForProviderId.length > 0 ||
-      duplicateLabel ||
-      duplicateProviderId ||
-      expectedLifecycleCandidate(sandbox, candidatesByName) ||
-      databaseCapped
-    ) {
-      ambiguous += 1;
-      continue;
+    let reason: keyof AmbiguityReasons | undefined;
+    if (duplicateProviderId) {
+      reason = "duplicateProviderId";
+    } else if (duplicateLabel) {
+      reason = "duplicateIdentity";
+    } else if (mappingsForProviderId.length > 1) {
+      reason = "multipleMappings";
+    } else if (mappingsForProviderId.length === 1) {
+      reason = "unresolved";
+    } else if (expectedLifecycleCandidate(sandbox, candidatesByName)) {
+      reason = "pendingLifecycle";
+    } else if (databaseCapped) {
+      reason = "databaseBounded";
     }
-    unowned += 1;
+    if (reason) {
+      ambiguityReasons = {
+        ...ambiguityReasons,
+        [reason]: ambiguityReasons[reason] + 1,
+      };
+      ambiguous += 1;
+    } else {
+      unowned += 1;
+    }
   }
 
   const providerCapped = sandboxes.length === limit;
   return {
+    ambiguityReasons,
     ambiguous,
     appOwnedMappings: mappings.length,
+    configurationDrift: CONFIGURATION_DRIFT_FIELD_ORDER.flatMap((field) => {
+      const count = configurationDriftCounts.get(field);
+      return count ? [{ count, field }] : [];
+    }),
     databaseCapped,
     examined: sandboxes.length,
     kind: "available",
