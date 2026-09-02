@@ -57,8 +57,45 @@ const diagnosticResponseSchema = z
   .strict();
 const resourceInventoryResponseSchema = z
   .object({
+    ambiguityReasons: z
+      .object({
+        configurationDrift: z.number().int().nonnegative(),
+        databaseBounded: z.number().int().nonnegative(),
+        duplicateIdentity: z.number().int().nonnegative(),
+        duplicateProviderId: z.number().int().nonnegative(),
+        multipleMappings: z.number().int().nonnegative(),
+        pendingLifecycle: z.number().int().nonnegative(),
+        unresolved: z.number().int().nonnegative(),
+      })
+      .strict(),
     ambiguous: z.number().int().nonnegative(),
     appOwnedMappings: z.number().int().nonnegative(),
+    configurationDrift: z.array(
+      z
+        .object({
+          count: z.number().int().positive(),
+          field: z.enum([
+            "autoArchiveInterval",
+            "autoDeleteInterval",
+            "autoDestroyAt",
+            "autoPauseInterval",
+            "autoStopInterval",
+            "cpu",
+            "disk",
+            "domainAllowList",
+            "labels",
+            "linkedSandbox",
+            "memory",
+            "name",
+            "public",
+            "snapshot",
+            "target",
+            "volumes",
+            "warmPool",
+          ]),
+        })
+        .strict()
+    ),
     databaseCapped: z.boolean(),
     examined: z.number().int().nonnegative(),
     matched: z.number().int().nonnegative(),
