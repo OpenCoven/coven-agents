@@ -19,7 +19,6 @@ import type {
   RunnerReconciliationExecutionResult,
   RunnerReconciliationResult,
 } from "./attempt-reconcile";
-import { COPILOT_CLI_VERSION } from "./copilot-version";
 import type { RunnerResourceOperationObservation } from "./resource-observability";
 import type { RunnerService } from "./service";
 import type { RunnerStore } from "./store";
@@ -413,11 +412,16 @@ function nextDispatchLease(leaseMilliseconds: number): Readonly<{
   };
 }
 
+/**
+ * The image installs exactly the supported harnesses, at exactly their
+ * registry pins, so discovery reports the same pin rather than a separately
+ * maintained constant that could disagree with what was baked in.
+ */
 export function registryHarnesses(): readonly HarnessStatus[] {
   return HARNESS_SPECS.map((spec) =>
     harnessStatus(spec, {
-      installed: spec.id === "copilot",
-      version: spec.id === "copilot" ? COPILOT_CLI_VERSION : null,
+      installed: spec.supported,
+      version: spec.supported ? spec.installVersion : null,
     })
   );
 }

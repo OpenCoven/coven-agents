@@ -1,0 +1,186 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-09-01",
+  "deployment": {
+    "id": "dpl_F4EXbTYZTvscUjrBUPZYjjSuDWB1",
+    "sourceCommit": "a2c11ff408caf8f97af8dbbe37903a13e928f255",
+    "sourceTree": "46df1be994b882c19fbcedd0bdecbba9c76ff299",
+    "target": "production",
+    "evidenceClass": "production-safe",
+    "staticGenerationCount": 42
+  },
+  "checks": {
+    "health": {
+      "method": "GET",
+      "route": "/api/health",
+      "status": 200,
+      "apiVersion": "1.0",
+      "mode": "cloud",
+      "minimumClientVersion": "1.0.0",
+      "capabilities": [
+        "agent-profiles",
+        "async-runs",
+        "idempotent-runs",
+        "run-events",
+        "run-cancel",
+        "command-evidence",
+        "file-evidence"
+      ]
+    },
+    "closedBetaRefusal": {
+      "method": "GET",
+      "route": "/agents",
+      "status": 307,
+      "location": "/login?beta=1"
+    },
+    "sandboxDiagnostic": {
+      "method": "POST",
+      "route": "/api/diagnostics/sandbox",
+      "status": 200,
+      "ok": true,
+      "exitCode": 0,
+      "output": "coven-agents"
+    },
+    "stripeReconciliation": {
+      "method": "GET",
+      "route": "/api/internal/stripe-reconcile",
+      "status": 200,
+      "execution": "executed",
+      "scanned": 0,
+      "applied": 0,
+      "unchanged": 0,
+      "conflicts": 0,
+      "deferred": 0,
+      "failures": 0
+    },
+    "runnerReconciliation": [
+      {
+        "sequence": 1,
+        "method": "POST",
+        "route": "/api/internal/runner-reconcile",
+        "status": 200,
+        "result": {
+          "adopted": 0,
+          "deferred": 0,
+          "dispatched": 0,
+          "expiredScanned": 0,
+          "failures": 0,
+          "logEvents": 0,
+          "requeued": 0,
+          "sandboxRecovered": 0,
+          "terminalCleaned": 0,
+          "terminalized": 0,
+          "terminalLeaseCleaned": 0,
+          "execution": "executed"
+        }
+      },
+      {
+        "sequence": 2,
+        "method": "POST",
+        "route": "/api/internal/runner-reconcile",
+        "status": 200,
+        "result": {
+          "adopted": 0,
+          "deferred": 0,
+          "dispatched": 0,
+          "expiredScanned": 0,
+          "failures": 0,
+          "logEvents": 0,
+          "requeued": 0,
+          "sandboxRecovered": 0,
+          "terminalCleaned": 0,
+          "terminalized": 0,
+          "terminalLeaseCleaned": 0,
+          "execution": "executed"
+        }
+      }
+    ],
+    "resourceInventory": {
+      "method": "GET",
+      "route": "/api/internal/runner-resource-inventory",
+      "status": 200,
+      "nonDestructive": true,
+      "before": {
+        "version": 1,
+        "status": "complete",
+        "appOwnedMappings": 4,
+        "examined": 4,
+        "matched": 0,
+        "ambiguous": 4,
+        "unowned": 0,
+        "providerCapped": false,
+        "databaseCapped": false,
+        "states": {
+          "active": 0,
+          "stopped": 4,
+          "archived": 0,
+          "other": 0
+        }
+      },
+      "after": {
+        "version": 1,
+        "status": "complete",
+        "appOwnedMappings": 4,
+        "examined": 4,
+        "matched": 0,
+        "ambiguous": 4,
+        "unowned": 0,
+        "providerCapped": false,
+        "databaseCapped": false,
+        "states": {
+          "active": 0,
+          "stopped": 4,
+          "archived": 0,
+          "other": 0
+        }
+      }
+    },
+    "credentialIsolation": [
+      {
+        "attemptedCredential": "diagnostic",
+        "intendedCredential": "scheduled-reconciliation",
+        "method": "GET",
+        "route": "/api/internal/runner-resource-inventory",
+        "status": 401,
+        "outcome": "unauthorized",
+        "requestId": "8069c025-0add-454a-9b5e-4f5ccdc9a23b",
+        "retryable": false
+      },
+      {
+        "attemptedCredential": "manual-reconciliation",
+        "intendedCredential": "diagnostic",
+        "method": "POST",
+        "route": "/api/diagnostics/sandbox",
+        "status": 401,
+        "outcome": "unauthorized",
+        "requestId": "2dd79a06-62a7-4396-86e6-00971899024e",
+        "retryable": false
+      },
+      {
+        "attemptedCredential": "scheduled-reconciliation",
+        "intendedCredential": "manual-reconciliation",
+        "method": "POST",
+        "route": "/api/internal/runner-reconcile",
+        "status": 401,
+        "outcome": "unauthorized",
+        "requestId": "14389c8a-5db2-4c96-a784-e7b8f4985808",
+        "retryable": false
+      }
+    ]
+  },
+  "cleanup": {
+    "defaultAliasDeploymentId": "dpl_F4EXbTYZTvscUjrBUPZYjjSuDWB1",
+    "productionAdminPlaceholderRestored": true,
+    "temporarySubscriberDeploymentsRemoved": 3
+  },
+  "evidenceFlags": {
+    "diagnosticLifecycleCertified": true,
+    "subscriberLifecycleCertified": false,
+    "persistentSandboxLifecycleCertified": false,
+    "resourceDispositionCertified": false,
+    "stripeCheckoutWebhookFailureRetryCertified": false,
+    "observationWindowCompleted": false,
+    "approvalsCompleted": false
+  },
+  "containsCredentialMaterial": false
+}

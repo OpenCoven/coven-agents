@@ -14,7 +14,7 @@ test("the current-state snapshot covers merged product and planning surfaces", (
   assert.match(currentState, /Snapshot date: 2026-09-01/u);
   assert.match(
     currentState,
-    /Application baseline: `4bf89dc98667efa1c46b5131e10d4b14bf5f86c3`/u
+    /Application baseline: `a2c11ff408caf8f97af8dbbe37903a13e928f255`/u
   );
 
   for (const evidence of [
@@ -55,7 +55,7 @@ test("the verification matrix records the newly verified repository boundaries",
   assert.match(matrix, /as of 2026-09-01/u);
   assert.match(
     matrix,
-    /application baseline `4bf89dc98667efa1c46b5131e10d4b14bf5f86c3`/u
+    /application baseline `a2c11ff408caf8f97af8dbbe37903a13e928f255`/u
   );
   assert.match(
     matrix,
@@ -187,6 +187,299 @@ test("the cutover attestation matches the exact preview receipt", () => {
     .split("\n")
     .filter((line) => line.startsWith("| `/api/"));
   assert.deepEqual(attestationRows, expectedRows);
+});
+
+test("the cutover attestation matches the production configuration receipt", () => {
+  const attestation = read("docs/operations/daytona-cutover-attestation.md");
+  const receipt = JSON.parse(
+    read("docs/operations/p0-production-config-receipt-2026-09-01.json")
+  );
+
+  assert.deepEqual(receipt, {
+    capturedAt: "2026-09-01",
+    checks: {
+      closedBetaRefusal: {
+        location: "/login?beta=1",
+        method: "GET",
+        route: "/agents",
+        status: 307,
+      },
+      credentialIsolation: [
+        {
+          attemptedCredential: "diagnostic",
+          intendedCredential: "scheduled-reconciliation",
+          method: "GET",
+          outcome: "unauthorized",
+          requestId: "8069c025-0add-454a-9b5e-4f5ccdc9a23b",
+          retryable: false,
+          route: "/api/internal/runner-resource-inventory",
+          status: 401,
+        },
+        {
+          attemptedCredential: "manual-reconciliation",
+          intendedCredential: "diagnostic",
+          method: "POST",
+          outcome: "unauthorized",
+          requestId: "2dd79a06-62a7-4396-86e6-00971899024e",
+          retryable: false,
+          route: "/api/diagnostics/sandbox",
+          status: 401,
+        },
+        {
+          attemptedCredential: "scheduled-reconciliation",
+          intendedCredential: "manual-reconciliation",
+          method: "POST",
+          outcome: "unauthorized",
+          requestId: "14389c8a-5db2-4c96-a784-e7b8f4985808",
+          retryable: false,
+          route: "/api/internal/runner-reconcile",
+          status: 401,
+        },
+      ],
+      health: {
+        apiVersion: "1.0",
+        capabilities: [
+          "agent-profiles",
+          "async-runs",
+          "idempotent-runs",
+          "run-events",
+          "run-cancel",
+          "command-evidence",
+          "file-evidence",
+        ],
+        method: "GET",
+        minimumClientVersion: "1.0.0",
+        mode: "cloud",
+        route: "/api/health",
+        status: 200,
+      },
+      resourceInventory: {
+        after: {
+          ambiguous: 4,
+          appOwnedMappings: 4,
+          databaseCapped: false,
+          examined: 4,
+          matched: 0,
+          providerCapped: false,
+          states: {
+            active: 0,
+            archived: 0,
+            other: 0,
+            stopped: 4,
+          },
+          status: "complete",
+          unowned: 0,
+          version: 1,
+        },
+        before: {
+          ambiguous: 4,
+          appOwnedMappings: 4,
+          databaseCapped: false,
+          examined: 4,
+          matched: 0,
+          providerCapped: false,
+          states: {
+            active: 0,
+            archived: 0,
+            other: 0,
+            stopped: 4,
+          },
+          status: "complete",
+          unowned: 0,
+          version: 1,
+        },
+        method: "GET",
+        nonDestructive: true,
+        route: "/api/internal/runner-resource-inventory",
+        status: 200,
+      },
+      runnerReconciliation: [
+        {
+          method: "POST",
+          result: {
+            adopted: 0,
+            deferred: 0,
+            dispatched: 0,
+            execution: "executed",
+            expiredScanned: 0,
+            failures: 0,
+            logEvents: 0,
+            requeued: 0,
+            sandboxRecovered: 0,
+            terminalCleaned: 0,
+            terminalized: 0,
+            terminalLeaseCleaned: 0,
+          },
+          route: "/api/internal/runner-reconcile",
+          sequence: 1,
+          status: 200,
+        },
+        {
+          method: "POST",
+          result: {
+            adopted: 0,
+            deferred: 0,
+            dispatched: 0,
+            execution: "executed",
+            expiredScanned: 0,
+            failures: 0,
+            logEvents: 0,
+            requeued: 0,
+            sandboxRecovered: 0,
+            terminalCleaned: 0,
+            terminalized: 0,
+            terminalLeaseCleaned: 0,
+          },
+          route: "/api/internal/runner-reconcile",
+          sequence: 2,
+          status: 200,
+        },
+      ],
+      sandboxDiagnostic: {
+        exitCode: 0,
+        method: "POST",
+        ok: true,
+        output: "coven-agents",
+        route: "/api/diagnostics/sandbox",
+        status: 200,
+      },
+      stripeReconciliation: {
+        applied: 0,
+        conflicts: 0,
+        deferred: 0,
+        execution: "executed",
+        failures: 0,
+        method: "GET",
+        route: "/api/internal/stripe-reconcile",
+        scanned: 0,
+        status: 200,
+        unchanged: 0,
+      },
+    },
+    cleanup: {
+      defaultAliasDeploymentId: "dpl_F4EXbTYZTvscUjrBUPZYjjSuDWB1",
+      productionAdminPlaceholderRestored: true,
+      temporarySubscriberDeploymentsRemoved: 3,
+    },
+    containsCredentialMaterial: false,
+    deployment: {
+      evidenceClass: "production-safe",
+      id: "dpl_F4EXbTYZTvscUjrBUPZYjjSuDWB1",
+      sourceCommit: "a2c11ff408caf8f97af8dbbe37903a13e928f255",
+      sourceTree: "46df1be994b882c19fbcedd0bdecbba9c76ff299",
+      staticGenerationCount: 42,
+      target: "production",
+    },
+    evidenceFlags: {
+      approvalsCompleted: false,
+      diagnosticLifecycleCertified: true,
+      observationWindowCompleted: false,
+      persistentSandboxLifecycleCertified: false,
+      resourceDispositionCertified: false,
+      stripeCheckoutWebhookFailureRetryCertified: false,
+      subscriberLifecycleCertified: false,
+    },
+    schemaVersion: 1,
+  });
+
+  for (const value of [
+    receipt.deployment.id,
+    receipt.deployment.sourceCommit,
+    receipt.deployment.sourceTree,
+  ]) {
+    assert.match(attestation, new RegExp(value, "u"));
+  }
+  assert.match(attestation, /p0-production-config-receipt-2026-09-01\.json/u);
+  const normalizedAttestation = attestation.replace(/\s+/gu, " ");
+  assert.ok(
+    normalizedAttestation.includes(
+      `Production-target build generated \`${receipt.deployment.staticGenerationCount}\` static pages`
+    )
+  );
+
+  const { checks } = receipt;
+  assert.ok(
+    normalizedAttestation.includes(
+      `\`${checks.health.method} ${checks.health.route}\` returned HTTP ${checks.health.status} with API v1 in ${checks.health.mode} mode`
+    )
+  );
+  assert.ok(
+    normalizedAttestation.includes(
+      `signed-out \`${checks.closedBetaRefusal.method} ${checks.closedBetaRefusal.route}\` returned HTTP ${checks.closedBetaRefusal.status} to \`${checks.closedBetaRefusal.location}\``
+    )
+  );
+  assert.ok(
+    normalizedAttestation.includes(
+      `\`${checks.sandboxDiagnostic.method} ${checks.sandboxDiagnostic.route}\` Daytona diagnostic returned HTTP ${checks.sandboxDiagnostic.status}, exit code zero, and the fixed sanitized output \`${checks.sandboxDiagnostic.output}\``
+    )
+  );
+  assert.ok(
+    normalizedAttestation.includes(
+      `\`${checks.stripeReconciliation.method} ${checks.stripeReconciliation.route}\` returned HTTP ${checks.stripeReconciliation.status} with \`execution=${checks.stripeReconciliation.execution}\` and zero scanned, changed, deferred, conflicting, or failed candidates`
+    )
+  );
+  assert.ok(
+    normalizedAttestation.includes(
+      `two consecutive manual \`${checks.runnerReconciliation[0].method} ${checks.runnerReconciliation[0].route}\` requests returned HTTP ${checks.runnerReconciliation[0].status} with \`execution=${checks.runnerReconciliation[0].result.execution}\` and every work and failure aggregate equal to zero`
+    )
+  );
+  assert.ok(
+    normalizedAttestation.includes(
+      `bounded \`${checks.resourceInventory.method} ${checks.resourceInventory.route}\` results before and after reconciliation each examined ${checks.resourceInventory.before.examined} application-owned mappings without provider or database truncation`
+    )
+  );
+  assert.ok(
+    normalizedAttestation.includes(
+      "four stopped resources remain ambiguous and were neither adopted nor deleted"
+    )
+  );
+
+  const label = (value: string) => {
+    const words = value.replaceAll("-", " ");
+    return `${words[0]?.toUpperCase()}${words.slice(1)}`;
+  };
+  for (const denial of checks.credentialIsolation) {
+    assert.ok(
+      attestation.includes(
+        `| ${label(denial.attemptedCredential)} | ${label(
+          denial.intendedCredential
+        )} | \`${denial.method} ${denial.route}\` | ${denial.status} | \`${
+          denial.requestId
+        }\` |`
+      )
+    );
+  }
+  assert.ok(
+    normalizedAttestation.includes(
+      `alias was restored to the receipt deployment after an isolated subscriber-session investigation: \`${receipt.cleanup.defaultAliasDeploymentId}\``
+    )
+  );
+  assert.ok(
+    normalizedAttestation.includes(
+      `${receipt.cleanup.temporarySubscriberDeploymentsRemoved} temporary subscriber deployments were removed`
+    )
+  );
+  assert.ok(
+    normalizedAttestation.includes(
+      "empty Production admin allowlist placeholder was restored"
+    )
+  );
+  assert.ok(
+    normalizedAttestation.includes(
+      `Diagnostic lifecycle certified: \`${
+        receipt.evidenceFlags.diagnosticLifecycleCertified ? "yes" : "no"
+      }\``
+    )
+  );
+  assert.match(attestation, /Subscriber lifecycle certified: `no`/u);
+  assert.match(attestation, /Persistent sandbox lifecycle certified: `no`/u);
+  assert.match(attestation, /Resource disposition certified:\s+`no`/u);
+  assert.match(
+    attestation,
+    /Stripe checkout\/webhook failure-retry certified: `no`/u
+  );
+  assert.match(attestation, /Observation\s+window completed: `no`/u);
+  assert.match(attestation, /Named approvals completed: `no`/u);
 });
 
 test("the verification matrix matches the hermetic certification receipt", () => {

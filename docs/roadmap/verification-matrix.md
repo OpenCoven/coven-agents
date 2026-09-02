@@ -1,11 +1,12 @@
 # Verification Matrix
 
 This matrix records implemented source and retained evidence as of 2026-09-01
-for application baseline `4bf89dc98667efa1c46b5131e10d4b14bf5f86c3`
+for application baseline `a2c11ff408caf8f97af8dbbe37903a13e928f255`
 and the documentation-only candidate that updates this matrix. Repository and
 local contract procedures are verified; infrastructure cutover evidence is
-retained; public guest replay is verified; deployed Daytona lifecycle,
-observation, and full product release certification remain pending.
+retained; public guest replay and Production-config operator paths are
+verified; persistent Daytona lifecycle, subscriber certification, observation,
+and full product release certification remain pending.
 
 ## State vocabulary
 
@@ -31,16 +32,17 @@ observation, and full product release certification remain pending.
 | Subscriber classification | `Verified` | Auth unit coverage and 28-case authenticated browser contract | Real OAuth and active/expired account exercise |
 | Same-origin execution session | `Verified` | Browser transport, runner authorization, product-boundary, and browser contract tests | Production-equivalent Auth.js request evidence |
 | Tenant credential custody | `Verified` | Credential, isolation, and evidence-safety unit suites | Retained production-equivalent isolation and redaction exercise |
-| Cross-surface evidence redaction | `Verified` | `packages/agent-contracts/src/evidence-safety.test.ts`, `lib/runner/evidence.test.ts`, `lib/runner/daytona/process.test.ts`, `lib/runner/reconcile.test.ts`, `lib/runner/http.test.ts`, `lib/runner/daytona/resource-inventory.test.ts`, `lib/runner/resource-observability.test.ts`, and `lib/runner/production.test.ts` prove bounded exact redaction, adapter and neutral defense in depth, categorical observability, safe failures, and tenant-B refusal | Dated deployed Daytona attempt plus retained credential-free browser API/SSE, internal inventory/diagnostic, provider-failure, and cross-tenant refusal captures. This row is a focused local verification slice, not full release or security-program closure. |
+| Cross-surface evidence redaction | `Verified` | `packages/agent-contracts/src/evidence-safety.test.ts`, `lib/runner/evidence.test.ts`, `lib/runner/daytona/process.test.ts`, `lib/runner/reconcile.test.ts`, `lib/runner/http.test.ts`, `lib/runner/daytona/resource-inventory.test.ts`, `lib/runner/resource-observability.test.ts`, and `lib/runner/production.test.ts` prove bounded exact redaction, adapter and neutral defense in depth, categorical observability, safe failures, and tenant-B refusal. The [Production-config receipt](../operations/p0-production-config-receipt-2026-09-01.json) retains sanitized diagnostic, inventory, reconciliation, and cross-channel refusal results without credential material. | Dated deployed tenant attempt plus retained credential-free browser API/SSE, provider-failure, and cross-tenant refusal captures. This row is a focused verification slice, not full release or security-program closure. |
 | Hermetic PostgreSQL browser certification | `Verified` | The [hermetic receipt](../operations/p0-hermetic-receipt-2026-09-01.json) records `pnpm db:check` and `pnpm test:e2e:hermetic` passing on 2026-09-01: 11 browser cases against disposable PostgreSQL for application baseline `3ad1232f061b5eaf4440b6fd3c7c13967a6c423f`, covering signed Auth.js sessions, current `authVersion`, real API/SSE/cancellation/reconciliation, tenant-cap admission, launched and queued revocation, anonymous replay, hostile anonymous route calls, fixture separation, and unchanged application-table fingerprints | Deployed Daytona staging and production-safe evidence; hermetic certification does not replace provider or deployment proof |
-| Daytona lifecycle | `Verified` | Daytona adapter and runner service unit suites | Dated provider create, reuse, run, stop, delete, and cleanup artifact |
+| Daytona lifecycle | `Verified` | Daytona adapter and runner service unit suites plus the Production-config receipt's successful bounded create/execute/delete diagnostic | Dated persistent tenant sandbox create, reuse, run, stop, delete, and cleanup artifact; four stopped inventory observations remain ambiguous |
 | Idempotent starts | `Verified` | Admission, store, and browser retry unit suites | Retry exercise against release-equivalent PostgreSQL |
 | Cursor-safe SSE | `Verified` | Server and browser reconnect/cursor unit suites | Release-equivalent reconnect exercise with retained cursor evidence |
 | Persisted recovery | `Verified` | Reconciliation, store, and hermetic browser suites prove a bounded finish-current recovery for one exact launched attempt, while revoked unlaunched work remains refused | Interrupted deployed provider-attempt convergence following an entitlement revocation and idempotent rerun |
 | Outbound policy | `Implemented` | Daytona domain configuration and tests | Enforced denial and recovery evidence |
 | Planning document registry | `Verified` | `docs/roadmap/README.md`, `scripts/planning-docs-policy.ts`, and focused policy coverage | Final Beads-to-Project no-op reconciliation before authority-derived status refresh |
+| Machine-readable readiness receipt | `Implemented` | `scripts/readiness-receipt.ts`, focused strict-schema and false-`go` policy coverage, and the [release readiness](release-readiness.md) operator procedure | Exact-deployment receipt validated against independent candidate and rollback manifests with complete durable journey evidence and authorized signed approvals |
 | Vercel Git deployment disablement | `Verified` | `vercel.json`, deployment documentation policy, and focused unit coverage | Account-level project disconnection only if full Vercel retirement is separately approved |
-| Production smoke and rollback | `Pending` | [release readiness](release-readiness.md), [cutover attestation](../operations/daytona-cutover-attestation.md) | Authorized promotion and rollback record |
+| Production smoke and rollback | `Pending` | [release readiness](release-readiness.md), [cutover attestation](../operations/daytona-cutover-attestation.md), and the Production-config receipt prove exact-build health, closed-beta refusal, bounded provider/Stripe operator access, credential separation, alias restoration, and temporary-deployment cleanup | Authenticated subscriber promotion and rollback, persistent sandbox lifecycle, resolved inventory disposition, observation window, and named approvals |
 
 The [Daytona cutover audit](daytona-cutover-audit-2026-08-29.md) records the
 documentation and repository assessment. Any relevant code, configuration,
