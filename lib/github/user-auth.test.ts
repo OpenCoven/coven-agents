@@ -17,7 +17,7 @@ const REDIRECT_URI = "https://app.example/api/github/callback";
 const USER_TOKEN = `ghu_${"A".repeat(32)}`;
 const SECOND_USER_TOKEN = `ghu_${"C".repeat(32)}`;
 
-test("user authorization proves an exact accessible installation and revokes only its token", async () => {
+test("user authorization proves an exact accessible installation and revokes its complete token pair", async () => {
   const requests: CapturedRequest[] = [];
   const client = clientFor(
     sequenceFetch(requests, [
@@ -29,7 +29,7 @@ test("user authorization proves an exact accessible installation and revokes onl
 
   const authority = await client.proveInstallationAccess(proofInput());
 
-  assert.equal(requests.length, 5);
+  assert.equal(requests.length, 6);
   assert.deepEqual(authority, {
     repositories: [
       {
@@ -44,7 +44,7 @@ test("user authorization proves an exact accessible installation and revokes onl
   });
   assert.deepEqual(
     requests.map(({ redirect }) => redirect),
-    ["error", "error", "error", "error", "error"]
+    ["error", "error", "error", "error", "error", "error"]
   );
   assert.equal(requests[0]?.url, "https://github.com/login/oauth/access_token");
   assert.equal(requests[0]?.method, "POST");
@@ -71,15 +71,23 @@ test("user authorization proves an exact accessible installation and revokes onl
     requests[1]?.headers.get("authorization"),
     `Bearer ${USER_TOKEN}`
   );
-  const cleanup = requests.find(({ method }) => method === "DELETE");
-  assert.equal(
-    cleanup?.url,
-    `https://api.github.com/applications/${CLIENT_ID}/token`
+  const cleanup = requests.filter(({ method }) => method === "DELETE");
+  assert.equal(cleanup.length, 2);
+  assert.ok(
+    cleanup.every(
+      ({ url }) =>
+        url === `https://api.github.com/applications/${CLIENT_ID}/token`
+    )
   );
-  assert.match(cleanup?.headers.get("authorization") ?? "", /^Basic /u);
-  assert.deepEqual(JSON.parse(cleanup?.body ?? ""), {
-    access_token: USER_TOKEN,
-  });
+  assert.ok(
+    cleanup.every(({ headers }) =>
+      /^Basic /u.test(headers.get("authorization") ?? "")
+    )
+  );
+  assert.deepEqual(
+    cleanup.map(({ body }) => JSON.parse(body ?? "{}").access_token).sort(),
+    [`ghr_${"B".repeat(32)}`, USER_TOKEN].sort()
+  );
   assert.equal(
     requests.some(({ url }) => url.endsWith("/grant")),
     false
@@ -290,7 +298,7 @@ test("a foreign valid installation is inaccessible and never accepted by app ide
     client.proveInstallationAccess(proofInput()),
     providerError("github_user_installation_inaccessible", false)
   );
-  assert.equal(requests.length, 3);
+  assert.equal(requests.length, 4);
 });
 
 test("user installation pagination finds the exact installation on a later bounded page", async () => {
@@ -493,7 +501,7 @@ test("OAuth code exchange timeout, status errors, oversize, and malformed JSON f
   }
 });
 
-test("a valid token in a malformed exchange response is revoked before failure", async () => {
+test("valid token candidates in a malformed exchange response are revoked before failure", async () => {
   const requests: CapturedRequest[] = [];
   const client = clientFor(
     sequenceFetch(requests, [
@@ -506,10 +514,39 @@ test("a valid token in a malformed exchange response is revoked before failure",
     client.proveInstallationAccess(proofInput()),
     providerError("github_provider_invalid_response", false)
   );
-  assert.equal(requests.length, 2);
-  assert.equal(
-    requests[1]?.url,
-    `https://api.github.com/applications/${CLIENT_ID}/token`
+  assert.equal(requests.length, 3);
+  const cleanup = requests.filter(({ method }) => method === "DELETE");
+  assert.deepEqual(
+    cleanup.map(({ body }) => JSON.parse(body ?? "{}").access_token).sort(),
+    [`ghr_${"B".repeat(32)}`, USER_TOKEN].sort()
+  );
+});
+
+test("a valid refresh candidate is revoked when its access-token companion is malformed", async () => {
+  const refreshToken = `ghr_${"B".repeat(32)}`;
+  const requests: CapturedRequest[] = [];
+  const client = clientFor(
+    sequenceFetch(requests, [
+      jsonResponse({
+        access_token: { malformed: true },
+        expires_in: 28_800,
+        refresh_token: refreshToken,
+        refresh_token_expires_in: 15_897_600,
+        scope: "",
+        token_type: "bearer",
+      }),
+      new Response(null, { status: 204 }),
+    ])
+  );
+
+  await assert.rejects(
+    client.proveInstallationAccess(proofInput()),
+    providerError("github_provider_invalid_response", false)
+  );
+  const cleanup = requests.filter(({ method }) => method === "DELETE");
+  assert.deepEqual(
+    cleanup.map(({ body }) => JSON.parse(body ?? "{}").access_token),
+    [refreshToken]
   );
 });
 
@@ -615,10 +652,15 @@ test("concurrent user proofs revoke only their own token authority", async () =>
   ]);
 
   const cleanup = requests.filter(({ method }) => method === "DELETE");
-  assert.equal(cleanup.length, 2);
+  assert.equal(cleanup.length, 4);
   assert.deepEqual(
     cleanup.map(({ body }) => JSON.parse(body ?? "{}").access_token).sort(),
-    [SECOND_USER_TOKEN, USER_TOKEN].sort()
+    [
+      `ghr_${"B".repeat(32)}`,
+      `ghr_${"D".repeat(32)}`,
+      SECOND_USER_TOKEN,
+      USER_TOKEN,
+    ].sort()
   );
   assert.ok(
     cleanup.every(
@@ -682,10 +724,10 @@ test("user-token revocation waits for every in-flight authority request to settl
     providerError("github_provider_unavailable", true)(await pending),
     true
   );
-  assert.equal(cleanupCalls, 1);
+  assert.equal(cleanupCalls, 2);
 });
 
-test("expiring-token refresh authority is validated but never persisted or sent to another cleanup", async () => {
+test("expiring-token refresh authority is retained only until both tokens are revoked", async () => {
   const refreshToken = `ghr_${"B".repeat(32)}`;
   const requests: CapturedRequest[] = [];
   const client = clientFor(
@@ -698,20 +740,55 @@ test("expiring-token refresh authority is validated but never persisted or sent 
 
   await client.proveInstallationAccess(proofInput());
 
-  assert.equal(requests.length, 5);
-  const serializedRequests = JSON.stringify(
-    requests.map(({ body, headers, method, url }) => ({
+  assert.equal(requests.length, 6);
+  const authorityRequests = JSON.stringify(
+    requests
+      .filter(({ method }) => method !== "DELETE")
+      .map(({ body, headers, method, url }) => ({
+        body,
+        headers: Object.fromEntries(headers),
+        method,
+        url,
+      }))
+  );
+  assert.doesNotMatch(authorityRequests, new RegExp(refreshToken, "u"));
+  const cleanup = requests.filter(({ method }) => method === "DELETE");
+  assert.deepEqual(
+    cleanup.map(({ body }) => JSON.parse(body ?? "{}").access_token).sort(),
+    [refreshToken, USER_TOKEN].sort()
+  );
+  const serializedCleanup = JSON.stringify(
+    cleanup.map(({ body, headers, method, url }) => ({
       body,
       headers: Object.fromEntries(headers),
       method,
       url,
     }))
   );
-  assert.doesNotMatch(serializedRequests, new RegExp(refreshToken, "u"));
-  const cleanup = requests.find(({ method }) => method === "DELETE");
-  assert.deepEqual(JSON.parse(cleanup?.body ?? ""), {
-    access_token: USER_TOKEN,
-  });
+  assert.match(serializedCleanup, new RegExp(refreshToken, "u"));
+});
+
+test("both token revocations are attempted before a cleanup failure is surfaced", async () => {
+  const refreshToken = `ghr_${"B".repeat(32)}`;
+  const requests: CapturedRequest[] = [];
+  const client = clientFor(
+    sequenceFetch(requests, [
+      jsonResponse(tokenBody(USER_TOKEN, refreshToken)),
+      jsonResponse(installationsBody([INSTALLATION_ID])),
+      new Response(null, { status: 503 }),
+      new Response(null, { status: 204 }),
+    ])
+  );
+
+  await assert.rejects(
+    client.proveInstallationAccess(proofInput()),
+    providerError("github_provider_unavailable", true)
+  );
+  const cleanup = requests.filter(({ method }) => method === "DELETE");
+  assert.deepEqual(
+    cleanup.map(({ body }) => JSON.parse(body ?? "{}").access_token).sort(),
+    [refreshToken, USER_TOKEN].sort()
+  );
 });
 
 test("user authorization errors retain only canonical GitHub request ids", async () => {
@@ -892,6 +969,9 @@ function sequenceFetch(
       );
     }
     const next = responses.shift();
+    if (!next && init.method === "DELETE") {
+      return Promise.resolve(new Response(null, { status: 204 }));
+    }
     assert.ok(next, `Unexpected request to ${input}`);
     return Promise.resolve(next);
   };

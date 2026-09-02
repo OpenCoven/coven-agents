@@ -183,7 +183,12 @@ export function createGitHubUserAuthorizationClient(
     proof: Parameters<
       GitHubUserAuthorizationClient["proveInstallationAccess"]
     >[0]
-  ): Promise<Readonly<{ error: GitHubProviderError | null; token: string }>> {
+  ): Promise<
+    Readonly<{
+      error: GitHubProviderError | null;
+      tokens: Readonly<{ access: string | null; refresh: string | null }>;
+    }>
+  > {
     return withClientSecret(input.clientSecret, async (clientSecret) => {
       const body = new URLSearchParams({
         client_id: input.clientId,
@@ -207,22 +212,25 @@ export function createGitHubUserAuthorizationClient(
           "exchange"
         )
       );
-      if (
-        parsed.access_token === undefined &&
-        typeof parsed.error === "string"
-      ) {
-        throw new GitHubProviderError("github_oauth_exchange_rejected", {
-          retryable: false,
-          status: 400,
-        });
-      }
-      const token = boundedTokenCandidate(parsed.access_token);
-      let validationError: GitHubProviderError | null = OAUTH_USER_PATTERN.test(
-        token
-      )
-        ? null
-        : invalidResponse();
+      let validationError: GitHubProviderError | null =
+        parsed.access_token === undefined && typeof parsed.error === "string"
+          ? new GitHubProviderError("github_oauth_exchange_rejected", {
+              retryable: false,
+              status: 400,
+            })
+          : null;
+      let accessToken: string | null = null;
+      let refreshToken: string | null = null;
       try {
+        accessToken = boundedTokenCandidate(parsed.access_token);
+      } catch (error) {
+        validationError ??=
+          error instanceof GitHubProviderError ? error : invalidResponse();
+      }
+      try {
+        if (parsed.refresh_token !== undefined) {
+          refreshToken = boundedTokenCandidate(parsed.refresh_token);
+        }
         if (
           parsed.error !== undefined ||
           parsed.token_type !== "bearer" ||
@@ -235,7 +243,13 @@ export function createGitHubUserAuthorizationClient(
         validationError ??=
           error instanceof GitHubProviderError ? error : invalidResponse();
       }
-      return { error: validationError, token };
+      if (accessToken !== null && !OAUTH_USER_PATTERN.test(accessToken)) {
+        validationError ??= invalidResponse();
+      }
+      return {
+        error: validationError,
+        tokens: { access: accessToken, refresh: refreshToken },
+      };
     });
   }
 
@@ -429,17 +443,18 @@ export function createGitHubUserAuthorizationClient(
   return {
     async proveInstallationAccess(proof) {
       assertProofInput(proof);
-      const { error: exchangeError, token: exchangedToken } =
+      const { error: exchangeError, tokens: exchangedTokens } =
         await exchangeCode(proof);
-      let token = exchangedToken;
+      let accessToken = exchangedTokens.access;
+      let refreshToken = exchangedTokens.refresh;
       let operationError: unknown = exchangeError ?? undefined;
       let authority: GitHubUserInstallationAuthority | undefined;
-      if (operationError === undefined) {
+      if (operationError === undefined && accessToken !== null) {
         try {
-          await assertAccessibleInstallation(proof.installationId, token);
+          await assertAccessibleInstallation(proof.installationId, accessToken);
           const [userResult, repositoryResult] = await Promise.allSettled([
-            userIdentity(token),
-            userRepositories(proof.installationId, token),
+            userIdentity(accessToken),
+            userRepositories(proof.installationId, accessToken),
           ]);
           if (userResult.status === "rejected") {
             throw userResult.reason;
@@ -454,15 +469,23 @@ export function createGitHubUserAuthorizationClient(
         } catch (error) {
           operationError = error;
         }
+      } else if (operationError === undefined) {
+        operationError = invalidResponse();
       }
 
       let revocationError: unknown;
       try {
-        await revokeToken(token);
-      } catch (error) {
-        revocationError = error;
+        const results = await Promise.allSettled([
+          ...(refreshToken === null ? [] : [revokeToken(refreshToken)]),
+          ...(accessToken === null ? [] : [revokeToken(accessToken)]),
+        ]);
+        revocationError = results.find(
+          (result): result is PromiseRejectedResult =>
+            result.status === "rejected"
+        )?.reason;
       } finally {
-        token = "";
+        accessToken = null;
+        refreshToken = null;
       }
       if (revocationError !== undefined) {
         throw revocationError;
