@@ -712,23 +712,6 @@ export const SummarizeIcon = ({ size = 16 }: { size?: number }) => (
   </svg>
 );
 
-export const SidebarLeftIcon = ({ size = 16 }: { size?: number }) => (
-  <svg
-    height={size}
-    strokeLinejoin="round"
-    style={{ color: "currentcolor" }}
-    viewBox="0 0 16 16"
-    width={size}
-  >
-    <path
-      clipRule="evenodd"
-      d="M6.245 2.5H14.5V12.5C14.5 13.0523 14.0523 13.5 13.5 13.5H6.245V2.5ZM4.995 2.5H1.5V12.5C1.5 13.0523 1.94772 13.5 2.5 13.5H4.995V2.5ZM0 1H1.5H14.5H16V2.5V12.5C16 13.8807 14.8807 15 13.5 15H2.5C1.11929 15 0 13.8807 0 12.5V2.5V1Z"
-      fill="currentColor"
-      fillRule="evenodd"
-    />
-  </svg>
-);
-
 export const PlusIcon = ({ size = 16 }: { size?: number }) => (
   <svg
     height={size}
@@ -1071,23 +1054,6 @@ export const FullscreenIcon = ({ size = 16 }: { size?: number }) => (
     <path
       clipRule="evenodd"
       d="M1 5.25V6H2.5V5.25V2.5H5.25H6V1H5.25H2C1.44772 1 1 1.44772 1 2V5.25ZM5.25 14.9994H6V13.4994H5.25H2.5V10.7494V9.99939H1V10.7494V13.9994C1 14.5517 1.44772 14.9994 2 14.9994H5.25ZM15 10V10.75V14C15 14.5523 14.5523 15 14 15H10.75H10V13.5H10.75H13.5V10.75V10H15ZM10.75 1H10V2.5H10.75H13.5V5.25V6H15V5.25V2C15 1.44772 14.5523 1 14 1H10.75Z"
-      fill="currentColor"
-      fillRule="evenodd"
-    />
-  </svg>
-);
-
-export const DownloadIcon = ({ size = 16 }: { size?: number }) => (
-  <svg
-    height={size}
-    strokeLinejoin="round"
-    style={{ color: "currentcolor" }}
-    viewBox="0 0 16 16"
-    width={size}
-  >
-    <path
-      clipRule="evenodd"
-      d="M8.75 1V1.75V8.68934L10.7197 6.71967L11.25 6.18934L12.3107 7.25L11.7803 7.78033L8.70711 10.8536C8.31658 11.2441 7.68342 11.2441 7.29289 10.8536L4.21967 7.78033L3.68934 7.25L4.75 6.18934L5.28033 6.71967L7.25 8.68934V1.75V1H8.75ZM13.5 9.25V13.5H2.5V9.25V8.5H1V9.25V14C1 14.5523 1.44771 15 2 15H14C14.5523 15 15 14.5523 15 14V9.25V8.5H13.5V9.25Z"
       fill="currentColor"
       fillRule="evenodd"
     />
