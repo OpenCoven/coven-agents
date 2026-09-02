@@ -632,7 +632,7 @@ test("a late exchange response is observed and its token pair is revoked", async
 
   const pending = client.proveInstallationAccess(proofInput());
   let settled = false;
-  void pending.then(
+  const settlement = pending.then(
     () => {
       settled = true;
     },
@@ -645,6 +645,7 @@ test("a late exchange response is observed and its token pair is revoked", async
 
   releaseExchange();
   await assert.rejects(pending, providerError("github_provider_timeout", true));
+  await settlement;
   assert.deepEqual(revokedCredentials(requests).sort(), [
     refreshToken,
     USER_TOKEN,
@@ -693,12 +694,25 @@ test("concurrent user proofs revoke only their own token authority", async () =>
   ]);
 
   const cleanup = requests.filter(isCleanupRequest);
-  assert.equal(cleanup.length, 2);
+  assert.equal(cleanup.length, 4);
   assert.deepEqual(
     revokedCredentials(requests).sort(),
-    [SECOND_USER_TOKEN, USER_TOKEN].sort()
+    [
+      `ghr_${"B".repeat(32)}`,
+      `ghr_${"D".repeat(32)}`,
+      SECOND_USER_TOKEN,
+      USER_TOKEN,
+    ].sort()
   );
-  assert.ok(cleanup.every(({ url }) => url === GRANT_REVOCATION_URL));
+  assert.deepEqual(
+    cleanup.map(({ url }) => url).sort(),
+    [
+      ACCESS_REVOCATION_URL,
+      ACCESS_REVOCATION_URL,
+      REFRESH_REVOCATION_URL,
+      REFRESH_REVOCATION_URL,
+    ].sort()
+  );
 });
 
 test("user-token revocation waits for every in-flight authority request to settle", async () => {
@@ -757,7 +771,7 @@ test("user-token revocation waits for every in-flight authority request to settl
     providerError("github_provider_unavailable", true)(await pending),
     true
   );
-  assert.equal(cleanupCalls, 1);
+  assert.equal(cleanupCalls, 2);
 });
 
 test("expiring-token refresh authority is retained only until both tokens are revoked", async () => {
