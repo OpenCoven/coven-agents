@@ -156,6 +156,7 @@ function githubConnectionRow(
     updatedAt: NOW,
     userPermissionCeiling: "write",
     userPermissionCurrent: "write",
+    userProjectIds: [],
     userProjectManagementCeiling: false,
     userProjectManagementCurrent: false,
     version: 0,
@@ -174,6 +175,7 @@ function githubConnectionAuthority(connection: GitHubConnectionRecord) {
     githubUserLogin: connection.githubUserLogin,
     userPermissionCeiling: connection.userPermissionCeiling,
     userPermissionCurrent: connection.userPermissionCurrent,
+    userProjectIds: [],
     userProjectManagementCeiling: connection.userProjectManagementCeiling,
     userProjectManagementCurrent: connection.userProjectManagementCurrent,
   };
@@ -455,7 +457,10 @@ test("forward migration persists team authority, approval audit, and execution s
 
 test("GitHub delivery migration enables contents authority and repository commits fail closed", async () => {
   const migration = await readFile(
-    new URL("../db/migrations/0034_certain_veda.sql", import.meta.url),
+    new URL(
+      "../db/migrations/0034_github_project_authority.sql",
+      import.meta.url
+    ),
     "utf8"
   );
 

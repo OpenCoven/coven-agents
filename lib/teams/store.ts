@@ -202,6 +202,7 @@ export type GitHubConnectionRecord = {
   updatedAt: Date;
   userPermissionCeiling: GitHubUserRepositoryPermission;
   userPermissionCurrent: GitHubUserRepositoryPermission;
+  userProjectIds: readonly string[];
   userProjectManagementCeiling: boolean;
   userProjectManagementCurrent: boolean;
   version: number;
@@ -354,6 +355,7 @@ export type ReplaceGitHubInstallationConnectionsInput = {
     repositoryOwner: string;
     userPermissionCeiling: GitHubUserRepositoryPermission;
     userPermissionCurrent: GitHubUserRepositoryPermission;
+    userProjectIds: readonly string[];
     userProjectManagementCeiling: boolean;
     userProjectManagementCurrent: boolean;
   }>;
@@ -741,6 +743,7 @@ function asConnection(row: Record<string, unknown>): GitHubConnectionRecord {
     updatedAt: timestampColumn(row, "updatedAt"),
     userPermissionCeiling: column(row, "userPermissionCeiling"),
     userPermissionCurrent: column(row, "userPermissionCurrent"),
+    userProjectIds: column(row, "userProjectIds"),
     userProjectManagementCeiling: column(row, "userProjectManagementCeiling"),
     userProjectManagementCurrent: column(row, "userProjectManagementCurrent"),
     version: column(row, "version"),
@@ -1208,6 +1211,7 @@ function validateConnectionInput(input: {
   repositoryOwner: string;
   userPermissionCeiling: GitHubUserRepositoryPermission;
   userPermissionCurrent: GitHubUserRepositoryPermission;
+  userProjectIds: readonly string[];
   userProjectManagementCeiling: boolean;
   userProjectManagementCurrent: boolean;
 }): void {
@@ -1233,6 +1237,14 @@ function validateConnectionInput(input: {
       input.userPermissionCurrent,
       input.userPermissionCeiling
     ) ||
+    !Array.isArray(input.userProjectIds) ||
+    input.userProjectIds.length > 100 ||
+    input.userProjectIds.some(
+      (projectId) =>
+        typeof projectId !== "string" ||
+        !/^[A-Za-z0-9_=-]{1,256}$/u.test(projectId)
+    ) ||
+    new Set(input.userProjectIds).size !== input.userProjectIds.length ||
     (input.userProjectManagementCurrent &&
       !input.userProjectManagementCeiling) ||
     !input.accountLogin ||
@@ -1323,6 +1335,8 @@ function sameConnectionAuthority(
       connection.githubUserLogin === candidate.githubUserLogin &&
       connection.userPermissionCeiling === candidate.userPermissionCeiling &&
       connection.userPermissionCurrent === candidate.userPermissionCurrent &&
+      JSON.stringify(connection.userProjectIds) ===
+        JSON.stringify(candidate.userProjectIds) &&
       connection.userProjectManagementCeiling ===
         candidate.userProjectManagementCeiling &&
       connection.userProjectManagementCurrent ===
@@ -1504,7 +1518,8 @@ async function replaceFencedGitHubInstallationConnections(
               "repositoryOwner", "repositoryName", "githubUserId",
               "githubUserLogin", "userPermissionCeiling",
               "userPermissionCurrent", "userProjectManagementCeiling",
-              "userProjectManagementCurrent", "appContentsPermission",
+              "userProjectManagementCurrent", "userProjectIds",
+              "appContentsPermission",
               "appIssuesPermission",
               "appPullRequestsPermission", "appOrganizationProjectsPermission"
             ) VALUES (
@@ -1517,6 +1532,7 @@ async function replaceFencedGitHubInstallationConnections(
               ${connection.userPermissionCurrent},
               ${connection.userProjectManagementCeiling},
               ${connection.userProjectManagementCurrent},
+              ${JSON.stringify(connection.userProjectIds)}::jsonb,
               ${connection.appContentsPermission},
               ${connection.appIssuesPermission},
               ${connection.appPullRequestsPermission},
@@ -1538,6 +1554,7 @@ async function replaceFencedGitHubInstallationConnections(
                   EXCLUDED."userProjectManagementCeiling",
                 "userProjectManagementCurrent" =
                   EXCLUDED."userProjectManagementCurrent",
+                "userProjectIds" = EXCLUDED."userProjectIds",
                 "appContentsPermission" = EXCLUDED."appContentsPermission",
                 "appIssuesPermission" = EXCLUDED."appIssuesPermission",
                 "appPullRequestsPermission" =
