@@ -83,15 +83,34 @@ export type ProductionClaimDependencies = Readonly<{
   environment?: Readonly<Record<string, string | undefined>>;
   findAccount?: ProductionAccountFinder;
   operator: RunnerOperator;
+  /**
+   * Reports that credential context could not be built because the runner is
+   * misconfigured, as distinct from the tenant being out of capacity. Both
+   * release the claim, so without this the two are indistinguishable from
+   * outside and a bad deployment looks like ordinary backpressure.
+   */
+  reportCredentialMisconfiguration?: (
+    misconfiguration: RunnerCredentialMisconfiguration
+  ) => void;
   store: Pick<
     RunnerStore,
     "cleanupTerminalLease" | "finalizeRun" | "releaseUnstartedDispatch"
   >;
 }>;
 
+export type RunnerCredentialMisconfiguration = Readonly<{
+  detail: string;
+  runId: string;
+}>;
+
 type ProductionQueuedAuthorityPreflightDependencies = Pick<
   ProductionClaimDependencies,
-  "clock" | "environment" | "findAccount" | "operator" | "store"
+  | "clock"
+  | "environment"
+  | "findAccount"
+  | "operator"
+  | "reportCredentialMisconfiguration"
+  | "store"
 >;
 
 export type ProductionRunnerRuntimeDependencies = Readonly<{
@@ -203,7 +222,7 @@ async function credentialContextForRun(
   run: RunnerRunRecord,
   dependencies: Pick<
     ProductionClaimDependencies,
-    "clock" | "environment" | "findAccount"
+    "clock" | "environment" | "findAccount" | "reportCredentialMisconfiguration"
   >
 ): Promise<CredentialContextDecision> {
   const userId = userIdForTenant(run.tenant);
@@ -244,7 +263,20 @@ async function credentialContextForRun(
       },
       kind: "allowed",
     };
-  } catch {
+  } catch (error) {
+    /**
+     * Only the two configuration reads above can throw here, and both raise a
+     * fixed message naming the variable at fault, so the detail carries no
+     * credential material. Capacity exhaustion never reaches this branch — it
+     * is decided by admission and reported as admission_unavailable.
+     */
+    dependencies.reportCredentialMisconfiguration?.({
+      detail:
+        error instanceof Error
+          ? error.message
+          : "Runner credential configuration is invalid.",
+      runId: run.id,
+    });
     return { kind: "unavailable" };
   }
 }

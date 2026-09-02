@@ -237,6 +237,12 @@ function configuredClaimDispatcher(
       },
       findAccount,
       operator: OPERATOR,
+      reportCredentialMisconfiguration: (misconfiguration) => {
+        console.error(
+          "Runner credential configuration is invalid; the claim was released rather than dispatched.",
+          misconfiguration
+        );
+      },
       store,
     });
   };
