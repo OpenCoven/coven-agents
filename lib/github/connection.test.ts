@@ -493,6 +493,7 @@ test("callback verifies provider authority, persists only provider metadata, and
         repositoryOwner: "OpenCoven",
         userPermissionCeiling: "write",
         userPermissionCurrent: "write",
+        userProjectIds: [],
         userProjectManagementCeiling: false,
         userProjectManagementCurrent: false,
       },
@@ -510,6 +511,7 @@ test("callback verifies provider authority, persists only provider metadata, and
         repositoryOwner: "OpenCoven",
         userPermissionCeiling: "write",
         userPermissionCurrent: "write",
+        userProjectIds: [],
         userProjectManagementCeiling: false,
         userProjectManagementCurrent: false,
       },
@@ -780,10 +782,51 @@ test("OAuth callback intersects app-selected repositories with exact user reposi
       repositoryOwner: "OpenCoven",
       userPermissionCeiling: "triage",
       userPermissionCurrent: "triage",
+      userProjectIds: [],
       userProjectManagementCeiling: false,
       userProjectManagementCurrent: false,
     },
   ]);
+});
+
+test("connection refresh revokes stale Project authority until the user proves it again", async () => {
+  const store = new MemoryConnectionStore();
+  const handlers = createGitHubConnectionHandlers(
+    dependenciesWithUserAuthorization(
+      { createStore: () => store },
+      {
+        proveInstallationAccess: () =>
+          Promise.resolve({
+            repositories: repositories().repositories.map((repository) => ({
+              ...repository,
+              permission: "write" as const,
+              projectIds: ["PVT_permitted"],
+            })),
+            user: { id: "112233", login: "BunsDev" },
+          }),
+      }
+    )
+  );
+  const authorization = await beginUserAuthorization(handlers);
+  assert.equal(
+    (await handlers.callback(oauthCallbackRequest(authorization.state), null))
+      .status,
+    303
+  );
+  assert.equal(store.connections()[0]?.userProjectManagementCurrent, true);
+  assert.deepEqual(store.connections()[0]?.userProjectIds, ["PVT_permitted"]);
+
+  assert.equal(
+    (
+      await handlers.getConnection(
+        new Request("https://app.example/api/github/connection"),
+        null
+      )
+    ).status,
+    200
+  );
+  assert.equal(store.connections()[0]?.userProjectManagementCurrent, false);
+  assert.deepEqual(store.connections()[0]?.userProjectIds, []);
 });
 
 test("foreign valid installation proof is rejected without metadata persistence", async () => {
@@ -1522,6 +1565,7 @@ test("connection GET refreshes a downgraded collaborator ceiling and never resto
     githubUserLogin: "BunsDev",
     userPermissionCeiling: "write",
     userPermissionCurrent: "write",
+    userProjectIds: [],
     userProjectManagementCeiling: false,
     userProjectManagementCurrent: false,
   } as never);
@@ -1562,6 +1606,7 @@ test("connection refresh preserves standard triage and maintain roles without ge
       repositoryNodeId: "R_24680",
       userPermissionCeiling: role,
       userPermissionCurrent: role,
+      userProjectIds: [],
     });
     const store = new MemoryConnectionStore(
       memoryConnectionDatabase([initial])
@@ -2274,6 +2319,7 @@ function connection(
     updatedAt: NOW,
     userPermissionCeiling: "write",
     userPermissionCurrent: "write",
+    userProjectIds: [],
     userProjectManagementCeiling: false,
     userProjectManagementCurrent: false,
     version: 0,

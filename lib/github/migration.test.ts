@@ -7,11 +7,12 @@ const migrations = new URL("../db/migrations/", import.meta.url);
 
 const GATEWAY_MIGRATION = "0032_github_tool_gateway.sql";
 const GATEWAY_SNAPSHOT = "meta/0032_snapshot.json";
+const PROJECT_AUTHORITY_MIGRATION = "0035_fair_killraven.sql";
 
 test("current main and the GitHub gateway form one migration lineage", async () => {
   const migrationNames = (await import("node:fs/promises")).readdir(migrations);
   const names = await migrationNames;
-  for (let index = 25; index <= 32; index += 1) {
+  for (let index = 25; index <= 35; index += 1) {
     const prefix = `${String(index).padStart(4, "0")}_`;
     assert.equal(
       names.filter((name) => name.startsWith(prefix) && name.endsWith(".sql"))
@@ -71,6 +72,20 @@ test("0032 adds durable immutable and current repository user-authority ceilings
     snapshot.tables["public.RunnerGitHubConnection"]?.columns
       .userPermissionCeiling
   );
+});
+
+test("0035 fails closed while preserving existing GitHub connections", async () => {
+  const migration = await readFile(
+    new URL(PROJECT_AUTHORITY_MIGRATION, migrations),
+    "utf8"
+  );
+  assert.match(
+    migration,
+    /ADD COLUMN "userProjectIds" jsonb DEFAULT '\[\]'::jsonb NOT NULL/u
+  );
+  assert.match(migration, /ALTER COLUMN "userProjectIds" DROP DEFAULT/u);
+  assert.match(migration, /jsonb_path_exists/u);
+  assert.match(migration, /userProjectManagementCurrent/u);
 });
 
 test("0032 adds exact runner broker authority without rewriting old migrations", async () => {

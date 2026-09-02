@@ -167,6 +167,12 @@ function configuredClaimDispatcher(
                     const authorityStore = teamStore.createTeamStore(
                       teamStore.drizzleTeamStoreDatabase(database)
                     );
+                    const retainsProjectAuthorityProof =
+                      policy.declaredCapabilities.some(
+                        (capability) =>
+                          capability === "github.projects.read" ||
+                          capability === "github.projects.write"
+                      );
                     const issued =
                       await githubCapability.issueGitHubStepCapability(
                         {
@@ -188,6 +194,20 @@ function configuredClaimDispatcher(
                             abortSignal,
                             deadlineAt: authorityDeadlineAt,
                           }) => {
+                            if (retainsProjectAuthorityProof) {
+                              return authorityStore.readGitHubConnectionSnapshot(
+                                {
+                                  kind: "subscriber",
+                                  tenant: run.tenant,
+                                  userId: policy.actorUserId,
+                                },
+                                policy.repositories.length + 1,
+                                {
+                                  abortSignal,
+                                  deadlineAt: authorityDeadlineAt,
+                                }
+                              );
+                            }
                             const config = githubConfig.githubAppConfig();
                             const refreshed =
                               await githubConnection.refreshGitHubConnectionAuthority(

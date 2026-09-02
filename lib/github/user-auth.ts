@@ -13,6 +13,7 @@ const DEFAULT_MAX_RESPONSE_BYTES = 1024 * 1024;
 const DEFAULT_MAX_PAGES = 10;
 const DEFAULT_MAX_INSTALLATIONS = 1000;
 const DEFAULT_MAX_REPOSITORIES = 16;
+const MAX_PROJECTS_PER_ORGANIZATION = 100;
 const MAX_TOKEN_BYTES = 4096;
 const MAX_TOKEN_CANDIDATES_PER_TYPE = 4;
 const MAX_CODE_BYTES = 1024;
@@ -54,9 +55,14 @@ export type GitHubUserInstallationAuthority = Readonly<{
     nodeId: string;
     owner: string;
     permission: GitHubUserRepositoryPermission;
+    projectIds: readonly string[];
   }>[];
   user: Readonly<{ id: string; login: string }>;
 }>;
+
+type GitHubUserRepository =
+  GitHubUserInstallationAuthority["repositories"][number] &
+    Readonly<{ ownerType: "Organization" | "User" }>;
 
 export function createGitHubUserAuthorizationClient(
   input: Readonly<{
@@ -437,12 +443,11 @@ export function createGitHubUserAuthorizationClient(
   async function userRepositories(
     installationId: string,
     token: string
-  ): Promise<GitHubUserInstallationAuthority["repositories"]> {
+  ): Promise<GitHubUserRepository[]> {
     let observed = 0;
     let totalCount: number | null = null;
     let selection: "all" | "selected" | null = null;
-    const repositories: GitHubUserInstallationAuthority["repositories"][number][] =
-      [];
+    const repositories: GitHubUserRepository[] = [];
     const ids = new Set<string>();
     for (let page = 1; page <= maxPages; page += 1) {
       let pageValue: unknown;
@@ -521,6 +526,81 @@ export function createGitHubUserAuthorizationClient(
     });
   }
 
+  async function userProjectIds(
+    repositories: readonly GitHubUserRepository[],
+    token: string
+  ): Promise<ReadonlyMap<string, readonly string[]>> {
+    const owners = [
+      ...new Set(
+        repositories
+          .filter(({ ownerType }) => ownerType === "Organization")
+          .map(({ owner }) => owner.toLowerCase())
+      ),
+    ].sort();
+    const result = new Map<string, readonly string[]>();
+    const query =
+      "query CovenProjectAuthority($owner: String!) { organization(login: $owner) { login projectsV2(first: 100) { nodes { id viewerCanUpdate } pageInfo { hasNextPage endCursor } } } }";
+
+    for (const owner of owners) {
+      const response = object(
+        requireOnTime(
+          // biome-ignore lint/performance/noAwaitInLoops: each bounded organization authority proof is independently fail-closed
+          await requestJson(
+            `${GITHUB_API_ORIGIN}/graphql`,
+            {
+              body: JSON.stringify({ query, variables: { owner } }),
+              headers: apiHeaders(["Bearer", token].join(" ")),
+              method: "POST",
+            },
+            "user"
+          )
+        )
+      );
+      if (response.errors !== undefined) {
+        throw invalidResponse();
+      }
+      const organization = object(object(response.data).organization);
+      if (namedString(organization.login).toLowerCase() !== owner) {
+        throw invalidResponse();
+      }
+      const projects = object(organization.projectsV2);
+      const pageInfo = object(projects.pageInfo);
+      const { nodes } = projects;
+      if (
+        pageInfo.hasNextPage !== false ||
+        (pageInfo.endCursor !== null &&
+          (typeof pageInfo.endCursor !== "string" ||
+            pageInfo.endCursor.length > 1024)) ||
+        !Array.isArray(nodes) ||
+        nodes.length > MAX_PROJECTS_PER_ORGANIZATION
+      ) {
+        throw Array.isArray(nodes) &&
+          nodes.length > MAX_PROJECTS_PER_ORGANIZATION
+          ? responseTooLarge()
+          : invalidResponse();
+      }
+      const projectIds = nodes.map((project) => {
+        const value = object(project);
+        if (value.viewerCanUpdate !== true) {
+          return null;
+        }
+        const { id } = value;
+        if (typeof id !== "string" || !NODE_ID.test(id)) {
+          throw invalidResponse();
+        }
+        return id;
+      });
+      const permitted = projectIds.filter(
+        (projectId): projectId is string => projectId !== null
+      );
+      if (new Set(permitted).size !== permitted.length) {
+        throw invalidResponse();
+      }
+      result.set(owner, permitted.sort());
+    }
+    return result;
+  }
+
   async function revokeToken(token: string): Promise<void> {
     await withClientSecret(input.clientSecret, async (clientSecret) => {
       const basic = Buffer.from(
@@ -585,8 +665,18 @@ export function createGitHubUserAuthorizationClient(
           if (repositoryResult.status === "rejected") {
             throw repositoryResult.reason;
           }
+          const projectIdsByOwner = await userProjectIds(
+            repositoryResult.value,
+            accessToken
+          );
           authority = {
-            repositories: repositoryResult.value,
+            repositories: repositoryResult.value.map(
+              ({ ownerType: _ownerType, ...repository }) => ({
+                ...repository,
+                projectIds:
+                  projectIdsByOwner.get(repository.owner.toLowerCase()) ?? [],
+              })
+            ),
             user: userResult.value,
           };
         } catch (error) {
@@ -640,12 +730,14 @@ export function createGitHubUserAuthorizationClient(
     return { id: decimalString(installation.id) };
   }
 
-  function parseUserRepository(
-    value: unknown
-  ): GitHubUserInstallationAuthority["repositories"][number] {
+  function parseUserRepository(value: unknown): GitHubUserRepository {
     const repository = object(value);
     const owner = object(repository.owner);
     const ownerLogin = namedString(owner.login);
+    const ownerType = owner.type;
+    if (ownerType !== "Organization" && ownerType !== "User") {
+      throw invalidResponse();
+    }
     const name = namedString(repository.name);
     if (repository.full_name !== `${ownerLogin}/${name}`) {
       throw invalidResponse();
@@ -690,7 +782,9 @@ export function createGitHubUserAuthorizationClient(
       name,
       nodeId: repository.node_id,
       owner: ownerLogin,
+      ownerType,
       permission,
+      projectIds: [],
     };
   }
 }
