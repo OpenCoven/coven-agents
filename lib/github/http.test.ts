@@ -80,6 +80,14 @@ function context(
       kind: operation.kind,
       operationId: "88888888-8888-4888-8888-888888888888",
       operationMarker: marker,
+      projectAuthorityBound:
+        operation.kind === "project.item.add" ||
+        operation.kind === "project.item.field.update",
+      projectId:
+        operation.kind === "project.item.add" ||
+        operation.kind === "project.item.field.update"
+          ? operation.projectId
+          : null,
       providerDispatchPhase: write ? "pre_send" : "not_applicable",
       providerRequestId: null,
       providerSentAt: null,

@@ -493,6 +493,11 @@ test("callback verifies provider authority, persists only provider metadata, and
         repositoryOwner: "OpenCoven",
         userPermissionCeiling: "write",
         userPermissionCurrent: "write",
+        userProjectAuthorityAuthVersion: null,
+        userProjectAuthorityConnectionGeneration: null,
+        userProjectAuthorityExpiresAt: null,
+        userProjectAuthorityIssuedAt: null,
+        userProjectIds: [],
         userProjectManagementCeiling: false,
         userProjectManagementCurrent: false,
       },
@@ -510,6 +515,11 @@ test("callback verifies provider authority, persists only provider metadata, and
         repositoryOwner: "OpenCoven",
         userPermissionCeiling: "write",
         userPermissionCurrent: "write",
+        userProjectAuthorityAuthVersion: null,
+        userProjectAuthorityConnectionGeneration: null,
+        userProjectAuthorityExpiresAt: null,
+        userProjectAuthorityIssuedAt: null,
+        userProjectIds: [],
         userProjectManagementCeiling: false,
         userProjectManagementCurrent: false,
       },
@@ -780,10 +790,128 @@ test("OAuth callback intersects app-selected repositories with exact user reposi
       repositoryOwner: "OpenCoven",
       userPermissionCeiling: "triage",
       userPermissionCurrent: "triage",
+      userProjectAuthorityAuthVersion: null,
+      userProjectAuthorityConnectionGeneration: null,
+      userProjectAuthorityExpiresAt: null,
+      userProjectAuthorityIssuedAt: null,
+      userProjectIds: [],
       userProjectManagementCeiling: false,
       userProjectManagementCurrent: false,
     },
   ]);
+});
+
+test("connection refresh retains only fresh Project authority and re-proof rotates it", async () => {
+  const store = new MemoryConnectionStore();
+  const handlers = createGitHubConnectionHandlers(
+    dependenciesWithUserAuthorization(
+      { createStore: () => store },
+      {
+        proveInstallationAccess: () =>
+          Promise.resolve({
+            repositories: repositories().repositories.map((repository) => ({
+              ...repository,
+              permission: "write" as const,
+              projectIds: ["PVT_permitted"],
+            })),
+            user: { id: "112233", login: "BunsDev" },
+          }),
+      }
+    )
+  );
+  const authorization = await beginUserAuthorization(handlers);
+  assert.equal(
+    (await handlers.callback(oauthCallbackRequest(authorization.state), null))
+      .status,
+    303
+  );
+  assert.equal(store.connections()[0]?.userProjectManagementCurrent, true);
+  assert.deepEqual(store.connections()[0]?.userProjectIds, ["PVT_permitted"]);
+  assert.equal(
+    store.connections()[0]?.userProjectAuthorityAuthVersion,
+    subscriber.authVersion
+  );
+  assert.deepEqual(store.connections()[0]?.userProjectAuthorityIssuedAt, NOW);
+  const firstProofExpiry =
+    store.connections()[0]?.userProjectAuthorityExpiresAt;
+  assert.ok(firstProofExpiry);
+
+  const currentResponse = await handlers.getConnection(
+    new Request("https://app.example/api/github/connection"),
+    null
+  );
+  assert.equal(currentResponse.status, 200);
+  assert.equal(
+    (
+      (await currentResponse.json()) as {
+        projectAuthorityExpiresAt: string | null;
+      }
+    ).projectAuthorityExpiresAt,
+    firstProofExpiry.toISOString()
+  );
+  assert.equal(store.connections()[0]?.userProjectManagementCurrent, true);
+  assert.deepEqual(store.connections()[0]?.userProjectIds, ["PVT_permitted"]);
+
+  const reauthorization = await beginUserAuthorization(handlers);
+  assert.equal(
+    (await handlers.callback(oauthCallbackRequest(reauthorization.state), null))
+      .status,
+    303
+  );
+  assert.equal(store.connections()[0]?.userProjectManagementCurrent, true);
+  assert.ok(
+    (store.connections()[0]?.userProjectAuthorityExpiresAt?.getTime() ?? 0) >=
+      firstProofExpiry.getTime()
+  );
+  assert.equal(
+    store.connections()[0]?.userProjectAuthorityConnectionGeneration,
+    store.generation()
+  );
+});
+
+test("connection refresh revokes expired or stale-session Project proof before public exposure", async () => {
+  for (const authority of [
+    {
+      userProjectAuthorityAuthVersion: subscriber.authVersion,
+      userProjectAuthorityExpiresAt: NOW,
+    },
+    {
+      userProjectAuthorityAuthVersion: subscriber.authVersion - 1,
+      userProjectAuthorityExpiresAt: new Date(NOW.getTime() + 60_000),
+    },
+  ]) {
+    const database = memoryConnectionDatabase([
+      connection({
+        userProjectAuthorityAuthVersion:
+          authority.userProjectAuthorityAuthVersion,
+        userProjectAuthorityConnectionGeneration: 0,
+        userProjectAuthorityExpiresAt: authority.userProjectAuthorityExpiresAt,
+        userProjectAuthorityIssuedAt: new Date(NOW.getTime() - 60_000),
+        userProjectIds: ["PVT_permitted"],
+        userProjectManagementCeiling: true,
+        userProjectManagementCurrent: true,
+      }),
+    ]);
+    const store = new MemoryConnectionStore(database);
+    const handlers = createGitHubConnectionHandlers(
+      dependencies({ createStore: () => store })
+    );
+
+    // biome-ignore lint/performance/noAwaitInLoops: each authority boundary owns an isolated store
+    const response = await handlers.getConnection(
+      new Request("https://app.example/api/github/connection"),
+      null
+    );
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as {
+      projectAuthorityExpiresAt: string | null;
+    };
+    assert.equal(body.projectAuthorityExpiresAt, null);
+    assert.equal(store.connections()[0]?.userProjectManagementCurrent, false);
+    assert.deepEqual(store.connections()[0]?.userProjectIds, []);
+    assert.equal(store.generation(), 1);
+    assert.equal(store.capabilityRevocations(), 1);
+  }
 });
 
 test("foreign valid installation proof is rejected without metadata persistence", async () => {
@@ -1522,6 +1650,11 @@ test("connection GET refreshes a downgraded collaborator ceiling and never resto
     githubUserLogin: "BunsDev",
     userPermissionCeiling: "write",
     userPermissionCurrent: "write",
+    userProjectAuthorityAuthVersion: null,
+    userProjectAuthorityConnectionGeneration: null,
+    userProjectAuthorityExpiresAt: null,
+    userProjectAuthorityIssuedAt: null,
+    userProjectIds: [],
     userProjectManagementCeiling: false,
     userProjectManagementCurrent: false,
   } as never);
@@ -1562,6 +1695,7 @@ test("connection refresh preserves standard triage and maintain roles without ge
       repositoryNodeId: "R_24680",
       userPermissionCeiling: role,
       userPermissionCurrent: role,
+      userProjectIds: [],
     });
     const store = new MemoryConnectionStore(
       memoryConnectionDatabase([initial])
@@ -2274,6 +2408,11 @@ function connection(
     updatedAt: NOW,
     userPermissionCeiling: "write",
     userPermissionCurrent: "write",
+    userProjectAuthorityAuthVersion: null,
+    userProjectAuthorityConnectionGeneration: null,
+    userProjectAuthorityExpiresAt: null,
+    userProjectAuthorityIssuedAt: null,
+    userProjectIds: [],
     userProjectManagementCeiling: false,
     userProjectManagementCurrent: false,
     version: 0,

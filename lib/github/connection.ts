@@ -49,6 +49,11 @@ import {
 } from "./app-auth";
 import { clampUserPermission } from "./authority-types";
 import type { GitHubAppConfig, GitHubEnvironmentState } from "./config";
+import {
+  currentGitHubProjectAuthorityExpiresAt,
+  isCurrentGitHubProjectAuthority,
+  MAX_GITHUB_PROJECT_AUTHORITY_PROOF_LIFETIME_MS,
+} from "./project-authority";
 import type {
   GitHubUserAuthorizationClient,
   GitHubUserInstallationAuthority,
@@ -665,13 +670,21 @@ export function createGitHubConnectionHandlers(
         return errorResponse(dependencies, "github_installation_unusable");
       }
       if (local.length === 0) {
-        return publicConnections([]);
+        return publicConnections([], {
+          authVersion: subscriber.authVersion,
+          connectionGeneration: snapshot.generation,
+          now: now(),
+          tenant: subscriber.principal.tenant,
+        });
       }
 
       let refreshed: GitHubConnectionAuthorityRefreshResult;
       try {
+        const checkedAt = now();
         refreshed = await refreshGitHubConnectionAuthority({
+          authVersion: subscriber.authVersion,
           config: configured,
+          now: checkedAt,
           principal: subscriber.principal,
           provider: dependencies.createProvider(configured),
           snapshot,
@@ -686,7 +699,12 @@ export function createGitHubConnectionHandlers(
       if (refreshed.kind === "unusable") {
         return errorResponse(dependencies, "github_installation_unusable");
       }
-      return publicConnections(refreshed.snapshot.connections);
+      return publicConnections(refreshed.snapshot.connections, {
+        authVersion: subscriber.authVersion,
+        connectionGeneration: refreshed.snapshot.generation,
+        now: now(),
+        tenant: subscriber.principal.tenant,
+      });
     },
     async install(request, ip) {
       const subscriber = await authorize();
@@ -733,8 +751,10 @@ export function createGitHubConnectionHandlers(
 export async function refreshGitHubConnectionAuthority(
   input: Readonly<{
     abortSignal?: AbortSignal;
+    authVersion: number;
     config: GitHubAppConfig;
     deadlineAt?: number;
+    now: Date;
     principal: RunnerPrincipal;
     provider: GitHubConnectionAppClient;
     snapshot?: GitHubConnectionSnapshot;
@@ -756,6 +776,13 @@ export async function refreshGitHubConnectionAuthority(
     }
   };
   assertLive();
+  if (
+    !Number.isSafeInteger(input.authVersion) ||
+    input.authVersion < 0 ||
+    Number.isNaN(input.now.getTime())
+  ) {
+    throw new Error("GitHub connection authority binding is invalid.");
+  }
   const initial =
     input.snapshot ??
     (await input.store.readGitHubConnectionSnapshot(
@@ -783,6 +810,12 @@ export async function refreshGitHubConnectionAuthority(
             existing: initial.connections.filter(
               (connection) => connection.installationId === installationId
             ),
+            projectAuthorityBinding: {
+              authVersion: input.authVersion,
+              connectionGeneration: initial.generation,
+              now: input.now,
+              tenant: input.principal.tenant,
+            },
           }
         );
         assertLive();
@@ -1092,6 +1125,7 @@ async function userAuthorizationCallback(
     claims: checkedState.claims,
     config: input.config,
     dependencies: input.dependencies,
+    now: input.now,
     subscriber: input.subscriber,
   });
   try {
@@ -1119,6 +1153,7 @@ async function completeUserAuthorization(
     claims: GitHubUserAuthorizationStateClaims;
     config: GitHubAppConfig;
     dependencies: GitHubConnectionDependencies;
+    now: () => Date;
     subscriber: RunnerAuthenticatedSubscriber;
   }>
 ): Promise<Extract<CallbackOutcome, { kind: "error" | "redirect" }>> {
@@ -1199,10 +1234,22 @@ async function completeUserAuthorization(
     return { code: "github_state_mismatch", kind: "error" };
   }
   try {
+    const proofIssuedAt = input.now();
+    if (Number.isNaN(proofIssuedAt.getTime())) {
+      return { code: "github_provider_unavailable", kind: "error" };
+    }
     const connected = await store.connectGitHubInstallationConnections(
       input.subscriber.principal,
       {
-        ...replacementInput(input.subscriber.principal, authority),
+        ...replacementInput(input.subscriber.principal, authority, {
+          authVersion: current.authVersion,
+          connectionGeneration: snapshot.generation + 1,
+          expiresAt: new Date(
+            proofIssuedAt.getTime() +
+              MAX_GITHUB_PROJECT_AUTHORITY_PROOF_LIFETIME_MS
+          ),
+          issuedAt: proofIssuedAt,
+        }),
         expectedGeneration: snapshot.generation,
       }
     );
@@ -1227,6 +1274,12 @@ async function verifiedInstallationAuthority(
   input:
     | Readonly<{
         existing: readonly GitHubConnectionRecord[];
+        projectAuthorityBinding: Readonly<{
+          authVersion: number;
+          connectionGeneration: number;
+          now: Date;
+          tenant: string;
+        }>;
       }>
     | Readonly<{
         userAuthority: GitHubUserInstallationAuthority;
@@ -1309,8 +1362,13 @@ async function verifiedInstallationAuthority(
         repositoryOwner: selected.owner,
         userPermissionCeiling: userRepository.permission,
         userPermissionCurrent: userRepository.permission,
-        userProjectManagementCeiling: false,
-        userProjectManagementCurrent: false,
+        userProjectAuthorityAuthVersion: null,
+        userProjectAuthorityConnectionGeneration: null,
+        userProjectAuthorityExpiresAt: null,
+        userProjectAuthorityIssuedAt: null,
+        userProjectIds: [...userRepository.projectIds],
+        userProjectManagementCeiling: userRepository.projectIds.length > 0,
+        userProjectManagementCurrent: userRepository.projectIds.length > 0,
       });
     }
   } else {
@@ -1367,6 +1425,10 @@ async function verifiedInstallationAuthority(
       if (!current) {
         continue;
       }
+      const projectAuthorityCurrent = isCurrentGitHubProjectAuthority(
+        existing,
+        input.projectAuthorityBinding
+      );
       repositories.push({
         appContentsPermission,
         appIssuesPermission,
@@ -1381,8 +1443,23 @@ async function verifiedInstallationAuthority(
         repositoryOwner: selected.owner,
         userPermissionCeiling: existing.userPermissionCeiling,
         userPermissionCurrent: current,
+        userProjectAuthorityAuthVersion: projectAuthorityCurrent
+          ? existing.userProjectAuthorityAuthVersion
+          : null,
+        userProjectAuthorityConnectionGeneration: projectAuthorityCurrent
+          ? existing.userProjectAuthorityConnectionGeneration
+          : null,
+        userProjectAuthorityExpiresAt: projectAuthorityCurrent
+          ? existing.userProjectAuthorityExpiresAt
+          : null,
+        userProjectAuthorityIssuedAt: projectAuthorityCurrent
+          ? existing.userProjectAuthorityIssuedAt
+          : null,
+        userProjectIds: projectAuthorityCurrent
+          ? [...existing.userProjectIds]
+          : [],
         userProjectManagementCeiling: existing.userProjectManagementCeiling,
-        userProjectManagementCurrent: false,
+        userProjectManagementCurrent: projectAuthorityCurrent,
       });
     }
   }
@@ -1397,7 +1474,13 @@ async function verifiedInstallationAuthority(
 
 function replacementInput(
   principal: RunnerPrincipal,
-  authority: VerifiedInstallationAuthority
+  authority: VerifiedInstallationAuthority,
+  projectProof?: Readonly<{
+    authVersion: number;
+    connectionGeneration: number;
+    expiresAt: Date;
+    issuedAt: Date;
+  }>
 ): ReplaceGitHubInstallationConnectionsInput {
   return {
     accountId: authority.installation.account.id,
@@ -1411,6 +1494,30 @@ function replacementInput(
           principal.tenant,
           repository.repositoryId
         ),
+        userProjectAuthorityAuthVersion:
+          projectProof === undefined
+            ? repository.userProjectAuthorityAuthVersion
+            : repository.userProjectIds.length > 0
+              ? projectProof.authVersion
+              : null,
+        userProjectAuthorityConnectionGeneration:
+          projectProof === undefined
+            ? repository.userProjectAuthorityConnectionGeneration
+            : repository.userProjectIds.length > 0
+              ? projectProof.connectionGeneration
+              : null,
+        userProjectAuthorityExpiresAt:
+          projectProof === undefined
+            ? repository.userProjectAuthorityExpiresAt
+            : repository.userProjectIds.length > 0
+              ? projectProof.expiresAt
+              : null,
+        userProjectAuthorityIssuedAt:
+          projectProof === undefined
+            ? repository.userProjectAuthorityIssuedAt
+            : repository.userProjectIds.length > 0
+              ? projectProof.issuedAt
+              : null,
       }))
       .sort((left, right) =>
         compareAscii(left.repositoryId, right.repositoryId)
@@ -1591,7 +1698,19 @@ function configuredOrigin(
   }
 }
 
-function publicConnections(connections: readonly GitHubConnectionRecord[]) {
+function publicConnections(
+  connections: readonly GitHubConnectionRecord[],
+  binding: Readonly<{
+    authVersion: number;
+    connectionGeneration: number;
+    now: Date;
+    tenant: string;
+  }>
+) {
+  const projectAuthorityExpiresAt = currentGitHubProjectAuthorityExpiresAt(
+    connections,
+    binding
+  );
   return Response.json(
     {
       connected: connections.length > 0,
@@ -1616,6 +1735,8 @@ function publicConnections(connections: readonly GitHubConnectionRecord[]) {
           },
           updatedAt: connection.updatedAt.toISOString(),
         })),
+      projectAuthorityExpiresAt:
+        projectAuthorityExpiresAt?.toISOString() ?? null,
     },
     { headers: { "cache-control": "no-store" } }
   );

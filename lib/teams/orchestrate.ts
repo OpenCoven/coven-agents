@@ -203,8 +203,10 @@ export function createTeamOrchestrator(
               authVersion: claim.authVersion,
               connectionSnapshot: snapshot,
               declaredCapabilities: claim.declaredCapabilities,
+              now: new Date(),
               teamRunId: claim.teamRunId,
               teamStepId: claim.teamStepId,
+              tenant: claim.principal.tenant,
             });
           } catch {
             failures += 1;

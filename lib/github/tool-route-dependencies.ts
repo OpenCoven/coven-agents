@@ -50,8 +50,10 @@ export function productionGitHubToolHandler() {
         refreshAuthority: async ({ abortSignal, context, deadlineAt }) => {
           const refreshed = await refreshGitHubConnectionAuthority({
             abortSignal,
+            authVersion: context.capability.authVersion,
             config,
             deadlineAt,
+            now: new Date(),
             principal: {
               kind: "subscriber",
               tenant: context.capability.tenant,

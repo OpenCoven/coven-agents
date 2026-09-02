@@ -156,6 +156,11 @@ function githubConnectionRow(
     updatedAt: NOW,
     userPermissionCeiling: "write",
     userPermissionCurrent: "write",
+    userProjectAuthorityAuthVersion: null,
+    userProjectAuthorityConnectionGeneration: null,
+    userProjectAuthorityExpiresAt: null,
+    userProjectAuthorityIssuedAt: null,
+    userProjectIds: [],
     userProjectManagementCeiling: false,
     userProjectManagementCurrent: false,
     version: 0,
@@ -174,6 +179,12 @@ function githubConnectionAuthority(connection: GitHubConnectionRecord) {
     githubUserLogin: connection.githubUserLogin,
     userPermissionCeiling: connection.userPermissionCeiling,
     userPermissionCurrent: connection.userPermissionCurrent,
+    userProjectAuthorityAuthVersion: connection.userProjectAuthorityAuthVersion,
+    userProjectAuthorityConnectionGeneration:
+      connection.userProjectAuthorityConnectionGeneration,
+    userProjectAuthorityExpiresAt: connection.userProjectAuthorityExpiresAt,
+    userProjectAuthorityIssuedAt: connection.userProjectAuthorityIssuedAt,
+    userProjectIds: connection.userProjectIds,
     userProjectManagementCeiling: connection.userProjectManagementCeiling,
     userProjectManagementCurrent: connection.userProjectManagementCurrent,
   };
@@ -2471,6 +2482,36 @@ test("GitHub connection stores decimal metadata without an access token field", 
   }
 });
 
+test("GitHub connection rejects current Project authority without a complete bounded proof", async () => {
+  const row = githubConnectionRow();
+  const { statements, store } = scripted();
+
+  await assert.rejects(
+    fencedGitHubStore(store).connectGitHubInstallationConnections(principal, {
+      accountId: row.accountId,
+      accountLogin: row.accountLogin,
+      accountType: row.accountType,
+      expectedGeneration: 0,
+      installationId: row.installationId,
+      repositories: [
+        {
+          ...githubConnectionAuthority(row),
+          id: row.id,
+          repositoryId: row.repositoryId,
+          repositoryName: row.repositoryName,
+          repositoryNodeId: row.repositoryNodeId,
+          repositoryOwner: row.repositoryOwner,
+          userProjectIds: ["PVT_permitted"],
+          userProjectManagementCeiling: true,
+          userProjectManagementCurrent: true,
+        },
+      ],
+    }),
+    /project|proof|authority|metadata/i
+  );
+  assert.equal(statements.length, 0);
+});
+
 test("GitHub connection listing is tenant fenced and publicly bounded", async () => {
   const row = githubConnectionRow();
   const { statements, store } = scripted([], [{ generation: "3" }], [row]);
@@ -2619,6 +2660,48 @@ test("GitHub reconnect advances the exact generation while stale reconnect and r
   assert.deepEqual(
     staleRemoval.statements.map(({ name }) => name),
     ["ensure-github-connection-fence", "lock-github-connection-fence"]
+  );
+});
+
+test("GitHub reconnect cannot reuse Project proof from the prior connection generation", async () => {
+  const current = githubConnectionRow({
+    userProjectAuthorityAuthVersion: 8,
+    userProjectAuthorityConnectionGeneration: 7,
+    userProjectAuthorityExpiresAt: new Date("2026-08-31T00:15:00.000Z"),
+    userProjectAuthorityIssuedAt: NOW,
+    userProjectIds: ["PVT_current"],
+    userProjectManagementCeiling: true,
+    userProjectManagementCurrent: true,
+  });
+  const fixture = scripted(
+    [],
+    [{ generation: "7" }],
+    [current],
+    [{ generation: "8" }]
+  );
+
+  await assert.rejects(
+    fencedGitHubStore(fixture.store).connectGitHubInstallationConnections(
+      principal,
+      {
+        accountId: current.accountId,
+        accountLogin: current.accountLogin,
+        accountType: current.accountType,
+        expectedGeneration: 7,
+        installationId: current.installationId,
+        repositories: [
+          {
+            ...githubConnectionAuthority(current),
+            id: current.id,
+            repositoryId: current.repositoryId,
+            repositoryName: current.repositoryName,
+            repositoryNodeId: current.repositoryNodeId,
+            repositoryOwner: current.repositoryOwner,
+          },
+        ],
+      }
+    ),
+    /proof generation is stale/i
   );
 });
 
@@ -2782,6 +2865,74 @@ test("identical GitHub refreshes are deterministic no-ops", async () => {
       "lock-github-connection-fence",
       "list-github-tenant-connections-for-update",
     ]
+  );
+});
+
+test("GitHub refresh changes revoke Project proof instead of carrying it into a new generation", async () => {
+  const current = githubConnectionRow({
+    userProjectAuthorityAuthVersion: 8,
+    userProjectAuthorityConnectionGeneration: 5,
+    userProjectAuthorityExpiresAt: new Date("2026-08-31T00:15:00.000Z"),
+    userProjectAuthorityIssuedAt: NOW,
+    userProjectIds: ["PVT_current"],
+    userProjectManagementCeiling: true,
+    userProjectManagementCurrent: true,
+  });
+  const revoked = githubConnectionRow({
+    appIssuesPermission: "read",
+    userProjectManagementCeiling: true,
+  });
+  const { statements, store } = scripted(
+    [],
+    [{ generation: "5" }],
+    [current],
+    [{ generation: "6" }],
+    [revoked],
+    [],
+    [{ id: CAPABILITY_A }]
+  );
+
+  const result = await fencedGitHubStore(
+    store
+  ).refreshGitHubInstallationConnections(principal, {
+    accountId: current.accountId,
+    accountLogin: current.accountLogin,
+    accountType: current.accountType,
+    expectedGeneration: 5,
+    installationId: current.installationId,
+    repositories: [
+      {
+        ...githubConnectionAuthority(current),
+        appIssuesPermission: "read",
+        id: current.id,
+        repositoryId: current.repositoryId,
+        repositoryName: current.repositoryName,
+        repositoryNodeId: current.repositoryNodeId,
+        repositoryOwner: current.repositoryOwner,
+      },
+    ],
+  });
+
+  assert.deepEqual(result, {
+    changed: true,
+    connections: [revoked],
+    generation: 6,
+    kind: "refreshed",
+  });
+  const upsert = statements.find(
+    ({ name }) => name === "upsert-github-installation-connection"
+  );
+  assert.equal(upsert?.args.userProjectManagementCurrent, false);
+  assert.deepEqual(upsert?.args.userProjectIds, []);
+  assert.equal(upsert?.args.userProjectAuthorityAuthVersion, null);
+  assert.equal(upsert?.args.userProjectAuthorityConnectionGeneration, null);
+  assert.equal(upsert?.args.userProjectAuthorityExpiresAt, null);
+  assert.equal(upsert?.args.userProjectAuthorityIssuedAt, null);
+  assert.ok(
+    statements.some(
+      ({ name }) =>
+        name === "revoke-github-capabilities-after-connection-change"
+    )
   );
 });
 

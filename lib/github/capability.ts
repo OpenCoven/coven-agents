@@ -38,6 +38,10 @@ import {
   githubOperationMarker,
   githubOperationRepository,
 } from "./operations";
+import {
+  isCurrentGitHubProjectAuthority,
+  isWellFormedGitHubProjectAuthority,
+} from "./project-authority";
 
 const TENANT = /^[A-Za-z0-9_]{1,64}$/u;
 const DECIMAL_ID = /^[1-9][0-9]{0,19}$/u;
@@ -105,8 +109,14 @@ export type GitHubBrokerRepository = Readonly<{
   repositoryName: string;
   repositoryNodeId: string;
   repositoryOwner: string;
+  tenant: string;
   userPermissionCeiling: GitHubUserRepositoryPermission;
   userPermissionCurrent: GitHubUserRepositoryPermission;
+  userProjectIds: readonly string[];
+  userProjectAuthorityAuthVersion: number | null;
+  userProjectAuthorityConnectionGeneration: number | null;
+  userProjectAuthorityExpiresAt: string | null;
+  userProjectAuthorityIssuedAt: string | null;
   userProjectManagementCeiling: boolean;
   userProjectManagementCurrent: boolean;
 }>;
@@ -122,6 +132,7 @@ export type GitHubBrokerPolicy = Readonly<{
   repositories: readonly GitHubBrokerRepository[];
   teamRunId: string;
   teamStepId: string;
+  tenant: string;
   version: 1;
 }>;
 
@@ -131,8 +142,10 @@ type BuildGitHubBrokerPolicyInput = Readonly<{
   authVersion: number;
   connectionSnapshot: GitHubConnectionSnapshot;
   declaredCapabilities: readonly TeamCapability[];
+  now: Date;
   teamRunId: string;
   teamStepId: string;
+  tenant: string;
 }>;
 
 function assertExactObject(
@@ -169,7 +182,13 @@ function assertIdentity(input: BuildGitHubBrokerPolicyInput): void {
 }
 
 function brokerRepository(
-  connection: GitHubConnectionSnapshot["connections"][number]
+  connection: GitHubConnectionSnapshot["connections"][number],
+  binding: Readonly<{
+    authVersion: number;
+    connectionGeneration: number;
+    now: Date;
+    tenant: string;
+  }>
 ): GitHubBrokerRepository {
   if (
     !isCanonicalUuid(connection.id) ||
@@ -194,10 +213,17 @@ function brokerRepository(
       connection.userPermissionCurrent,
       connection.userPermissionCeiling
     ) ||
+    connection.tenant !== binding.tenant ||
     typeof connection.userProjectManagementCeiling !== "boolean" ||
     typeof connection.userProjectManagementCurrent !== "boolean" ||
-    (connection.userProjectManagementCurrent &&
-      !connection.userProjectManagementCeiling) ||
+    !Array.isArray(connection.userProjectIds) ||
+    connection.userProjectIds.length > 100 ||
+    connection.userProjectIds.some(
+      (projectId) => typeof projectId !== "string" || !NODE_ID.test(projectId)
+    ) ||
+    new Set(connection.userProjectIds).size !==
+      connection.userProjectIds.length ||
+    !isWellFormedGitHubProjectAuthority(connection) ||
     (connection.accountType !== "Organization" &&
       connection.accountType !== "User")
   ) {
@@ -221,8 +247,17 @@ function brokerRepository(
     repositoryName: connection.repositoryName,
     repositoryNodeId: connection.repositoryNodeId,
     repositoryOwner: connection.repositoryOwner,
+    tenant: connection.tenant,
     userPermissionCeiling: connection.userPermissionCeiling,
     userPermissionCurrent: connection.userPermissionCurrent,
+    userProjectAuthorityAuthVersion: connection.userProjectAuthorityAuthVersion,
+    userProjectAuthorityConnectionGeneration:
+      connection.userProjectAuthorityConnectionGeneration,
+    userProjectAuthorityExpiresAt:
+      connection.userProjectAuthorityExpiresAt?.toISOString() ?? null,
+    userProjectAuthorityIssuedAt:
+      connection.userProjectAuthorityIssuedAt?.toISOString() ?? null,
+    userProjectIds: [...connection.userProjectIds],
     userProjectManagementCeiling: connection.userProjectManagementCeiling,
     userProjectManagementCurrent: connection.userProjectManagementCurrent,
   };
@@ -230,14 +265,22 @@ function brokerRepository(
 
 function repositoryAllowsCapability(
   repository: GitHubBrokerRepository,
-  capability: TeamCapability
+  capability: TeamCapability,
+  binding: Readonly<{
+    authVersion: number;
+    connectionGeneration: number;
+    now: Date;
+    tenant: string;
+  }>,
+  projectId?: string
 ): boolean {
   const write = capability.endsWith(".write");
   if (capability.startsWith("github.projects.")) {
     return (
       repository.accountType === "Organization" &&
-      repository.userProjectManagementCeiling &&
-      repository.userProjectManagementCurrent &&
+      isCurrentGitHubProjectAuthority(repository, binding) &&
+      (projectId === undefined ||
+        repository.userProjectIds.includes(projectId)) &&
       appPermissionAtLeast(
         repository.appOrganizationProjectsPermission,
         write ? "write" : "read"
@@ -273,12 +316,17 @@ export function buildGitHubBrokerPolicy(
       "authVersion",
       "connectionSnapshot",
       "declaredCapabilities",
+      "now",
       "teamRunId",
       "teamStepId",
+      "tenant",
     ],
     "GitHub broker policy input"
   );
   assertIdentity(input);
+  if (!TENANT.test(input.tenant) || Number.isNaN(input.now.getTime())) {
+    throw new Error("GitHub broker policy authority binding is invalid.");
+  }
   if (
     !Number.isSafeInteger(input.connectionSnapshot.generation) ||
     input.connectionSnapshot.generation < 0
@@ -313,7 +361,14 @@ export function buildGitHubBrokerPolicy(
     )
   );
   const repositories = input.connectionSnapshot.connections
-    .map(brokerRepository)
+    .map((connection) =>
+      brokerRepository(connection, {
+        authVersion: input.authVersion,
+        connectionGeneration: input.connectionSnapshot.generation,
+        now: input.now,
+        tenant: input.tenant,
+      })
+    )
     .sort((left, right) => compareAscii(left.repository, right.repository));
   if (
     new Set(repositories.map(({ repository }) => repository)).size !==
@@ -326,7 +381,12 @@ export function buildGitHubBrokerPolicy(
       (capability.endsWith(".read") ||
         approvedCapabilities.includes(capability)) &&
       repositories.some((repository) =>
-        repositoryAllowsCapability(repository, capability)
+        repositoryAllowsCapability(repository, capability, {
+          authVersion: input.authVersion,
+          connectionGeneration: input.connectionSnapshot.generation,
+          now: input.now,
+          tenant: input.tenant,
+        })
       )
   );
   if (allowedCapabilities.length === 0) {
@@ -344,6 +404,7 @@ export function buildGitHubBrokerPolicy(
     repositories,
     teamRunId: input.teamRunId,
     teamStepId: input.teamStepId,
+    tenant: input.tenant,
     version: 1,
   };
 }
@@ -420,6 +481,7 @@ export async function issueGitHubStepCapability(
     !isCanonicalUuid(input.userId) ||
     !TENANT.test(input.tenant) ||
     input.policy.teamStepId.length === 0 ||
+    input.policy.tenant !== input.tenant ||
     input.policy.actorUserId !== input.userId ||
     input.policy.authVersion < 0 ||
     Number.isNaN(input.now.valueOf()) ||
@@ -477,8 +539,10 @@ export async function issueGitHubStepCapability(
       authVersion: input.policy.authVersion,
       connectionSnapshot: refreshed,
       declaredCapabilities: input.policy.declaredCapabilities,
+      now: input.now,
       teamRunId: input.policy.teamRunId,
       teamStepId: input.policy.teamStepId,
+      tenant: input.tenant,
     });
     if (
       canonicalJsonStringify(currentPolicy) !==
@@ -590,6 +654,8 @@ export type GitHubGatewayOperationRecord = Readonly<{
   kind: GitHubOperationKind;
   operationId: string;
   operationMarker: string | null;
+  projectAuthorityBound: boolean;
+  projectId: string | null;
   providerDispatchPhase: "not_applicable" | "pre_send" | "sent";
   providerRequestId: string | null;
   providerSentAt: Date | null;
@@ -710,6 +776,21 @@ function nullableDateColumn(
   return value === null ? null : dateColumn(row, name);
 }
 
+function nullableNumberColumn(
+  row: Record<string, unknown>,
+  name: string
+): number | null {
+  const value = column<unknown>(row, name);
+  if (value === null) {
+    return null;
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error(`GitHub gateway query returned an invalid "${name}".`);
+  }
+  return parsed;
+}
+
 function asCapability(
   row: Record<string, unknown>
 ): GitHubGatewayCapabilityRecord {
@@ -756,6 +837,8 @@ function asOperation(
     kind: column(row, "kind"),
     operationId: column(row, "operationId"),
     operationMarker: column(row, "operationMarker"),
+    projectAuthorityBound: column(row, "projectAuthorityBound"),
+    projectId: column(row, "projectId"),
     providerDispatchPhase: column(row, "providerDispatchPhase"),
     providerRequestId: column(row, "providerRequestId"),
     providerSentAt: nullableDateColumn(row, "providerSentAt"),
@@ -812,6 +895,8 @@ function operationMatches(
     capabilityId: string;
     kind: GitHubOperationKind;
     operationMarker: string | null;
+    projectAuthorityBound: boolean;
+    projectId: string | null;
     repository: string;
     requestHash: string;
     requiredCapability: TeamCapability;
@@ -827,7 +912,9 @@ function operationMatches(
     operation.repository === input.repository &&
     operation.requiredCapability === input.requiredCapability &&
     operation.target === input.target &&
-    operation.operationMarker === input.operationMarker
+    operation.operationMarker === input.operationMarker &&
+    operation.projectAuthorityBound === input.projectAuthorityBound &&
+    operation.projectId === input.projectId
   );
 }
 
@@ -856,7 +943,8 @@ function capabilityAuthorityIsLive(
   inputHash: string,
   requiredCapability: TeamCapability,
   classification: "read" | "write",
-  repository: string
+  repository: string,
+  projectId?: string
 ): boolean {
   const capability = asCapability(row);
   const databaseNow = dateColumn(row, "databaseNow");
@@ -892,7 +980,17 @@ function capabilityAuthorityIsLive(
       capability.connectionGeneration &&
     runnerBrokerPolicy !== null &&
     policyRepository !== undefined &&
-    repositoryAllowsCapability(policyRepository, requiredCapability) &&
+    repositoryAllowsCapability(
+      policyRepository,
+      requiredCapability,
+      {
+        authVersion: capability.authVersion,
+        connectionGeneration: capability.connectionGeneration,
+        now: databaseNow,
+        tenant: capability.tenant,
+      },
+      projectId
+    ) &&
     policyRepository.connectionId === column(row, "connectionId") &&
     policyRepository.githubUserId === column(row, "githubUserId") &&
     policyRepository.githubUserLogin === column(row, "githubUserLogin") &&
@@ -900,6 +998,20 @@ function capabilityAuthorityIsLive(
       column(row, "userPermissionCeiling") &&
     policyRepository.userPermissionCurrent ===
       column(row, "userPermissionCurrent") &&
+    JSON.stringify(policyRepository.userProjectIds) ===
+      JSON.stringify(column(row, "userProjectIds")) &&
+    policyRepository.userProjectAuthorityAuthVersion ===
+      nullableNumberColumn(row, "userProjectAuthorityAuthVersion") &&
+    policyRepository.userProjectAuthorityConnectionGeneration ===
+      nullableNumberColumn(row, "userProjectAuthorityConnectionGeneration") &&
+    policyRepository.userProjectAuthorityExpiresAt ===
+      (nullableDateColumn(
+        row,
+        "userProjectAuthorityExpiresAt"
+      )?.toISOString() ?? null) &&
+    policyRepository.userProjectAuthorityIssuedAt ===
+      (nullableDateColumn(row, "userProjectAuthorityIssuedAt")?.toISOString() ??
+        null) &&
     policyRepository.userProjectManagementCeiling ===
       column(row, "userProjectManagementCeiling") &&
     policyRepository.userProjectManagementCurrent ===
@@ -920,6 +1032,7 @@ function capabilityAuthorityIsLive(
     column(row, "actorUserId") === runnerBrokerPolicy.actorUserId &&
     runnerBrokerPolicy.teamStepId === capability.teamStepId &&
     runnerBrokerPolicy.teamRunId === capability.teamRunId &&
+    runnerBrokerPolicy.tenant === capability.tenant &&
     exactCapabilities(
       capability.declaredCapabilities,
       runnerBrokerPolicy.declaredCapabilities
@@ -1061,8 +1174,24 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
                       AND "connection"."accountType" = 'Organization'
                       AND "connection"."appOrganizationProjectsPermission" =
                         'write'
+                      AND "operation"."projectAuthorityBound" = true
+                      AND "operation"."projectId" IS NOT NULL
+                      AND "connection"."userProjectIds" ?
+                        "operation"."projectId"
                       AND "connection"."userProjectManagementCeiling" = true
                       AND "connection"."userProjectManagementCurrent" = true
+                      AND "connection"."userProjectAuthorityIssuedAt" <=
+                        clock_timestamp()
+                      AND "connection"."userProjectAuthorityExpiresAt" >
+                        clock_timestamp()
+                      AND "connection"."userProjectAuthorityExpiresAt" <=
+                        "connection"."userProjectAuthorityIssuedAt" +
+                          interval '15 minutes'
+                      AND "connection"."userProjectAuthorityAuthVersion" =
+                        "capability"."authVersion"
+                      AND
+                        "connection"."userProjectAuthorityConnectionGeneration" =
+                          "capability"."connectionGeneration"
                     )
                   )
                   AND (
@@ -1087,6 +1216,12 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
                         "connection"."userPermissionCeiling",
                       'userPermissionCurrent',
                         "connection"."userPermissionCurrent",
+                      'userProjectIds',
+                        "connection"."userProjectIds",
+                      'userProjectAuthorityAuthVersion',
+                        "connection"."userProjectAuthorityAuthVersion",
+                      'userProjectAuthorityConnectionGeneration',
+                        "connection"."userProjectAuthorityConnectionGeneration",
                       'userProjectManagementCeiling',
                         "connection"."userProjectManagementCeiling",
                       'userProjectManagementCurrent',
@@ -1098,7 +1233,8 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
                       'appPullRequestsPermission',
                         "connection"."appPullRequestsPermission",
                       'appOrganizationProjectsPermission',
-                        "connection"."appOrganizationProjectsPermission"
+                        "connection"."appOrganizationProjectsPermission",
+                      'tenant', "connection"."tenant"
                     ))
                   AND "runnerRun"."daytonaAttemptId" =
                     "capability"."attemptId"::text
@@ -1646,6 +1782,11 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
                 "connection"."repositoryOwner",
                 "connection"."userPermissionCeiling",
                 "connection"."userPermissionCurrent",
+                "connection"."userProjectIds",
+                "connection"."userProjectAuthorityAuthVersion",
+                "connection"."userProjectAuthorityConnectionGeneration",
+                "connection"."userProjectAuthorityExpiresAt",
+                "connection"."userProjectAuthorityIssuedAt",
                 "connection"."userProjectManagementCeiling",
                 "connection"."userProjectManagementCurrent"
               FROM "RunnerGitHubCapability" AS "capability"
@@ -1681,7 +1822,11 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
               input.tokenHash,
               authority.capability,
               authority.classification,
-              repository
+              repository,
+              operation.kind === "project.item.add" ||
+                operation.kind === "project.item.field.update"
+                ? operation.projectId
+                : undefined
             )
           ) {
             return { kind: "unauthorized" as const };
@@ -1744,6 +1889,14 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
                 capabilityId: capability.id,
                 kind: operation.kind,
                 operationMarker,
+                projectAuthorityBound:
+                  operation.kind === "project.item.add" ||
+                  operation.kind === "project.item.field.update",
+                projectId:
+                  operation.kind === "project.item.add" ||
+                  operation.kind === "project.item.field.update"
+                    ? operation.projectId
+                    : null,
                 repository,
                 requestHash: input.requestHash,
                 requiredCapability: authority.capability,
@@ -1931,6 +2084,14 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
                 kind: operation.kind,
                 operationId: input.operationId,
                 operationMarker,
+                projectAuthorityBound:
+                  operation.kind === "project.item.add" ||
+                  operation.kind === "project.item.field.update",
+                projectId:
+                  operation.kind === "project.item.add" ||
+                  operation.kind === "project.item.field.update"
+                    ? operation.projectId
+                    : null,
                 providerDispatchPhase:
                   authority.classification === "write"
                     ? "pre_send"
@@ -1952,7 +2113,8 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
                   "id", "tenant", "teamStepId", "capabilityId", "operationId",
                   "kind", "requestHash", "target", "repository",
                   "requiredCapability", "connectionId",
-                  "connectionGeneration", "operationMarker", "status",
+                  "connectionGeneration", "operationMarker",
+                  "projectAuthorityBound", "projectId", "status",
                   "startedAt", "executionLeaseExpiresAt", "accountId",
                   "accountLogin", "accountType", "installationId",
                   "repositoryId", "repositoryName", "repositoryNodeId",
@@ -1964,6 +2126,16 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
                   ${input.requestHash}, ${input.target}, ${repository},
                   ${authority.capability}, ${column(row, "connectionId")},
                   ${capability.connectionGeneration}, ${operationMarker},
+                  ${
+                    operation.kind === "project.item.add" ||
+                    operation.kind === "project.item.field.update"
+                  },
+                  ${
+                    operation.kind === "project.item.add" ||
+                    operation.kind === "project.item.field.update"
+                      ? operation.projectId
+                      : null
+                  },
                   'running', clock_timestamp(),
                   ${input.executionLeaseExpiresAt.toISOString()},
                   ${column(row, "accountId")}, ${column(row, "accountLogin")},

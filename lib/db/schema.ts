@@ -1412,6 +1412,21 @@ export const runnerGitHubConnection = pgTable(
     })
       .$type<GitHubUserRepositoryPermission>()
       .notNull(),
+    userProjectAuthorityAuthVersion: integer("userProjectAuthorityAuthVersion"),
+    userProjectAuthorityConnectionGeneration: bigint(
+      "userProjectAuthorityConnectionGeneration",
+      { mode: "number" }
+    ),
+    userProjectAuthorityExpiresAt: timestamp("userProjectAuthorityExpiresAt", {
+      withTimezone: true,
+    }),
+    userProjectAuthorityIssuedAt: timestamp("userProjectAuthorityIssuedAt", {
+      withTimezone: true,
+    }),
+    userProjectIds: jsonb("userProjectIds")
+      .$type<string[]>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
     userProjectManagementCeiling: boolean(
       "userProjectManagementCeiling"
     ).notNull(),
@@ -1438,7 +1453,7 @@ export const runnerGitHubConnection = pgTable(
     ),
     check(
       "RGHConn_authority_valid",
-      sql`${table.appContentsPermission} in ('none','read','write') and ${table.appIssuesPermission} in ('none','read','write') and ${table.appPullRequestsPermission} in ('none','read','write') and ${table.appOrganizationProjectsPermission} in ('none','read','write') and ${table.userPermissionCeiling} in ('read','triage','write','maintain','admin') and ${table.userPermissionCurrent} in ('read','triage','write','maintain','admin') and CASE ${table.userPermissionCurrent} WHEN 'read' THEN 1 WHEN 'triage' THEN 2 WHEN 'write' THEN 3 WHEN 'maintain' THEN 4 WHEN 'admin' THEN 5 ELSE 0 END <= CASE ${table.userPermissionCeiling} WHEN 'read' THEN 1 WHEN 'triage' THEN 2 WHEN 'write' THEN 3 WHEN 'maintain' THEN 4 WHEN 'admin' THEN 5 ELSE 0 END and (not ${table.userProjectManagementCurrent} or ${table.userProjectManagementCeiling}) and char_length(${table.githubUserLogin}) between 1 and 100 and ${table.githubUserLogin} ~ '^[A-Za-z0-9_.-]+$'`
+      sql`${table.appContentsPermission} in ('none','read','write') and ${table.appIssuesPermission} in ('none','read','write') and ${table.appPullRequestsPermission} in ('none','read','write') and ${table.appOrganizationProjectsPermission} in ('none','read','write') and ${table.userPermissionCeiling} in ('read','triage','write','maintain','admin') and ${table.userPermissionCurrent} in ('read','triage','write','maintain','admin') and CASE ${table.userPermissionCurrent} WHEN 'read' THEN 1 WHEN 'triage' THEN 2 WHEN 'write' THEN 3 WHEN 'maintain' THEN 4 WHEN 'admin' THEN 5 ELSE 0 END <= CASE ${table.userPermissionCeiling} WHEN 'read' THEN 1 WHEN 'triage' THEN 2 WHEN 'write' THEN 3 WHEN 'maintain' THEN 4 WHEN 'admin' THEN 5 ELSE 0 END and jsonb_typeof(${table.userProjectIds}) = 'array' and jsonb_array_length(${table.userProjectIds}) <= 100 and not jsonb_path_exists(${table.userProjectIds}, '$[*] ? (!(@ like_regex "^[A-Za-z0-9_=-]{1,256}$"))') and ((${table.userProjectManagementCurrent} and ${table.userProjectManagementCeiling} and jsonb_array_length(${table.userProjectIds}) > 0 and ${table.userProjectAuthorityAuthVersion} >= 0 and ${table.userProjectAuthorityConnectionGeneration} >= 0 and ${table.userProjectAuthorityIssuedAt} is not null and ${table.userProjectAuthorityExpiresAt} > ${table.userProjectAuthorityIssuedAt} and ${table.userProjectAuthorityExpiresAt} <= ${table.userProjectAuthorityIssuedAt} + interval '15 minutes') or (not ${table.userProjectManagementCurrent} and jsonb_array_length(${table.userProjectIds}) = 0 and ${table.userProjectAuthorityAuthVersion} is null and ${table.userProjectAuthorityConnectionGeneration} is null and ${table.userProjectAuthorityIssuedAt} is null and ${table.userProjectAuthorityExpiresAt} is null)) and char_length(${table.githubUserLogin}) between 1 and 100 and ${table.githubUserLogin} ~ '^[A-Za-z0-9_.-]+$'`
     ),
     check("RGHConn_version_valid", sql`${table.version} >= 0`),
   ]
@@ -1575,6 +1590,10 @@ export const runnerGitHubOperation = pgTable(
       .notNull(),
     operationId: uuid("operationId").notNull(),
     operationMarker: varchar("operationMarker", { length: 80 }),
+    projectAuthorityBound: boolean("projectAuthorityBound")
+      .notNull()
+      .default(false),
+    projectId: varchar("projectId", { length: 256 }),
     providerDispatchPhase: varchar("providerDispatchPhase", {
       enum: ["not_applicable", "pre_send", "sent"],
       length: 16,
@@ -1672,7 +1691,7 @@ export const runnerGitHubOperation = pgTable(
     ),
     check(
       "RGHOp_connectionSnapshot_valid",
-      sql`${table.installationId} ~ '^[1-9][0-9]{0,19}$' and ${table.accountId} ~ '^[1-9][0-9]{0,19}$' and ${table.repositoryId} ~ '^[1-9][0-9]{0,19}$' and ${table.accountType} in ('Organization','User') and char_length(${table.repositoryNodeId}) between 1 and 256 and ${table.repositoryNodeId} ~ '^[A-Za-z0-9_=-]+$'`
+      sql`${table.installationId} ~ '^[1-9][0-9]{0,19}$' and ${table.accountId} ~ '^[1-9][0-9]{0,19}$' and ${table.repositoryId} ~ '^[1-9][0-9]{0,19}$' and ${table.accountType} in ('Organization','User') and char_length(${table.repositoryNodeId}) between 1 and 256 and ${table.repositoryNodeId} ~ '^[A-Za-z0-9_=-]+$' and ((${table.kind} in ('project.item.add','project.item.field.update') and ((${table.projectAuthorityBound} and ${table.projectId} ~ '^[A-Za-z0-9_=-]{1,256}$') or (not ${table.projectAuthorityBound} and ${table.projectId} is null))) or (${table.kind} not in ('project.item.add','project.item.field.update') and not ${table.projectAuthorityBound} and ${table.projectId} is null))`
     ),
     check(
       "RGHOp_capability_mapping_valid",

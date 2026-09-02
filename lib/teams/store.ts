@@ -27,6 +27,7 @@ import {
   validAppRepositoryPermission,
   validUserRepositoryPermission,
 } from "@/lib/github/authority-types";
+import { MAX_GITHUB_PROJECT_AUTHORITY_PROOF_LIFETIME_MS } from "@/lib/github/project-authority";
 import type {
   RunnerAgentExecutionSnapshot,
   RunnerExecutionPermission,
@@ -202,6 +203,11 @@ export type GitHubConnectionRecord = {
   updatedAt: Date;
   userPermissionCeiling: GitHubUserRepositoryPermission;
   userPermissionCurrent: GitHubUserRepositoryPermission;
+  userProjectIds: readonly string[];
+  userProjectAuthorityAuthVersion: number | null;
+  userProjectAuthorityConnectionGeneration: number | null;
+  userProjectAuthorityExpiresAt: Date | null;
+  userProjectAuthorityIssuedAt: Date | null;
   userProjectManagementCeiling: boolean;
   userProjectManagementCurrent: boolean;
   version: number;
@@ -354,6 +360,11 @@ export type ReplaceGitHubInstallationConnectionsInput = {
     repositoryOwner: string;
     userPermissionCeiling: GitHubUserRepositoryPermission;
     userPermissionCurrent: GitHubUserRepositoryPermission;
+    userProjectIds: readonly string[];
+    userProjectAuthorityAuthVersion: number | null;
+    userProjectAuthorityConnectionGeneration: number | null;
+    userProjectAuthorityExpiresAt: Date | null;
+    userProjectAuthorityIssuedAt: Date | null;
     userProjectManagementCeiling: boolean;
     userProjectManagementCurrent: boolean;
   }>;
@@ -553,6 +564,15 @@ function generationColumn(row: Record<string, unknown>, name: string): number {
   return parsed;
 }
 
+function nullableGenerationColumn(
+  row: Record<string, unknown>,
+  name: string
+): number | null {
+  return column<unknown>(row, name) === null
+    ? null
+    : generationColumn(row, name);
+}
+
 function postgresTimestamp(value: unknown): Date | null {
   if (value instanceof Date) {
     return Number.isNaN(value.getTime()) ? null : value;
@@ -741,6 +761,23 @@ function asConnection(row: Record<string, unknown>): GitHubConnectionRecord {
     updatedAt: timestampColumn(row, "updatedAt"),
     userPermissionCeiling: column(row, "userPermissionCeiling"),
     userPermissionCurrent: column(row, "userPermissionCurrent"),
+    userProjectAuthorityAuthVersion: nullableGenerationColumn(
+      row,
+      "userProjectAuthorityAuthVersion"
+    ),
+    userProjectAuthorityConnectionGeneration: nullableGenerationColumn(
+      row,
+      "userProjectAuthorityConnectionGeneration"
+    ),
+    userProjectAuthorityExpiresAt: nullableTimestampColumn(
+      row,
+      "userProjectAuthorityExpiresAt"
+    ),
+    userProjectAuthorityIssuedAt: nullableTimestampColumn(
+      row,
+      "userProjectAuthorityIssuedAt"
+    ),
+    userProjectIds: arrayColumn<string>(row, "userProjectIds"),
     userProjectManagementCeiling: column(row, "userProjectManagementCeiling"),
     userProjectManagementCurrent: column(row, "userProjectManagementCurrent"),
     version: column(row, "version"),
@@ -1208,6 +1245,11 @@ function validateConnectionInput(input: {
   repositoryOwner: string;
   userPermissionCeiling: GitHubUserRepositoryPermission;
   userPermissionCurrent: GitHubUserRepositoryPermission;
+  userProjectIds: readonly string[];
+  userProjectAuthorityAuthVersion: number | null;
+  userProjectAuthorityConnectionGeneration: number | null;
+  userProjectAuthorityExpiresAt: Date | null;
+  userProjectAuthorityIssuedAt: Date | null;
   userProjectManagementCeiling: boolean;
   userProjectManagementCurrent: boolean;
 }): void {
@@ -1233,8 +1275,37 @@ function validateConnectionInput(input: {
       input.userPermissionCurrent,
       input.userPermissionCeiling
     ) ||
+    !Array.isArray(input.userProjectIds) ||
+    input.userProjectIds.length > 100 ||
+    input.userProjectIds.some(
+      (projectId) =>
+        typeof projectId !== "string" ||
+        !/^[A-Za-z0-9_=-]{1,256}$/u.test(projectId)
+    ) ||
+    new Set(input.userProjectIds).size !== input.userProjectIds.length ||
     (input.userProjectManagementCurrent &&
       !input.userProjectManagementCeiling) ||
+    (input.userProjectManagementCurrent &&
+      (!Number.isSafeInteger(input.userProjectAuthorityAuthVersion) ||
+        (input.userProjectAuthorityAuthVersion ?? -1) < 0 ||
+        !Number.isSafeInteger(input.userProjectAuthorityConnectionGeneration) ||
+        (input.userProjectAuthorityConnectionGeneration ?? -1) < 0 ||
+        !(input.userProjectAuthorityIssuedAt instanceof Date) ||
+        Number.isNaN(input.userProjectAuthorityIssuedAt.getTime()) ||
+        !(input.userProjectAuthorityExpiresAt instanceof Date) ||
+        Number.isNaN(input.userProjectAuthorityExpiresAt.getTime()) ||
+        input.userProjectIds.length === 0 ||
+        input.userProjectAuthorityExpiresAt <=
+          input.userProjectAuthorityIssuedAt ||
+        input.userProjectAuthorityExpiresAt.getTime() -
+          input.userProjectAuthorityIssuedAt.getTime() >
+          MAX_GITHUB_PROJECT_AUTHORITY_PROOF_LIFETIME_MS)) ||
+    (!input.userProjectManagementCurrent &&
+      (input.userProjectIds.length !== 0 ||
+        input.userProjectAuthorityAuthVersion !== null ||
+        input.userProjectAuthorityConnectionGeneration !== null ||
+        input.userProjectAuthorityExpiresAt !== null ||
+        input.userProjectAuthorityIssuedAt !== null)) ||
     !input.accountLogin ||
     input.accountLogin.length > 100 ||
     !input.githubUserLogin ||
@@ -1323,6 +1394,16 @@ function sameConnectionAuthority(
       connection.githubUserLogin === candidate.githubUserLogin &&
       connection.userPermissionCeiling === candidate.userPermissionCeiling &&
       connection.userPermissionCurrent === candidate.userPermissionCurrent &&
+      JSON.stringify(connection.userProjectIds) ===
+        JSON.stringify(candidate.userProjectIds) &&
+      connection.userProjectAuthorityAuthVersion ===
+        candidate.userProjectAuthorityAuthVersion &&
+      connection.userProjectAuthorityConnectionGeneration ===
+        candidate.userProjectAuthorityConnectionGeneration &&
+      connection.userProjectAuthorityExpiresAt?.getTime() ===
+        candidate.userProjectAuthorityExpiresAt?.getTime() &&
+      connection.userProjectAuthorityIssuedAt?.getTime() ===
+        candidate.userProjectAuthorityIssuedAt?.getTime() &&
       connection.userProjectManagementCeiling ===
         candidate.userProjectManagementCeiling &&
       connection.userProjectManagementCurrent ===
@@ -1482,6 +1563,28 @@ async function replaceFencedGitHubInstallationConnections(
           currentGeneration
         );
       }
+      const storedConnections =
+        mode === "refresh" && changed
+          ? connections.map((connection) => ({
+              ...connection,
+              userProjectAuthorityAuthVersion: null,
+              userProjectAuthorityConnectionGeneration: null,
+              userProjectAuthorityExpiresAt: null,
+              userProjectAuthorityIssuedAt: null,
+              userProjectIds: [],
+              userProjectManagementCurrent: false,
+            }))
+          : connections;
+      if (
+        mode === "connect" &&
+        storedConnections.some(
+          (connection) =>
+            connection.userProjectManagementCurrent &&
+            connection.userProjectAuthorityConnectionGeneration !== generation
+        )
+      ) {
+        throw new Error("GitHub Project authority proof generation is stale.");
+      }
       if (!changed) {
         return {
           changed: false,
@@ -1492,7 +1595,7 @@ async function replaceFencedGitHubInstallationConnections(
       }
 
       const stored: GitHubConnectionRecord[] = [];
-      for (const connection of connections) {
+      for (const connection of storedConnections) {
         // biome-ignore lint/performance/noAwaitInLoops: bounded writes share one tenant-fenced replacement transaction
         const [row] = await transaction.execute(
           statement(
@@ -1504,7 +1607,12 @@ async function replaceFencedGitHubInstallationConnections(
               "repositoryOwner", "repositoryName", "githubUserId",
               "githubUserLogin", "userPermissionCeiling",
               "userPermissionCurrent", "userProjectManagementCeiling",
-              "userProjectManagementCurrent", "appContentsPermission",
+              "userProjectManagementCurrent", "userProjectIds",
+              "userProjectAuthorityAuthVersion",
+              "userProjectAuthorityConnectionGeneration",
+              "userProjectAuthorityIssuedAt",
+              "userProjectAuthorityExpiresAt",
+              "appContentsPermission",
               "appIssuesPermission",
               "appPullRequestsPermission", "appOrganizationProjectsPermission"
             ) VALUES (
@@ -1517,6 +1625,11 @@ async function replaceFencedGitHubInstallationConnections(
               ${connection.userPermissionCurrent},
               ${connection.userProjectManagementCeiling},
               ${connection.userProjectManagementCurrent},
+              ${JSON.stringify(connection.userProjectIds)}::jsonb,
+              ${connection.userProjectAuthorityAuthVersion},
+              ${connection.userProjectAuthorityConnectionGeneration},
+              ${connection.userProjectAuthorityIssuedAt?.toISOString() ?? null},
+              ${connection.userProjectAuthorityExpiresAt?.toISOString() ?? null},
               ${connection.appContentsPermission},
               ${connection.appIssuesPermission},
               ${connection.appPullRequestsPermission},
@@ -1538,6 +1651,15 @@ async function replaceFencedGitHubInstallationConnections(
                   EXCLUDED."userProjectManagementCeiling",
                 "userProjectManagementCurrent" =
                   EXCLUDED."userProjectManagementCurrent",
+                "userProjectIds" = EXCLUDED."userProjectIds",
+                "userProjectAuthorityAuthVersion" =
+                  EXCLUDED."userProjectAuthorityAuthVersion",
+                "userProjectAuthorityConnectionGeneration" =
+                  EXCLUDED."userProjectAuthorityConnectionGeneration",
+                "userProjectAuthorityIssuedAt" =
+                  EXCLUDED."userProjectAuthorityIssuedAt",
+                "userProjectAuthorityExpiresAt" =
+                  EXCLUDED."userProjectAuthorityExpiresAt",
                 "appContentsPermission" = EXCLUDED."appContentsPermission",
                 "appIssuesPermission" = EXCLUDED."appIssuesPermission",
                 "appPullRequestsPermission" =
@@ -1555,7 +1677,9 @@ async function replaceFencedGitHubInstallationConnections(
         stored.push(asConnection(row));
       }
 
-      const repositoryIds = connections.map(({ repositoryId }) => repositoryId);
+      const repositoryIds = storedConnections.map(
+        ({ repositoryId }) => repositoryId
+      );
       await transaction.execute(
         statement(
           "delete-stale-github-installation-connections",

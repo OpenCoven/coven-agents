@@ -193,8 +193,10 @@ function configuredClaimDispatcher(
                               await githubConnection.refreshGitHubConnectionAuthority(
                                 {
                                   abortSignal,
+                                  authVersion: policy.authVersion,
                                   config,
                                   deadlineAt: authorityDeadlineAt,
+                                  now,
                                   principal: {
                                     kind: "subscriber",
                                     tenant: run.tenant,
