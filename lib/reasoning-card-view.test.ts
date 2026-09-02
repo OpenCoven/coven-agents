@@ -23,6 +23,10 @@ test("reasoning card keeps disclosure, focus, and reduced-motion semantics", () 
     source,
     /if \(!isOpen\) \{\s*hasAutoClosedRef\.current = true;\s*\}/u
   );
+  assert.match(
+    source,
+    /if \(!\(next \|\| isStreaming\)\) \{\s*hasAutoClosedRef\.current = true;\s*\}/u
+  );
   assert.match(source, /useReducedMotion\(\)/u);
   assert.match(
     source,

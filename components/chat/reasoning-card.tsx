@@ -178,6 +178,9 @@ export function ReasoningCard({
   const handleOpenChange = useCallback(
     (next: boolean) => {
       explicitlyClosedRef.current = !next && isStreaming;
+      if (!(next || isStreaming)) {
+        hasAutoClosedRef.current = true;
+      }
       if (next) {
         setIsMounted(true);
       }
