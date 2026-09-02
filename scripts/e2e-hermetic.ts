@@ -544,6 +544,7 @@ export async function runHermeticE2E(
       environment,
       port
     );
+    await playwright("tests/e2e/chat.test.ts", testEnvironment);
     await playwright("tests/e2e/subscriber-hermetic.test.ts", testEnvironment);
 
     const beforeDemo = await applicationTableInventory(database.url);

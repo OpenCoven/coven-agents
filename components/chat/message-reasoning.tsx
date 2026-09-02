@@ -2,20 +2,17 @@
 
 import { useEffect, useState } from "react";
 import {
-  Reasoning,
-  ReasoningContent,
-  ReasoningTrigger,
-} from "../ai-elements/reasoning";
+  buildReasoningCardModel,
+  reasoningCardActivities,
+} from "@/lib/reasoning-card";
+import { ReasoningCard } from "./reasoning-card";
 
 type MessageReasoningProps = {
   isLoading: boolean;
-  reasoning: string;
+  parts: readonly unknown[];
 };
 
-export function MessageReasoning({
-  isLoading,
-  reasoning,
-}: MessageReasoningProps) {
+export function MessageReasoning({ isLoading, parts }: MessageReasoningProps) {
   const [hasBeenStreaming, setHasBeenStreaming] = useState(isLoading);
 
   useEffect(() => {
@@ -24,14 +21,16 @@ export function MessageReasoning({
     }
   }, [isLoading]);
 
+  const model = buildReasoningCardModel({
+    activities: reasoningCardActivities(parts),
+    isStreaming: isLoading,
+  });
+
   return (
-    <Reasoning
-      data-testid="message-reasoning"
+    <ReasoningCard
       defaultOpen={hasBeenStreaming}
       isStreaming={isLoading}
-    >
-      <ReasoningTrigger />
-      <ReasoningContent>{reasoning}</ReasoningContent>
-    </Reasoning>
+      model={model}
+    />
   );
 }
