@@ -269,8 +269,8 @@ test("inventory reports privacy-safe configuration drift fields", async () => {
     ambiguous: 1,
     appOwnedMappings: 1,
     configurationDrift: [
-      { count: 1, field: "disk" },
-      { count: 1, field: "autoPauseInterval" },
+      { count: 1, field: "disk", relation: "above" },
+      { count: 1, field: "autoPauseInterval", relation: "different" },
     ],
     databaseCapped: false,
     examined: 1,
@@ -308,8 +308,36 @@ test("configuration drift field order is independent of provider order", async (
   assert.equal(forward.kind, "available");
   if (forward.kind === "available") {
     assert.deepEqual(forward.configurationDrift, [
-      { count: 1, field: "cpu" },
-      { count: 1, field: "disk" },
+      { count: 1, field: "cpu", relation: "above" },
+      { count: 1, field: "disk", relation: "above" },
+    ]);
+  }
+});
+
+test("configuration drift reports direction without resource values", async () => {
+  const mapping = agent();
+  const drifted = sandbox(mapping, {
+    autoPauseInterval: 30,
+    cpu: 1,
+    disk: 10,
+    memory: 8,
+  });
+
+  const result = await inventoryDaytonaSandboxes({
+    configuration,
+    daytona: inventoryService([drifted]),
+    limit: 10,
+    operator,
+    store: inventoryStore([mapping]),
+  });
+
+  assert.equal(result.kind, "available");
+  if (result.kind === "available") {
+    assert.deepEqual(result.configurationDrift, [
+      { count: 1, field: "cpu", relation: "below" },
+      { count: 1, field: "memory", relation: "above" },
+      { count: 1, field: "disk", relation: "below" },
+      { count: 1, field: "autoPauseInterval", relation: "above" },
     ]);
   }
 });

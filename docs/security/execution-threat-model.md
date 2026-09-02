@@ -205,7 +205,7 @@ and parsed forms. Repository scanning reports only path, line, and category.
 | T10 | Cancellation or recovery reports false success | Durable intent, exact cleanup, leased reconciliation | Provider outages can delay convergence |
 | T11 | Capacity exhaustion harms availability | Abuse budgets and deployment/tenant queue limits | Tune from measured provider behavior |
 | T12 | Operator credential gains tenant authority | Operator credentials authorize only bounded operational routes | Protect operator machines and deployment secrets |
-| T13 | A provider-only or drifted sandbox is adopted or deleted by label | Read-only app-label inventory, exact durable mapping comparison, exclusive privacy-safe ambiguity reasons, fixed configuration-drift field counts, existing fenced recovery only | An operator must investigate and separately authorize any unmatched provider resource |
+| T13 | A provider-only or drifted sandbox is adopted or deleted by label | Read-only app-label inventory, exact durable mapping comparison, exclusive privacy-safe ambiguity reasons, fixed configuration-drift field/direction counts, existing fenced recovery only | An operator must investigate and separately authorize any unmatched provider resource |
 
 ## Incident and recovery expectations
 
