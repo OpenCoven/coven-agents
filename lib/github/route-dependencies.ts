@@ -9,7 +9,7 @@ import { databaseFor } from "@/lib/db/access";
 import { databaseIdempotencyStore } from "@/lib/db/queries";
 import { createRunnerAuth } from "@/lib/runner/auth";
 import { createTeamStore, drizzleTeamStoreDatabase } from "@/lib/teams/store";
-import { createGitHubAppClient } from "./app-auth";
+import { createGitHubAppClient, GitHubProviderError } from "./app-auth";
 import { validateGitHubEnvironment } from "./config";
 import {
   createGitHubConnectionHandlers,
@@ -50,9 +50,18 @@ export function productionGitHubConnectionHandlers(): GitHubConnectionHandlers {
     idempotencyStore: databaseIdempotencyStore,
     serializeUserAuthorization: async (subscriber, operation) =>
       databaseFor(subscriber.session).transaction(async (transaction) => {
-        await transaction.execute(
-          sql`SELECT pg_advisory_xact_lock(1129270855, 1431194708)`
+        const [lock] = await transaction.execute(
+          sql<{ acquired: boolean }>`SELECT pg_try_advisory_xact_lock(
+            1129270855,
+            1431194708
+          ) AS "acquired"`
         );
+        if (lock?.acquired !== true) {
+          throw new GitHubProviderError("github_provider_unavailable", {
+            retryable: true,
+            status: 503,
+          });
+        }
         return operation();
       }),
   });

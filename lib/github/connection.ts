@@ -1006,114 +1006,137 @@ async function userAuthorizationCallback(
     return errorResponse(input.dependencies, "github_configuration_invalid");
   }
 
-  let consumedCompletion: IdempotencyCompleteInput | null = null;
-  let result: Awaited<ReturnType<typeof runIdempotentOperation>>;
   try {
-    result = await runIdempotentOperation({
-      completeSuccessfulResponse: async (completion) => {
-        const processingCompletion = {
-          ...completion,
-          expiresAt: new Date(
-            completion.completedAt.getTime() + CALLBACK_PROCESSING_LEASE_MS
-          ),
-        };
-        const completed =
-          await input.dependencies.idempotencyStore.complete(
-            processingCompletion
-          );
-        if (completed === "completed") {
-          consumedCompletion = processingCompletion;
+    return await input.dependencies.serializeUserAuthorization(
+      input.subscriber,
+      async () => {
+        let consumedCompletion: IdempotencyCompleteInput | null = null;
+        let result: Awaited<ReturnType<typeof runIdempotentOperation>>;
+        try {
+          result = await runIdempotentOperation({
+            completeSuccessfulResponse: async (completion) => {
+              const processingCompletion = {
+                ...completion,
+                expiresAt: new Date(
+                  completion.completedAt.getTime() +
+                    CALLBACK_PROCESSING_LEASE_MS
+                ),
+              };
+              const completed =
+                await input.dependencies.idempotencyStore.complete(
+                  processingCompletion
+                );
+              if (completed === "completed") {
+                consumedCompletion = processingCompletion;
+              }
+              return completed;
+            },
+            idempotencyKey: stateIdempotencyKey(checkedState.claims),
+            now: input.now,
+            operation: callbackOperation(
+              "github_user_authorization",
+              input.subscriber.principal.tenant
+            ),
+            ownerId: input.subscriber.userId,
+            perform: async () => ({
+              body: {
+                installationId: checkedState.claims.installationId,
+                kind: "consumed",
+                returnPath,
+              },
+              status: 200,
+            }),
+            request: {
+              codeHash: sha256(input.callback.code),
+              installationId: checkedState.claims.installationId,
+              jti: checkedState.claims.jti,
+            },
+            retentionMs: stateRetentionMs(checkedState.claims.exp, input.now()),
+            store: input.dependencies.idempotencyStore,
+          });
+        } catch (error) {
+          return providerOrStoreError(input.dependencies, error);
         }
-        return completed;
-      },
-      idempotencyKey: stateIdempotencyKey(checkedState.claims),
-      now: input.now,
-      operation: callbackOperation(
-        "github_user_authorization",
-        input.subscriber.principal.tenant
-      ),
-      ownerId: input.subscriber.userId,
-      perform: async () => ({
-        body: {
-          installationId: checkedState.claims.installationId,
-          kind: "consumed",
-          returnPath,
-        },
-        status: 200,
-      }),
-      request: {
-        codeHash: sha256(input.callback.code),
-        installationId: checkedState.claims.installationId,
-        jti: checkedState.claims.jti,
-      },
-      retentionMs: stateRetentionMs(checkedState.claims.exp, input.now()),
-      store: input.dependencies.idempotencyStore,
-    });
+
+        if (result.kind === "in_progress") {
+          return errorResponse(input.dependencies, "request_in_progress");
+        }
+        if (result.kind !== "response") {
+          return errorResponse(input.dependencies, "github_state_invalid");
+        }
+        const storedOutcome = callbackOutcome(result.response.body);
+        if (!storedOutcome) {
+          return errorResponse(
+            input.dependencies,
+            "github_configuration_invalid"
+          );
+        }
+        if (result.replayed) {
+          if (
+            storedOutcome.kind === "redirect" &&
+            storedOutcome.returnPath === returnPath
+          ) {
+            return redirectResponse(
+              `${callbackUrl.origin}${storedOutcome.returnPath}`,
+              303,
+              true
+            );
+          }
+          if (storedOutcome.kind === "error") {
+            return errorResponse(input.dependencies, storedOutcome.code);
+          }
+          if (storedOutcome.kind === "consumed") {
+            return errorResponse(input.dependencies, "request_in_progress");
+          }
+          return errorResponse(input.dependencies, "github_state_invalid");
+        }
+        if (
+          storedOutcome.kind !== "consumed" ||
+          storedOutcome.installationId !== checkedState.claims.installationId ||
+          storedOutcome.returnPath !== returnPath ||
+          consumedCompletion === null
+        ) {
+          return errorResponse(
+            input.dependencies,
+            "github_configuration_invalid"
+          );
+        }
+
+        const outcome = await completeUserAuthorization({
+          callback: input.callback,
+          callbackUrl: callbackUrl.url,
+          claims: checkedState.claims,
+          config: input.config,
+          dependencies: input.dependencies,
+          subscriber: input.subscriber,
+        });
+        try {
+          const completedAt = input.now();
+          await replaceConsumedOutcome(
+            input.dependencies.idempotencyStore,
+            consumedCompletion,
+            outcome,
+            completedAt,
+            stateRetentionMs(checkedState.claims.exp, completedAt)
+          );
+        } catch {
+          return errorResponse(
+            input.dependencies,
+            "github_provider_unavailable"
+          );
+        }
+        if (outcome.kind === "error") {
+          return errorResponse(input.dependencies, outcome.code);
+        }
+        return redirectResponse(
+          `${callbackUrl.origin}${outcome.returnPath}`,
+          303
+        );
+      }
+    );
   } catch (error) {
     return providerOrStoreError(input.dependencies, error);
   }
-  if (result.kind === "in_progress") {
-    return errorResponse(input.dependencies, "request_in_progress");
-  }
-  if (result.kind !== "response") {
-    return errorResponse(input.dependencies, "github_state_invalid");
-  }
-  const storedOutcome = callbackOutcome(result.response.body);
-  if (!storedOutcome) {
-    return errorResponse(input.dependencies, "github_configuration_invalid");
-  }
-  if (result.replayed) {
-    if (
-      storedOutcome.kind === "redirect" &&
-      storedOutcome.returnPath === returnPath
-    ) {
-      return redirectResponse(
-        `${callbackUrl.origin}${storedOutcome.returnPath}`,
-        303,
-        true
-      );
-    }
-    if (storedOutcome.kind === "error") {
-      return errorResponse(input.dependencies, storedOutcome.code);
-    }
-    if (storedOutcome.kind === "consumed") {
-      return errorResponse(input.dependencies, "request_in_progress");
-    }
-    return errorResponse(input.dependencies, "github_state_invalid");
-  }
-  if (
-    storedOutcome.kind !== "consumed" ||
-    storedOutcome.installationId !== checkedState.claims.installationId ||
-    storedOutcome.returnPath !== returnPath ||
-    consumedCompletion === null
-  ) {
-    return errorResponse(input.dependencies, "github_configuration_invalid");
-  }
-
-  const outcome = await completeUserAuthorization({
-    callback: input.callback,
-    callbackUrl: callbackUrl.url,
-    claims: checkedState.claims,
-    config: input.config,
-    dependencies: input.dependencies,
-    subscriber: input.subscriber,
-  });
-  try {
-    const completedAt = input.now();
-    await replaceConsumedOutcome(
-      input.dependencies.idempotencyStore,
-      consumedCompletion,
-      outcome,
-      completedAt,
-      stateRetentionMs(checkedState.claims.exp, completedAt)
-    );
-  } catch {
-    return errorResponse(input.dependencies, "github_provider_unavailable");
-  }
-  if (outcome.kind === "error") {
-    return errorResponse(input.dependencies, outcome.code);
-  }
-  return redirectResponse(`${callbackUrl.origin}${outcome.returnPath}`, 303);
 }
 
 async function completeUserAuthorization(
@@ -1143,21 +1166,17 @@ async function completeUserAuthorization(
 
   let userAuthority: GitHubUserInstallationAuthority;
   try {
-    userAuthority = await input.dependencies.serializeUserAuthorization(
-      input.subscriber,
-      () =>
-        input.dependencies
-          .createUserAuthorizationClient(input.config)
-          .proveInstallationAccess({
-            code: input.callback.code,
-            codeVerifier: githubCodeVerifier(
-              input.claims,
-              input.config.stateSigningKey
-            ),
-            installationId: input.claims.installationId,
-            redirectUri: input.callbackUrl,
-          })
-    );
+    userAuthority = await input.dependencies
+      .createUserAuthorizationClient(input.config)
+      .proveInstallationAccess({
+        code: input.callback.code,
+        codeVerifier: githubCodeVerifier(
+          input.claims,
+          input.config.stateSigningKey
+        ),
+        installationId: input.claims.installationId,
+        redirectUri: input.callbackUrl,
+      });
   } catch (error) {
     return {
       code: callbackErrorCode(error),
