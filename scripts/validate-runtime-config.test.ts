@@ -34,6 +34,7 @@ const VALID_ENV: Partial<NodeJS.ProcessEnv> = {
   DAYTONA_SANDBOX_MEMORY_GIB: "4",
   DAYTONA_SNAPSHOT: "coven-agents-copilot-1",
   DAYTONA_TARGET: "us",
+  GLOBAL_DAILY_RUN_CAP: "500",
   OPERATOR_DIAGNOSTIC_TOKEN: "subprocess-test-operator-token",
   REDIS_URL: "redis://localhost:6379",
   RUN_ADMISSION_CONSECUTIVE_MAX: "2",
@@ -78,6 +79,7 @@ const REQUIRED_PRODUCTION_VARIABLES = [
   "DAYTONA_API_KEY",
   "DAYTONA_DOMAIN_ALLOW_LIST",
   "DAYTONA_SNAPSHOT",
+  "GLOBAL_DAILY_RUN_CAP",
   "OPERATOR_DIAGNOSTIC_TOKEN",
   "REDIS_URL",
   "RUNNER_MANUAL_RECONCILE_SECRET",
@@ -691,6 +693,7 @@ test("permits preview validation without production Daytona secrets or Redis", (
     DAYTONA_API_KEY: undefined,
     DAYTONA_DOMAIN_ALLOW_LIST: undefined,
     DAYTONA_SNAPSHOT: undefined,
+    GLOBAL_DAILY_RUN_CAP: undefined,
     NODE_ENV: "production",
     OPERATOR_DIAGNOSTIC_TOKEN: undefined,
     REDIS_URL: undefined,
@@ -1088,14 +1091,26 @@ test("the explicit release preflight enforces outside production markers", () =>
 });
 
 test("an env file in the working directory supplies keys the harness cleared", () => {
-  const result = runReleaseValidatorFromFiles({
-    ".env.local":
-      'RELEASE_AUDIENCE=public\nBETA_MODE=off\nGLOBAL_DAILY_RUN_CAP=""\n',
-  });
+  const result = runReleaseValidatorFromFiles(
+    {
+      ".env.local":
+        "RELEASE_AUDIENCE=public\nBETA_MODE=off\nGLOBAL_DAILY_RUN_CAP=not-a-number\n",
+    },
+    { GLOBAL_DAILY_RUN_CAP: undefined }
+  );
 
   assertRejectedWithMessage(
     result,
     "GLOBAL_DAILY_RUN_CAP must be a positive integer."
+  );
+});
+
+test("a blank run cap is missing configuration rather than a malformed value", () => {
+  const result = runValidator({ GLOBAL_DAILY_RUN_CAP: "   " }, ["--release"]);
+
+  assertRejectedWithMessage(
+    result,
+    "Missing required production environment variables: GLOBAL_DAILY_RUN_CAP."
   );
 });
 
