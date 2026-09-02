@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-09-02",
+  "source": {
+    "archiveExported": true,
+    "commit": "140bc1a5617c12cb1ad89b1b0a4945d27478564f",
+    "tree": "a52c25f529c8f75466ce85969b4e6e3866f54033"
+  },
+  "deployment": {
+    "automaticDomainPromotion": false,
+    "deploymentId": "dpl_CWMnd5TuRTvanpmuotyyuQA5Vdaj",
+    "deploymentUrl": "https://coven-agents-htfbvw3l7-0xbuns.vercel.app",
+    "generatedStaticPages": 47,
+    "readyState": "READY",
+    "target": "production"
+  },
+  "requiredRoutes": [
+    "/api/internal/runner-resource-repair",
+    "/api/teams",
+    "/api/team-runs/[id]/approve",
+    "/api/team-runs/[id]/stop"
+  ],
+  "safeSmoke": [
+    {
+      "apiVersion": "1.0",
+      "capabilities": [
+        "agent-profiles",
+        "async-runs",
+        "idempotent-runs",
+        "run-events",
+        "run-cancel",
+        "command-evidence",
+        "file-evidence"
+      ],
+      "minimumClientVersion": "1.0.0",
+      "mode": "cloud",
+      "route": "/api/health",
+      "status": 200
+    },
+    {
+      "location": "/login?beta=1",
+      "route": "/api/agents",
+      "status": 307
+    },
+    {
+      "location": "/login?beta=1",
+      "route": "/api/teams",
+      "status": 307
+    },
+    {
+      "errorCode": "unauthorized",
+      "retryable": false,
+      "route": "/api/internal/runner-resource-repair",
+      "status": 401
+    }
+  ],
+  "productionAlias": {
+    "deploymentId": "dpl_EERKkjtfpkT5SPRD7uxRKPutRLoy",
+    "unchanged": true
+  },
+  "disposition": {
+    "candidatePromoted": false,
+    "releaseCertified": false,
+    "remainingBlockers": [
+      "authenticated_subscriber_lifecycle",
+      "stripe_provider_lifecycle",
+      "daytona_persistent_workspace_lifecycle",
+      "daytona_resize_capability",
+      "observation_window",
+      "rollback_exercise",
+      "named_approvals"
+    ]
+  },
+  "containsCredentialMaterial": false,
+  "containsDaytonaResourceIdentifiers": false,
+  "containsTenantIdentifiers": false
+}

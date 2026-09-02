@@ -1,17 +1,19 @@
 # Current Repository State
 
 - Snapshot date: 2026-09-02
-- Application baseline: `dbe5ebbf70c5b943561612512fc03e5ae4542b3b`
+- Application baseline: `140bc1a5617c12cb1ad89b1b0a4945d27478564f`
 - Evidence class: verified repository and local contract evidence, retained
-  infrastructure cutover and Production-config operator evidence, and a public
-  exact-build guest replay
+  infrastructure cutover and Production-config operator evidence, a public
+  exact-build guest replay, and a non-promoted exact latest-main production
+  candidate
 
 This snapshot includes merged P0 repository certification through PR #183, the
 replay-timeline correction in PR #184, the public exact-build guest replay
 recorded by PR #185, unreachable UI removal in PR #186, retained exact-preview
 and hermetic receipts in PR #187, the subscriber launch runbook in PR #188,
 the fenced Daytona resource-repair path in PR #198, and definitive provider
-rejection handling in PR #200.
+rejection handling in PR #200, the sanitized blocker receipt in PR #201, and
+the coordinated team console in PR #199.
 It distinguishes those completed boundaries and the successful
 Production-config operator checks from pending persistent Daytona lifecycle,
 subscriber certification, observation-window, and full product release
@@ -83,18 +85,25 @@ from repository or Project evidence.
 - [PR #200](https://github.com/OpenCoven/coven-agents/pull/200) made
   definitive provider resize rejections release their exact fences while
   preserving fail-closed handling for ambiguous outcomes.
+- [PR #201](https://github.com/OpenCoven/coven-agents/pull/201) retained the
+  sanitized Daytona resize-blocker receipt.
+- [PR #199](https://github.com/OpenCoven/coven-agents/pull/199) added the
+  coordinated team console and its bounded service and browser contracts.
 
 The application baseline also includes the merged console, billing,
 deployment-policy, branding, runner-reliability, coordinated-team, dependency,
-subscriber-surface, credential-lifecycle, and session-path corrections plus
-the P0 repository certification through
-`a2c11ff408caf8f97af8dbbe37903a13e928f255`. The
+subscriber-surface, credential-lifecycle, and session-path corrections through
+`140bc1a5617c12cb1ad89b1b0a4945d27478564f`. The
 [cutover attestation](../operations/daytona-cutover-attestation.md) records
 infrastructure production evidence, exact application-preview results, and the
 [Production-config operator receipt](../operations/p0-production-config-receipt-2026-09-01.json)
 and the
 [resource-repair receipt](../operations/p0-daytona-resource-repair-receipt-2026-09-02.json)
-while preserving the remaining product certification and approval gates.
+while preserving the remaining product certification and approval gates. The
+[latest-main candidate receipt](../operations/p0-latest-main-candidate-receipt-2026-09-02.json)
+records an exact production-target build with automatic domain promotion
+disabled, successful health, signed-out product refusal, operator credential
+refusal, and no claim of subscriber or provider lifecycle certification.
 
 ## Known gaps
 

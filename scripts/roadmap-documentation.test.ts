@@ -14,7 +14,7 @@ test("the current-state snapshot covers merged product and planning surfaces", (
   assert.match(currentState, /Snapshot date: 2026-09-02/u);
   assert.match(
     currentState,
-    /Application baseline: `dbe5ebbf70c5b943561612512fc03e5ae4542b3b`/u
+    /Application baseline: `140bc1a5617c12cb1ad89b1b0a4945d27478564f`/u
   );
 
   for (const evidence of [
@@ -36,6 +36,7 @@ test("the current-state snapshot covers merged product and planning surfaces", (
     "docs/operations/vercel-git-deployment-disablement.md",
     "Manual resource repair",
     "lib/runner/daytona/resource-repair.ts",
+    "p0-latest-main-candidate-receipt-2026-09-02.json",
     "Planning documents",
     "scripts/planning-docs-policy.ts",
   ]) {
@@ -57,7 +58,7 @@ test("the verification matrix records the newly verified repository boundaries",
   assert.match(matrix, /as of 2026-09-02/u);
   assert.match(
     matrix,
-    /application baseline `dbe5ebbf70c5b943561612512fc03e5ae4542b3b`/u
+    /application baseline `140bc1a5617c12cb1ad89b1b0a4945d27478564f`/u
   );
   assert.match(
     matrix,
@@ -78,6 +79,101 @@ test("the verification matrix records the newly verified repository boundaries",
     assert.match(matrix, new RegExp(`\\| ${capability} \\| \`Verified\``, "u"));
   }
   assert.match(matrix, /\| Daytona resource disposition \| `Blocked` \|/u);
+});
+
+test("the latest-main candidate receipt records safe smoke without promotion", () => {
+  const currentState = read("docs/roadmap/current-state.md");
+  const matrix = read("docs/roadmap/verification-matrix.md");
+  const receipt = JSON.parse(
+    read("docs/operations/p0-latest-main-candidate-receipt-2026-09-02.json")
+  );
+
+  assert.deepEqual(receipt, {
+    capturedAt: "2026-09-02",
+    containsCredentialMaterial: false,
+    containsDaytonaResourceIdentifiers: false,
+    containsTenantIdentifiers: false,
+    deployment: {
+      automaticDomainPromotion: false,
+      deploymentId: "dpl_CWMnd5TuRTvanpmuotyyuQA5Vdaj",
+      deploymentUrl: "https://coven-agents-htfbvw3l7-0xbuns.vercel.app",
+      generatedStaticPages: 47,
+      readyState: "READY",
+      target: "production",
+    },
+    disposition: {
+      candidatePromoted: false,
+      releaseCertified: false,
+      remainingBlockers: [
+        "authenticated_subscriber_lifecycle",
+        "stripe_provider_lifecycle",
+        "daytona_persistent_workspace_lifecycle",
+        "daytona_resize_capability",
+        "observation_window",
+        "rollback_exercise",
+        "named_approvals",
+      ],
+    },
+    productionAlias: {
+      deploymentId: "dpl_EERKkjtfpkT5SPRD7uxRKPutRLoy",
+      unchanged: true,
+    },
+    requiredRoutes: [
+      "/api/internal/runner-resource-repair",
+      "/api/teams",
+      "/api/team-runs/[id]/approve",
+      "/api/team-runs/[id]/stop",
+    ],
+    safeSmoke: [
+      {
+        apiVersion: "1.0",
+        capabilities: [
+          "agent-profiles",
+          "async-runs",
+          "idempotent-runs",
+          "run-events",
+          "run-cancel",
+          "command-evidence",
+          "file-evidence",
+        ],
+        minimumClientVersion: "1.0.0",
+        mode: "cloud",
+        route: "/api/health",
+        status: 200,
+      },
+      {
+        location: "/login?beta=1",
+        route: "/api/agents",
+        status: 307,
+      },
+      {
+        location: "/login?beta=1",
+        route: "/api/teams",
+        status: 307,
+      },
+      {
+        errorCode: "unauthorized",
+        retryable: false,
+        route: "/api/internal/runner-resource-repair",
+        status: 401,
+      },
+    ],
+    schemaVersion: 1,
+    source: {
+      archiveExported: true,
+      commit: "140bc1a5617c12cb1ad89b1b0a4945d27478564f",
+      tree: "a52c25f529c8f75466ce85969b4e6e3866f54033",
+    },
+  });
+
+  for (const document of [currentState, matrix]) {
+    assert.match(
+      document,
+      /p0-latest-main-candidate-receipt-2026-09-02\.json/u
+    );
+  }
+  assert.match(currentState, /automatic domain promotion\s+disabled/iu);
+  assert.match(matrix, /non-promoted latest-main build/iu);
 });
 
 test("the resource repair receipt records the provider blocker without identifiers", () => {
