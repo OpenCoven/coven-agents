@@ -123,3 +123,15 @@ export function visibleGitHubProjectCapabilityExpiry(
     ? null
     : expiresAt;
 }
+
+export function isGitHubProjectCapabilityCurrent(
+  expiresAt: number | null,
+  now: number
+): boolean {
+  return (
+    expiresAt !== null &&
+    Number.isFinite(expiresAt) &&
+    Number.isFinite(now) &&
+    expiresAt > now
+  );
+}

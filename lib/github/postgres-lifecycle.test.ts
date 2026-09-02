@@ -64,8 +64,13 @@ test("disconnect advances generation, revokes capability, and preserves an immut
         repositoryName: "repo",
         repositoryNodeId: "R_prefix",
         repositoryOwner: "a-foo",
+        tenant,
         userPermissionCeiling: "write",
         userPermissionCurrent: "write",
+        userProjectAuthorityAuthVersion: null,
+        userProjectAuthorityConnectionGeneration: null,
+        userProjectAuthorityExpiresAt: null,
+        userProjectAuthorityIssuedAt: null,
         userProjectIds: [],
         userProjectManagementCeiling: false,
         userProjectManagementCurrent: false,
@@ -87,8 +92,13 @@ test("disconnect advances generation, revokes capability, and preserves an immut
         repositoryName: "repo",
         repositoryNodeId: "R_short",
         repositoryOwner: "a",
+        tenant,
         userPermissionCeiling: "write",
         userPermissionCurrent: "write",
+        userProjectAuthorityAuthVersion: null,
+        userProjectAuthorityConnectionGeneration: null,
+        userProjectAuthorityExpiresAt: null,
+        userProjectAuthorityIssuedAt: null,
         userProjectIds: [],
         userProjectManagementCeiling: false,
         userProjectManagementCurrent: false,
@@ -110,8 +120,13 @@ test("disconnect advances generation, revokes capability, and preserves an immut
         repositoryName: "coven-agents",
         repositoryNodeId: "R_kgDOExample",
         repositoryOwner: "OpenCoven",
+        tenant,
         userPermissionCeiling: "write",
         userPermissionCurrent: "write",
+        userProjectAuthorityAuthVersion: null,
+        userProjectAuthorityConnectionGeneration: null,
+        userProjectAuthorityExpiresAt: null,
+        userProjectAuthorityIssuedAt: null,
         userProjectIds: [],
         userProjectManagementCeiling: false,
         userProjectManagementCurrent: false,
@@ -119,6 +134,7 @@ test("disconnect advances generation, revokes capability, and preserves an immut
     ],
     teamRunId,
     teamStepId,
+    tenant,
     version: 1,
   };
   const skillSnapshots = [
@@ -198,24 +214,25 @@ test("disconnect advances generation, revokes capability, and preserves an immut
             "repositoryNodeId", "repositoryOwner", "githubUserId",
             "githubUserLogin", "userPermissionCeiling",
             "userPermissionCurrent", "userProjectManagementCeiling",
-            "userProjectManagementCurrent", "appIssuesPermission",
+            "userProjectManagementCurrent", "appContentsPermission",
+            "appIssuesPermission",
             "appPullRequestsPermission", "appOrganizationProjectsPermission"
           ) VALUES (
             ${connectionId}, ${tenant}, ${accountId}, 'OpenCoven',
             'Organization', ${installationId}, ${repositoryId},
             'coven-agents', 'R_kgDOExample', 'OpenCoven', '112233',
             'BunsDev', 'write', 'write', false, false, 'write', 'write',
-            'write'
+            'write', 'write'
           ), (
             ${prefixConnectionId}, ${tenant}, ${accountId}, 'OpenCoven',
             'Organization', ${installationId}, ${prefixRepositoryId},
             'repo', 'R_prefix', 'a-foo', '112233', 'BunsDev', 'write',
-            'write', false, false, 'write', 'write', 'write'
+            'write', false, false, 'write', 'write', 'write', 'write'
           ), (
             ${shortConnectionId}, ${tenant}, ${accountId}, 'OpenCoven',
             'Organization', ${installationId}, ${shortRepositoryId},
             'repo', 'R_short', 'a', '112233', 'BunsDev', 'write', 'write',
-            false, false, 'write', 'write', 'write'
+            false, false, 'write', 'write', 'write', 'write'
           )
         `;
       await transaction`

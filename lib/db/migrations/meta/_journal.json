@@ -253,6 +253,13 @@
       "when": 1788350663336,
       "tag": "0035_spicy_hammerhead",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1788352989366,
+      "tag": "0036_project_authority_trigger",
+      "breakpoints": true
     }
   ]
 }
