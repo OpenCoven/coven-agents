@@ -1412,7 +1412,6 @@ export const runnerGitHubConnection = pgTable(
     })
       .$type<GitHubUserRepositoryPermission>()
       .notNull(),
-    userProjectIds: jsonb("userProjectIds").$type<string[]>().notNull(),
     userProjectManagementCeiling: boolean(
       "userProjectManagementCeiling"
     ).notNull(),
@@ -1439,7 +1438,7 @@ export const runnerGitHubConnection = pgTable(
     ),
     check(
       "RGHConn_authority_valid",
-      sql`${table.appContentsPermission} in ('none','read','write') and ${table.appIssuesPermission} in ('none','read','write') and ${table.appPullRequestsPermission} in ('none','read','write') and ${table.appOrganizationProjectsPermission} in ('none','read','write') and ${table.userPermissionCeiling} in ('read','triage','write','maintain','admin') and ${table.userPermissionCurrent} in ('read','triage','write','maintain','admin') and CASE ${table.userPermissionCurrent} WHEN 'read' THEN 1 WHEN 'triage' THEN 2 WHEN 'write' THEN 3 WHEN 'maintain' THEN 4 WHEN 'admin' THEN 5 ELSE 0 END <= CASE ${table.userPermissionCeiling} WHEN 'read' THEN 1 WHEN 'triage' THEN 2 WHEN 'write' THEN 3 WHEN 'maintain' THEN 4 WHEN 'admin' THEN 5 ELSE 0 END and jsonb_typeof(${table.userProjectIds}) = 'array' and jsonb_array_length(${table.userProjectIds}) <= 100 and not jsonb_path_exists(${table.userProjectIds}, '$[*] ? (!(@ like_regex "^[A-Za-z0-9_=-]{1,256}$"))') and (not ${table.userProjectManagementCurrent} or (${table.userProjectManagementCeiling} and jsonb_array_length(${table.userProjectIds}) > 0)) and char_length(${table.githubUserLogin}) between 1 and 100 and ${table.githubUserLogin} ~ '^[A-Za-z0-9_.-]+$'`
+      sql`${table.appContentsPermission} in ('none','read','write') and ${table.appIssuesPermission} in ('none','read','write') and ${table.appPullRequestsPermission} in ('none','read','write') and ${table.appOrganizationProjectsPermission} in ('none','read','write') and ${table.userPermissionCeiling} in ('read','triage','write','maintain','admin') and ${table.userPermissionCurrent} in ('read','triage','write','maintain','admin') and CASE ${table.userPermissionCurrent} WHEN 'read' THEN 1 WHEN 'triage' THEN 2 WHEN 'write' THEN 3 WHEN 'maintain' THEN 4 WHEN 'admin' THEN 5 ELSE 0 END <= CASE ${table.userPermissionCeiling} WHEN 'read' THEN 1 WHEN 'triage' THEN 2 WHEN 'write' THEN 3 WHEN 'maintain' THEN 4 WHEN 'admin' THEN 5 ELSE 0 END and (not ${table.userProjectManagementCurrent} or ${table.userProjectManagementCeiling}) and char_length(${table.githubUserLogin}) between 1 and 100 and ${table.githubUserLogin} ~ '^[A-Za-z0-9_.-]+$'`
     ),
     check("RGHConn_version_valid", sql`${table.version} >= 0`),
   ]

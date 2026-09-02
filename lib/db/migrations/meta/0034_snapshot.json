@@ -1,5 +1,5 @@
 {
-  "id": "6978b370-3d16-4bef-98e9-c695e0aefdfc",
+  "id": "468c4a22-c9ed-465f-8929-d0c037095b30",
   "prevId": "91874a54-0529-4492-ac2b-886ecc85f7a7",
   "version": "7",
   "dialect": "postgresql",
@@ -1445,12 +1445,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "userProjectIds": {
-          "name": "userProjectIds",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true
-        },
         "userProjectManagementCeiling": {
           "name": "userProjectManagementCeiling",
           "type": "boolean",
@@ -1518,7 +1512,7 @@
         },
         "RGHConn_authority_valid": {
           "name": "RGHConn_authority_valid",
-          "value": "\"RunnerGitHubConnection\".\"appContentsPermission\" in ('none','read','write') and \"RunnerGitHubConnection\".\"appIssuesPermission\" in ('none','read','write') and \"RunnerGitHubConnection\".\"appPullRequestsPermission\" in ('none','read','write') and \"RunnerGitHubConnection\".\"appOrganizationProjectsPermission\" in ('none','read','write') and \"RunnerGitHubConnection\".\"userPermissionCeiling\" in ('read','triage','write','maintain','admin') and \"RunnerGitHubConnection\".\"userPermissionCurrent\" in ('read','triage','write','maintain','admin') and CASE \"RunnerGitHubConnection\".\"userPermissionCurrent\" WHEN 'read' THEN 1 WHEN 'triage' THEN 2 WHEN 'write' THEN 3 WHEN 'maintain' THEN 4 WHEN 'admin' THEN 5 ELSE 0 END <= CASE \"RunnerGitHubConnection\".\"userPermissionCeiling\" WHEN 'read' THEN 1 WHEN 'triage' THEN 2 WHEN 'write' THEN 3 WHEN 'maintain' THEN 4 WHEN 'admin' THEN 5 ELSE 0 END and jsonb_typeof(\"RunnerGitHubConnection\".\"userProjectIds\") = 'array' and jsonb_array_length(\"RunnerGitHubConnection\".\"userProjectIds\") <= 100 and not jsonb_path_exists(\"RunnerGitHubConnection\".\"userProjectIds\", '$[*] ? (!(@ like_regex \"^[A-Za-z0-9_=-]{1,256}$\"))') and (not \"RunnerGitHubConnection\".\"userProjectManagementCurrent\" or (\"RunnerGitHubConnection\".\"userProjectManagementCeiling\" and jsonb_array_length(\"RunnerGitHubConnection\".\"userProjectIds\") > 0)) and char_length(\"RunnerGitHubConnection\".\"githubUserLogin\") between 1 and 100 and \"RunnerGitHubConnection\".\"githubUserLogin\" ~ '^[A-Za-z0-9_.-]+$'"
+          "value": "\"RunnerGitHubConnection\".\"appContentsPermission\" in ('none','read','write') and \"RunnerGitHubConnection\".\"appIssuesPermission\" in ('none','read','write') and \"RunnerGitHubConnection\".\"appPullRequestsPermission\" in ('none','read','write') and \"RunnerGitHubConnection\".\"appOrganizationProjectsPermission\" in ('none','read','write') and \"RunnerGitHubConnection\".\"userPermissionCeiling\" in ('read','triage','write','maintain','admin') and \"RunnerGitHubConnection\".\"userPermissionCurrent\" in ('read','triage','write','maintain','admin') and CASE \"RunnerGitHubConnection\".\"userPermissionCurrent\" WHEN 'read' THEN 1 WHEN 'triage' THEN 2 WHEN 'write' THEN 3 WHEN 'maintain' THEN 4 WHEN 'admin' THEN 5 ELSE 0 END <= CASE \"RunnerGitHubConnection\".\"userPermissionCeiling\" WHEN 'read' THEN 1 WHEN 'triage' THEN 2 WHEN 'write' THEN 3 WHEN 'maintain' THEN 4 WHEN 'admin' THEN 5 ELSE 0 END and (not \"RunnerGitHubConnection\".\"userProjectManagementCurrent\" or \"RunnerGitHubConnection\".\"userProjectManagementCeiling\") and char_length(\"RunnerGitHubConnection\".\"githubUserLogin\") between 1 and 100 and \"RunnerGitHubConnection\".\"githubUserLogin\" ~ '^[A-Za-z0-9_.-]+$'"
         },
         "RGHConn_version_valid": {
           "name": "RGHConn_version_valid",
