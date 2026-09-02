@@ -111,31 +111,60 @@ validate it before requesting approval:
 
 ```bash
 pnpm readiness:check path/to/readiness-receipt.json \
-  --expected-sha "$(git rev-parse HEAD)"
+  --expected-sha "$(git rev-parse HEAD)" \
+  --expected-candidate-digest "$DEPLOYMENT_CANDIDATE_DIGEST" \
+  --expected-rollback-sha "$CERTIFIED_ROLLBACK_SHA" \
+  --expected-rollback-candidate-digest "$CERTIFIED_ROLLBACK_DIGEST" \
+  --reviewer-keys path/to/authorized-reviewer-keys.json
 ```
 
 The strict version-1 contract is defined in
 `scripts/readiness-receipt.ts`. It records:
 
-- the exact source SHA, app build, migration, executor contract, adapter,
-  Daytona SDK/API, snapshot, target, region, and configuration digest;
+- a canonical candidate-manifest digest over the exact source SHA, app build,
+  migration, executor contract, adapter, Daytona SDK/API, snapshot, target,
+  region, and configuration digest;
 - synthetic tenant, account, and run correlation digests rather than raw
   identifiers;
-- bounded test results for the hermetic application, deployed staging, and
-  production smoke layers;
+- candidate-bound test results for every entry in test manifest version 1,
+  covering the required hermetic application, deployed staging, and production
+  smoke journeys;
 - explicit failure or recovery dispositions, evidence digests, and retention
-  classes;
-- the evidence-redaction result, retired-provider evidence result, rollback
-  target, open blockers, and the three required approval roles.
+  classes, plus one canonical evidence-set digest;
+- candidate-bound evidence-redaction and retired-provider results;
+- a distinct previously certified rollback candidate with retained deployment
+  and schema-compatibility evidence;
+- open blockers and signed approvals from the three required reviewer roles.
 
 Every object is strict, so unrecognized fields such as raw tokens or provider
-output are rejected. A `go` decision is invalid unless all three certification
-layers have passing evidence, every passing or failing result retains at least
-one evidence digest, every result passes or is explicitly not applicable,
-redaction and retirement evidence pass, no blocker remains, and the release
-operator, security reviewer, and product owner approve. A not-applicable result
-does not satisfy a required certification layer. Pending receipts may retain
-deferred evidence and blockers without implying release approval.
+output are rejected, and receipt files are capped at 1 MiB. A `go` decision is
+invalid unless every required manifest entry has durable passing evidence,
+every passing or failing result retains at least one evidence digest, every
+result passes or is explicitly not applicable, redaction and retirement
+evidence pass, no blocker remains, and the release operator, security reviewer,
+and product owner approve. Required entries cannot be replaced by one generic
+result per layer, and ephemeral evidence cannot satisfy them.
+
+Each approval carries a stable reviewer identity, role, timestamp, candidate
+digest, evidence-set digest, HTTPS approval reference, signing-key identifier,
+and Ed25519 signature. The trusted reviewer-key file is supplied independently
+at validation time and binds each key to an authorized identity and role; it is
+not embedded in the receipt. The validator also requires independently supplied
+candidate and rollback digests, rejects a rollback target equal to the
+candidate, rejects future-dated receipts beyond five minutes of clock skew, and
+rejects `go` receipts older than seven days. Generate expected digests from the
+deployment and previously certified rollback manifests rather than copying
+values out of the receipt under review.
+
+A reviewer-key file contains a strict top-level `keys` array. Each entry names
+`keyId`, `reviewerId`, authorized `roles`, and an Ed25519 `publicKeyPem`.
+Public keys are not secrets, but the approved key registry remains controlled
+release configuration. Private signing keys must never enter the repository,
+receipt, command line, logs, or evidence bundle.
+
+A not-applicable result does not satisfy a required manifest entry. Pending
+receipts may retain deferred evidence and blockers without implying release
+approval or requiring signed `go` attestations.
 
 Store the receipt only in the approved evidence system. Do not commit
 production identifiers, credentials, provider output, private repository

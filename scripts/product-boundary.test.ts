@@ -21,6 +21,10 @@ const cutoverAttestationUrl = new URL(
 );
 const readmeUrl = new URL("README.md", repositoryRoot);
 const roadmapUrl = new URL("ROADMAP.md", repositoryRoot);
+const releaseReadinessUrl = new URL(
+  "docs/roadmap/release-readiness.md",
+  repositoryRoot
+);
 const deliveryGovernanceUrl = new URL(
   "docs/roadmap/delivery-governance.md",
   repositoryRoot
@@ -814,6 +818,21 @@ test("the prior UI audit retains its evidence and explicit correction", () => {
   assert.match(audit, /disposition remained\s+\*\*no-go\*\*/);
   assert.match(audit, /\[Daytona cutover audit\]/);
   assert.match(audit, /\[release-readiness runbook\]/);
+});
+
+test("release readiness requires exact signed deployment attestations", () => {
+  const readiness = readFileSync(releaseReadinessUrl, "utf8");
+
+  assert.match(readiness, /test manifest version 1/);
+  assert.match(readiness, /ephemeral evidence cannot satisfy/);
+  assert.match(readiness, /Ed25519 signature/);
+  assert.match(readiness, /trusted reviewer-key file/);
+  assert.match(
+    readiness,
+    /independently supplied\s+candidate and rollback digests/
+  );
+  assert.match(readiness, /rejects a rollback target equal to the\s+candidate/);
+  assert.match(readiness, /older than seven days/);
 });
 
 test("repo-local OpenCoven packages stay private workspace dependencies", () => {
