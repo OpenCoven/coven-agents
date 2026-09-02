@@ -1,12 +1,13 @@
 # Verification Matrix
 
 This matrix records implemented source and retained evidence as of 2026-09-02
-for application baseline `dbe5ebbf70c5b943561612512fc03e5ae4542b3b`
+for application baseline `140bc1a5617c12cb1ad89b1b0a4945d27478564f`
 and the documentation-only candidate that updates this matrix. Repository and
 local contract procedures are verified; infrastructure cutover evidence is
-retained; public guest replay and Production-config operator paths are
-verified; persistent Daytona lifecycle, subscriber certification, observation,
-and full product release certification remain pending.
+retained; public guest replay, Production-config operator paths, and a
+non-promoted exact latest-main production-target candidate are verified;
+persistent Daytona lifecycle, subscriber certification, observation, and full
+product release certification remain pending.
 
 ## State vocabulary
 
@@ -43,7 +44,7 @@ and full product release certification remain pending.
 | Planning document registry | `Verified` | `docs/roadmap/README.md`, `scripts/planning-docs-policy.ts`, and focused policy coverage | Final Beads-to-Project no-op reconciliation before authority-derived status refresh |
 | Machine-readable readiness receipt | `Implemented` | `scripts/readiness-receipt.ts`, focused strict-schema and false-`go` policy coverage, and the [release readiness](release-readiness.md) operator procedure | Exact-deployment receipt validated against independent candidate and rollback manifests with complete durable journey evidence and authorized signed approvals |
 | Vercel Git deployment disablement | `Verified` | `vercel.json`, deployment documentation policy, and focused unit coverage | Account-level project disconnection only if full Vercel retirement is separately approved |
-| Production smoke and rollback | `Pending` | [release readiness](release-readiness.md), [cutover attestation](../operations/daytona-cutover-attestation.md), the Production-config receipt, and the resource-repair receipt prove exact-build health, closed-beta refusal, bounded provider/Stripe operator access, credential separation, alias state, definitive resize rejection recovery, and aggregate inventory | Authenticated subscriber promotion and rollback, persistent sandbox lifecycle, resolved provider-blocked inventory disposition, observation window, and named approvals |
+| Production smoke and rollback | `Pending` | [release readiness](release-readiness.md), [cutover attestation](../operations/daytona-cutover-attestation.md), the Production-config receipt, the resource-repair receipt, and the [latest-main candidate receipt](../operations/p0-latest-main-candidate-receipt-2026-09-02.json) prove exact-build health, closed-beta refusal, bounded provider/Stripe operator access, credential separation, alias state, definitive resize rejection recovery, aggregate inventory, and a non-promoted latest-main build with signed-out and operator refusal smoke | Authenticated subscriber promotion and rollback, persistent sandbox lifecycle, resolved provider-blocked inventory disposition, observation window, and named approvals |
 
 The [Daytona cutover audit](daytona-cutover-audit-2026-08-29.md) records the
 documentation and repository assessment. Any relevant code, configuration,
