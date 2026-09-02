@@ -900,6 +900,56 @@ test("queued authority preflight moves past eligible capacity-blocked work", asy
   ]);
 });
 
+test("queued authority preflight reports invalid credential configuration", async () => {
+  const current = claimed(5);
+  const reported: { detail: string; runId: string }[] = [];
+  const releasedRunIds: string[] = [];
+  let claimCalls = 0;
+
+  await preflightQueuedProductionDispatch({
+    dispatchLeaseMs: 1000,
+    environment: {
+      ABUSE_KEY_SECRET: "production-test-key",
+      GLOBAL_DAILY_RUN_CAP: "not-a-number",
+    },
+    findAccount: () =>
+      Promise.resolve({
+        authVersion: 5,
+        billingPeriodStart: new Date("2026-08-01T00:00:00.000Z"),
+        subscribedUntil: ACTIVE_SUBSCRIPTION_UNTIL,
+      }),
+    operator,
+    reportCredentialMisconfiguration: (misconfiguration) => {
+      reported.push({ ...misconfiguration });
+    },
+    store: {
+      claimQueuedDispatchForRevalidation: () => {
+        claimCalls += 1;
+        return Promise.resolve(claimCalls === 1 ? current : null);
+      },
+      cleanupTerminalLease: () =>
+        Promise.reject(new Error("valid authority must not be terminalized")),
+      finalizeRun: () =>
+        Promise.reject(new Error("valid authority must not be finalized")),
+      releaseUnstartedDispatch: (_operator, input) => {
+        releasedRunIds.push(input.runId);
+        return Promise.resolve({
+          kind: "released" as const,
+          value: current.run,
+        });
+      },
+    },
+  });
+
+  assert.deepEqual(releasedRunIds, [current.run.id]);
+  assert.deepEqual(reported, [
+    {
+      detail: "GLOBAL_DAILY_RUN_CAP must be a positive integer.",
+      runId: current.run.id,
+    },
+  ]);
+});
+
 test("production dispatches only a currently subscribed matching authority", async () => {
   const current = claimed(5);
   let dispatchedClaim: RunnerClaimedDispatch | undefined;
@@ -1130,4 +1180,81 @@ test("production reconciliation sanitizes lease database failures", async () => 
     },
   ]);
   assert.equal(JSON.stringify(failures).includes("private-detail"), false);
+});
+
+/**
+ * A misconfigured runner and an out-of-capacity tenant both release the claim,
+ * so before this was reported the two were indistinguishable from outside: a
+ * bad deployment presented as ordinary backpressure and runs simply stopped
+ * starting. Capacity is decided by admission and never reaches this branch.
+ */
+test("production reports credential misconfiguration instead of swallowing it", async () => {
+  const current = claimed(5);
+  const reported: { detail: string; runId: string }[] = [];
+  let dispatched = 0;
+
+  const result = await dispatchProductionClaim(current, {
+    dispatch: () => {
+      dispatched += 1;
+      return Promise.resolve({ kind: "started", runId: current.run.id });
+    },
+    environment: {
+      ABUSE_KEY_SECRET: "production-test-key",
+      GLOBAL_DAILY_RUN_CAP: "not-a-number",
+    },
+    findAccount: () =>
+      Promise.resolve({
+        authVersion: 5,
+        billingPeriodStart: new Date("2026-08-01T00:00:00.000Z"),
+        subscribedUntil: ACTIVE_SUBSCRIPTION_UNTIL,
+      }),
+    operator,
+    reportCredentialMisconfiguration: (misconfiguration) => {
+      reported.push({ ...misconfiguration });
+    },
+    store: {
+      releaseUnstartedDispatch: () =>
+        Promise.resolve({ kind: "released" as const, value: current.run }),
+    } as never,
+  });
+
+  assert.equal(dispatched, 0);
+  assert.deepEqual(result, {
+    kind: "retryable",
+    reason: "credential_unavailable",
+    runId: current.run.id,
+  });
+  assert.deepEqual(reported, [
+    {
+      detail: "GLOBAL_DAILY_RUN_CAP must be a positive integer.",
+      runId: current.run.id,
+    },
+  ]);
+});
+
+test("production stays silent when credential configuration is valid", async () => {
+  const current = claimed(5);
+  const reported: unknown[] = [];
+
+  const result = await dispatchProductionClaim(current, {
+    dispatch: () => Promise.resolve({ kind: "started", runId: current.run.id }),
+    environment: {
+      ABUSE_KEY_SECRET: "production-test-key",
+      GLOBAL_DAILY_RUN_CAP: "500",
+    },
+    findAccount: () =>
+      Promise.resolve({
+        authVersion: 5,
+        billingPeriodStart: new Date("2026-08-01T00:00:00.000Z"),
+        subscribedUntil: ACTIVE_SUBSCRIPTION_UNTIL,
+      }),
+    operator,
+    reportCredentialMisconfiguration: (misconfiguration) => {
+      reported.push(misconfiguration);
+    },
+    store: {} as never,
+  });
+
+  assert.deepEqual(result, { kind: "started", runId: current.run.id });
+  assert.deepEqual(reported, []);
 });

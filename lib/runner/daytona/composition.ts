@@ -15,6 +15,7 @@ import {
   type ProductionRunnerRuntimeDependencies,
   preflightQueuedProductionDispatch,
   productionDatabase,
+  type RunnerCredentialMisconfiguration,
   type RunnerReconciliationFailure,
   reconciliationFailure,
   registryHarnesses,
@@ -25,6 +26,15 @@ import type { RunnerStore } from "../store";
 import type { RunnerClaimedDispatch, RunnerOperator } from "../types";
 
 const OPERATOR: RunnerOperator = { kind: "runner-operator" };
+
+function reportCredentialMisconfiguration(
+  misconfiguration: RunnerCredentialMisconfiguration
+): void {
+  console.error(
+    "Runner credential configuration is invalid; the claim was released rather than dispatched.",
+    misconfiguration
+  );
+}
 
 function nextDispatchLease(leaseMilliseconds: number): Readonly<{
   leaseExpiresAt: Date;
@@ -237,6 +247,7 @@ function configuredClaimDispatcher(
       },
       findAccount,
       operator: OPERATOR,
+      reportCredentialMisconfiguration,
       store,
     });
   };
@@ -397,6 +408,7 @@ function daytonaProductionReconcile(
                 dispatchLeaseMs: admission.DEFAULT_DISPATCH_LEASE_MS,
                 findAccount,
                 operator: OPERATOR,
+                reportCredentialMisconfiguration,
                 store,
               }),
             projectTeamRuns: teams.projectTerminalSteps,
