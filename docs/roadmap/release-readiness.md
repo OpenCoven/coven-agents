@@ -41,7 +41,8 @@ Do not promote when:
 - Redis admission state
 - Daytona API key, snapshot, target, lifecycle settings, and domain allowlist
 - credential KEK ring and AAD write policy
-- Stripe configuration when billing is enabled
+- Stripe restricted key, webhook signing secret, recurring Price, and
+  default-off Checkout launch flag
 - distinct cron, manual reconciliation, and diagnostic credentials
 - explicit `RELEASE_AUDIENCE` and matching beta configuration
 
@@ -138,7 +139,36 @@ Repository build evidence does not prove a deployment occurred.
 
 ## Stripe webhook delivery
 
-When billing is enabled:
+Before enabling new subscription Checkout:
+
+1. Keep `SUBSCRIPTION_CHECKOUT_ENABLED=off` during deployment and migration.
+2. Confirm `STRIPE_PRICE_ID` identifies the intended live recurring Price,
+   interval, currency, amount, and Product.
+3. Use a test-mode restricted key to complete the documented Customer,
+   subscription, Checkout Session, invoice-line, and recovery paths. Then
+   create a separate live-mode restricted key with the same reviewed
+   permissions and verify that it can read the configured live Product and
+   Price. Do not attempt to use a live key against test-mode resources.
+4. Configure the webhook endpoint at the canonical application origin for:
+   `checkout.session.completed`,
+   `checkout.session.async_payment_succeeded`, `invoice.paid`, and
+   `invoice.payment_failed`.
+5. Verify the endpoint signing secret and exact raw-body signature handling.
+6. Run the checkout-disabled browser suite and prove both account surfaces hide
+   new-sales controls while the webhook still accepts a signed existing-customer
+   event.
+7. In Stripe test mode, prove successful first payment, delayed webhook
+   activation, failed initial payment, duplicate delivery, transient database
+   retry, renewal failure grace, expiry, and cancel-then-resubscribe.
+8. Inspect every pending `StripeReconciliation` row and resolve or explicitly
+   accept it before launch.
+9. Confirm Customer Portal, self-service cancellation, plan changes, and Stripe
+   Tax are not represented as available features.
+10. Enable `SUBSCRIPTION_CHECKOUT_ENABLED=on`, rerun runtime validation, and
+    prove both account surfaces can open one current Checkout Session without
+    exposing Stripe secrets or hardcoding the provider amount.
+
+For ongoing webhook delivery:
 
 - verify signature validation;
 - prove event deduplication and ordering;
@@ -146,6 +176,19 @@ When billing is enabled:
 - confirm a failed owner mutation rolls back the atomic event claim, so the
   same Stripe delivery remains retryable;
 - retain a sanitized event ID and status only.
+
+To stop new sales, return `SUBSCRIPTION_CHECKOUT_ENABLED` to `off` and verify
+`POST /api/checkout` refuses before provider work. Keep the webhook configured
+and healthy for existing subscribers. Rollback must never delete Customer,
+Subscription, `StripeEvent`, or unresolved `StripeReconciliation` records.
+
+### Stripe Tax no-go
+
+Do not enable `automatic_tax` until the business/head-office address, Product
+tax code, Price tax behavior, customer-location collection, and every required
+tax registration have been reviewed. A successful Checkout without an active
+registration can collect no tax. The detailed readiness sequence is in the
+[subscription and billing policy](../product/subscription-billing-policy.md#stripe-tax-readiness).
 
 ## Credential and identity isolation
 
