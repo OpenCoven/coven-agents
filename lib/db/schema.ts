@@ -1691,7 +1691,7 @@ export const runnerGitHubOperation = pgTable(
     ),
     check(
       "RGHOp_connectionSnapshot_valid",
-      sql`${table.installationId} ~ '^[1-9][0-9]{0,19}$' and ${table.accountId} ~ '^[1-9][0-9]{0,19}$' and ${table.repositoryId} ~ '^[1-9][0-9]{0,19}$' and ${table.accountType} in ('Organization','User') and char_length(${table.repositoryNodeId}) between 1 and 256 and ${table.repositoryNodeId} ~ '^[A-Za-z0-9_=-]+$' and ((${table.kind} in ('project.item.add','project.item.field.update') and ((${table.projectAuthorityBound} and char_length(${table.projectId}) between 1 and 256 and ${table.projectId} ~ '^[A-Za-z0-9_=-]+$') or (not ${table.projectAuthorityBound} and ${table.projectId} is null))) or (${table.kind} not in ('project.item.add','project.item.field.update') and not ${table.projectAuthorityBound} and ${table.projectId} is null))`
+      sql`${table.installationId} ~ '^[1-9][0-9]{0,19}$' and ${table.accountId} ~ '^[1-9][0-9]{0,19}$' and ${table.repositoryId} ~ '^[1-9][0-9]{0,19}$' and ${table.accountType} in ('Organization','User') and char_length(${table.repositoryNodeId}) between 1 and 256 and ${table.repositoryNodeId} ~ '^[A-Za-z0-9_=-]+$' and ((${table.kind} in ('project.item.add','project.item.field.update') and ((${table.projectAuthorityBound} and ${table.projectId} is not null and char_length(${table.projectId}) between 1 and 256 and ${table.projectId} ~ '^[A-Za-z0-9_=-]+$') or (not ${table.projectAuthorityBound} and ${table.projectId} is null))) or (${table.kind} not in ('project.item.add','project.item.field.update') and not ${table.projectAuthorityBound} and ${table.projectId} is null))`
     ),
     check(
       "RGHOp_capability_mapping_valid",

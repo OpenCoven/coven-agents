@@ -177,7 +177,34 @@ test("0035 bounds Project ids without exceeding the Postgres regex repetition li
     migration,
     /char_length\("RunnerGitHubOperation"\."projectId"\) between 1 and 256 and "RunnerGitHubOperation"\."projectId" ~ '\^\[A-Za-z0-9_=-\]\+\$'/u
   );
+  assert.match(
+    migration,
+    /"projectAuthorityBound" and "RunnerGitHubOperation"\."projectId" is not null and char_length/u
+  );
   assert.doesNotMatch(migration, /\{1,256\}/u);
+});
+
+test("the regex bound scanner catches every quantifier shape Postgres limits", () => {
+  const bounds = (text: string) =>
+    [...text.matchAll(/\{(\d+)(?:,(\d*))?\}/gu)]
+      .flatMap((match) => match.slice(1))
+      .filter((bound) => bound !== undefined && bound !== "")
+      .map(Number);
+  assert.deepEqual(
+    bounds("a{255} b{1,255} c{256,} d{1,256} e{0,19}"),
+    [255, 1, 255, 256, 1, 256, 0, 19]
+  );
+  assert.ok(
+    bounds("x{256,}").some((bound) => bound > POSTGRES_REGEX_REPETITION_LIMIT)
+  );
+  assert.ok(
+    bounds("x{1,256}").some((bound) => bound > POSTGRES_REGEX_REPETITION_LIMIT)
+  );
+  assert.ok(
+    bounds("x{255} y{1,255}").every(
+      (bound) => bound <= POSTGRES_REGEX_REPETITION_LIMIT
+    )
+  );
 });
 
 test("no migration or schema regex uses a repetition bound Postgres rejects", async () => {
@@ -195,9 +222,9 @@ test("no migration or schema regex uses a repetition bound Postgres rejects", as
     },
   ]);
   for (const { name, text } of sources) {
-    for (const match of text.matchAll(/\{(\d+)(?:,(\d+))?\}/gu)) {
+    for (const match of text.matchAll(/\{(\d+)(?:,(\d*))?\}/gu)) {
       for (const bound of match.slice(1)) {
-        if (bound !== undefined) {
+        if (bound !== undefined && bound !== "") {
           assert.ok(
             Number(bound) <= POSTGRES_REGEX_REPETITION_LIMIT,
             `${name} uses regex bound ${match[0]} above Postgres limit ${POSTGRES_REGEX_REPETITION_LIMIT}`
