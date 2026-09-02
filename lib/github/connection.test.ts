@@ -1952,7 +1952,6 @@ function dependencies(
     idempotencyStore: new MemoryIdempotencyStore(),
     now: () => NOW,
     randomBytes: (size) => new Uint8Array(size).fill(0x11),
-    serializeUserAuthorization: (_subscriber, operation) => operation(),
     ...rest,
   };
 }
