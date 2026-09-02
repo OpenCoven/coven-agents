@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { getTableConfig } from "drizzle-orm/pg-core";
 import { runReservation, runUsage } from "@/lib/db/schema";
+import { MONTHLY_MINUTE_CAP, RUN_MINUTE_RESERVATION } from "./limits";
 import { periodStart } from "./period";
 import {
   compensateRunReservation,
@@ -14,7 +15,8 @@ import {
   releaseRunReservation,
   reservationUsage,
   reserveRun,
-  TENANT_DAILY_RUN_CAP,
+  settledRunMinutes,
+  TENANT_DAILY_MINUTE_CAP,
   tenantHashForReservation,
 } from "./run-reservations";
 
@@ -217,6 +219,9 @@ function reservationInput(
   overrides: Partial<Parameters<typeof reserveRun>[1]> = {}
 ) {
   return {
+    // Cap mechanics are unit-agnostic; one unit per run keeps the small caps
+    // in these tests readable. The production default is asserted separately.
+    costUnits: 1,
     globalDailyCap: 500,
     keySecret: SECRET,
     now: NOW,
@@ -228,6 +233,127 @@ function reservationInput(
     ...overrides,
   };
 }
+
+test("a run reserves the runner's full time limit in minutes by default", async () => {
+  const db = new MemoryReservationDatabase();
+  const { costUnits: _omitted, ...withoutUnits } = reservationInput("default", {
+    tenantDailyCap: 100,
+  });
+
+  const result = await reserveRun(db, withoutUnits);
+
+  assert.equal(result.kind, "reserved");
+  const reserved = db.reservations.get("default");
+  assert.equal(reserved?.costUnits, RUN_MINUTE_RESERVATION);
+  assert.equal(reserved?.reservedUnits, RUN_MINUTE_RESERVATION);
+  assert.equal(reserved?.settledAt, null);
+  assert.equal(reserved?.durationSeconds, null);
+});
+
+test("the default caps are the monthly minute cap and the tenant daily minute cap", async () => {
+  const db = new MemoryReservationDatabase();
+  const {
+    tenantDailyCap: _d,
+    tenantMonthlyCap: _m,
+    ...withDefaults
+  } = reservationInput("defaults", { costUnits: MONTHLY_MINUTE_CAP + 1 });
+
+  const monthly = await reserveRun(db, {
+    ...withDefaults,
+    tenantDailyCap: MONTHLY_MINUTE_CAP + 1,
+  });
+  const daily = await reserveRun(db, {
+    ...withDefaults,
+    costUnits: TENANT_DAILY_MINUTE_CAP + 1,
+    tenantMonthlyCap: MONTHLY_MINUTE_CAP * 2,
+  });
+
+  assert.deepEqual(monthly, {
+    cap: MONTHLY_MINUTE_CAP,
+    kind: "refused",
+    reason: "tenant_monthly_cap",
+    used: 0,
+  });
+  assert.deepEqual(daily, {
+    cap: TENANT_DAILY_MINUTE_CAP,
+    kind: "refused",
+    reason: "tenant_daily_cap",
+    used: 0,
+  });
+});
+
+test("settlement charges whole minutes, rounded up, within the reservation", () => {
+  const startedAt = new Date("2026-08-25T18:00:00.000Z");
+  const at = (seconds: number) =>
+    new Date(startedAt.getTime() + seconds * 1000);
+
+  // Any part of a minute is a minute, and a run that launched pays for one.
+  assert.deepEqual(
+    settledRunMinutes({ completedAt: at(0), reservedUnits: 15, startedAt }),
+    { costUnits: 1, durationSeconds: 0 }
+  );
+  assert.deepEqual(
+    settledRunMinutes({ completedAt: at(60), reservedUnits: 15, startedAt }),
+    { costUnits: 1, durationSeconds: 60 }
+  );
+  assert.deepEqual(
+    settledRunMinutes({ completedAt: at(61), reservedUnits: 15, startedAt }),
+    { costUnits: 2, durationSeconds: 61 }
+  );
+  // Sub-second overrun still rounds up: the provider bills the second.
+  assert.deepEqual(
+    settledRunMinutes({
+      completedAt: new Date(at(60).getTime() + 1),
+      reservedUnits: 15,
+      startedAt,
+    }),
+    { costUnits: 2, durationSeconds: 61 }
+  );
+  // A run that somehow outlived its limit is never charged above what
+  // admission checked against the cap.
+  assert.deepEqual(
+    settledRunMinutes({ completedAt: at(3600), reservedUnits: 15, startedAt }),
+    { costUnits: 15, durationSeconds: 3600 }
+  );
+});
+
+test("settlement refuses to invent a duration", () => {
+  const startedAt = new Date("2026-08-25T18:00:00.000Z");
+  const later = new Date("2026-08-25T18:05:00.000Z");
+
+  assert.equal(
+    settledRunMinutes({
+      completedAt: later,
+      reservedUnits: 15,
+      startedAt: null,
+    }),
+    null
+  );
+  assert.equal(
+    settledRunMinutes({ completedAt: null, reservedUnits: 15, startedAt }),
+    null
+  );
+  assert.equal(
+    settledRunMinutes({
+      completedAt: startedAt,
+      reservedUnits: 15,
+      startedAt: later,
+    }),
+    null
+  );
+  assert.equal(
+    settledRunMinutes({
+      completedAt: new Date("invalid"),
+      reservedUnits: 15,
+      startedAt,
+    }),
+    null
+  );
+  assert.equal(
+    settledRunMinutes({ completedAt: later, reservedUnits: 0, startedAt }),
+    null
+  );
+});
 
 test("parallel reservations cannot exceed the tenant daily cap", async () => {
   const db = new MemoryReservationDatabase();
@@ -814,9 +940,11 @@ test("global capacity configuration accepts only positive integers", () => {
 });
 
 test("the tenant daily cap is conservative, usable, and below the monthly cap", () => {
-  assert.equal(TENANT_DAILY_RUN_CAP, 50);
-  assert.ok(TENANT_DAILY_RUN_CAP > 0);
-  assert.ok(TENANT_DAILY_RUN_CAP < 750);
+  assert.equal(TENANT_DAILY_MINUTE_CAP, 200);
+  assert.ok(TENANT_DAILY_MINUTE_CAP > 0);
+  assert.ok(TENANT_DAILY_MINUTE_CAP < MONTHLY_MINUTE_CAP);
+  // A day must admit more than one full-length run or the cap is a lockout.
+  assert.ok(TENANT_DAILY_MINUTE_CAP >= RUN_MINUTE_RESERVATION * 4);
 });
 
 test("RunReservation has the required key, indexes, and integrity checks", () => {
@@ -856,6 +984,8 @@ test("RunReservation has the required key, indexes, and integrity checks", () =>
   );
   assert.ok(expiryIndex?.config.where);
   assert.ok(checkNames.includes("RunReservation_costUnits_positive"));
+  assert.ok(checkNames.includes("RunReservation_costUnits_within_reserved"));
+  assert.ok(checkNames.includes("RunReservation_settlement_valid"));
   assert.ok(checkNames.includes("RunReservation_state_valid"));
   assert.ok(checkNames.includes("RunReservation_state_timestamps_valid"));
   assert.ok(checkNames.includes("RunReservation_expiry_valid"));

@@ -17,11 +17,18 @@ import {
 import { requireNonemptyAbuseKeySecret } from "@/lib/abuse/config";
 import type { databaseFor } from "@/lib/db/access";
 import { type RunReservation, runReservation, runUsage } from "@/lib/db/schema";
-import { MONTHLY_RUN_CAP } from "./limits";
+import { MONTHLY_MINUTE_CAP, RUN_MINUTE_RESERVATION } from "./limits";
 
 export { globalDailyRunCapFromEnv } from "@/lib/abuse/config";
 
-export const TENANT_DAILY_RUN_CAP = 50;
+/**
+ * Minutes one tenant may hold across a UTC day. It bounds how fast a single
+ * account can burn through its monthly allowance and how many full-length runs
+ * it can have reserved at once, without being so tight that a busy day of
+ * ordinary use hits it: roughly four times the daily average of the monthly
+ * cap.
+ */
+export const TENANT_DAILY_MINUTE_CAP = 200;
 export const RUN_RESERVATION_TTL_MS = 5 * 60 * 1000;
 
 const SERIALIZABLE = { isolationLevel: "serializable" } as const;
@@ -319,9 +326,9 @@ export async function reserveRun(
   }
 ): Promise<ReserveRunResult> {
   const now = input.now ?? new Date();
-  const costUnits = input.costUnits ?? 1;
-  const tenantDailyCap = input.tenantDailyCap ?? TENANT_DAILY_RUN_CAP;
-  const tenantMonthlyCap = input.tenantMonthlyCap ?? MONTHLY_RUN_CAP;
+  const costUnits = input.costUnits ?? RUN_MINUTE_RESERVATION;
+  const tenantDailyCap = input.tenantDailyCap ?? TENANT_DAILY_MINUTE_CAP;
+  const tenantMonthlyCap = input.tenantMonthlyCap ?? MONTHLY_MINUTE_CAP;
   const reservationTtlMs = input.reservationTtlMs ?? RUN_RESERVATION_TTL_MS;
 
   validateReservationInput({
@@ -388,12 +395,15 @@ export async function reserveRun(
     const reservation: RunReservationRecord = {
       consumedAt: null,
       costUnits,
+      durationSeconds: null,
       expiresAt: new Date(now.getTime() + reservationTtlMs),
       periodDay,
       periodMonth: input.periodStart,
       releasedAt: null,
       reservedAt: now,
+      reservedUnits: costUnits,
       runId: input.runId,
+      settledAt: null,
       state: "reserved",
       tenantHash,
     };
@@ -499,8 +509,8 @@ export async function reservationUsage(
   tenantMonthlyRemaining: number;
 }> {
   const now = input.now ?? new Date();
-  const tenantDailyCap = input.tenantDailyCap ?? TENANT_DAILY_RUN_CAP;
-  const tenantMonthlyCap = input.tenantMonthlyCap ?? MONTHLY_RUN_CAP;
+  const tenantDailyCap = input.tenantDailyCap ?? TENANT_DAILY_MINUTE_CAP;
+  const tenantMonthlyCap = input.tenantMonthlyCap ?? MONTHLY_MINUTE_CAP;
   validatePositiveInteger(input.globalDailyCap, "globalDailyCap");
   validatePositiveInteger(tenantDailyCap, "tenantDailyCap");
   validatePositiveInteger(tenantMonthlyCap, "tenantMonthlyCap");
@@ -536,6 +546,51 @@ export async function reservationUsage(
       ),
     };
   });
+}
+
+export type RunReservationSettlement = Readonly<{
+  costUnits: number;
+  durationSeconds: number;
+}>;
+
+/**
+ * What a finished run should be charged, in whole minutes.
+ *
+ * Rounds up: a run that used any part of a minute pays for that minute, which
+ * is how the sandbox provider bills too. Never below one minute, because the
+ * run did launch, and never above what admission reserved, because a charge
+ * above the reservation could push a tenant past a cap that admission had
+ * already checked.
+ *
+ * Returns null when the timestamps cannot describe a duration. The caller
+ * leaves the reservation at its full reserved amount in that case: an
+ * unmeasurable run is charged as the longest run it could have been, which
+ * fails closed rather than handing out free minutes on a bookkeeping gap.
+ */
+export function settledRunMinutes(input: {
+  completedAt: Date | null | undefined;
+  reservedUnits: number;
+  startedAt: Date | null | undefined;
+}): RunReservationSettlement | null {
+  const { completedAt, reservedUnits, startedAt } = input;
+  if (
+    !(startedAt instanceof Date && completedAt instanceof Date) ||
+    Number.isNaN(startedAt.getTime()) ||
+    Number.isNaN(completedAt.getTime()) ||
+    completedAt.getTime() < startedAt.getTime() ||
+    !Number.isSafeInteger(reservedUnits) ||
+    reservedUnits <= 0
+  ) {
+    return null;
+  }
+  const durationSeconds = Math.ceil(
+    (completedAt.getTime() - startedAt.getTime()) / 1000
+  );
+  const minutes = Math.ceil(durationSeconds / 60);
+  return {
+    costUnits: Math.min(reservedUnits, Math.max(1, minutes)),
+    durationSeconds,
+  };
 }
 
 export function tenantHashForReservation(

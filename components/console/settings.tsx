@@ -996,7 +996,7 @@ export function Settings({
             {selectedTab === "usage" ? (
               <>
                 <Heading
-                  blurb="A run is counted when an agent starts, whether it succeeds or not."
+                  blurb="Minutes of agent run time. A run holds its full time limit when it starts and settles to what it used when it ends, whether it succeeds or not."
                   title="Usage"
                 />
                 {usage ? (
@@ -1035,7 +1035,7 @@ export function Settings({
                           ...tabular,
                         }}
                       >
-                        of {usage.cap} runs
+                        of {usage.cap} minutes
                       </span>
                       {daysToReset === null ? null : (
                         <span style={type_.meta}>
@@ -1052,11 +1052,11 @@ export function Settings({
                       }}
                     >
                       <div
-                        aria-label="Runs used this month"
+                        aria-label="Minutes used this month"
                         aria-valuemax={usage.cap}
                         aria-valuemin={0}
                         aria-valuenow={usage.used}
-                        aria-valuetext={`${usage.used} of ${usage.cap} runs, ${pct} percent of the monthly cap`}
+                        aria-valuetext={`${usage.used} of ${usage.cap} minutes, ${pct} percent of the monthly cap`}
                         role="progressbar"
                         style={{
                           background: "var(--bg-sunken)",
@@ -1077,7 +1077,7 @@ export function Settings({
                       </div>
                       <span style={{ ...type_.meta, ...tabular }}>
                         {pct}% of the monthly cap ·{" "}
-                        {Math.max(0, usage.cap - usage.used)} runs left
+                        {Math.max(0, usage.cap - usage.used)} minutes left
                       </span>
                     </div>
 

@@ -127,7 +127,7 @@ export function daytonaRunnerReconciliationDependencies(
     randomToken: dependencies.randomToken,
     releaseCredentialResources: (run) =>
       releaseRunnerCredentialResources(
-        run.id,
+        run,
         dependencies.credentialDependencies
       ),
     resourceLifecycle: dependencies.resourceLifecycle,
@@ -161,7 +161,7 @@ export function daytonaRunnerCancellationDependencies(
     randomToken: dependencies.randomToken,
     releaseCredentialResources: (run) =>
       releaseRunnerCredentialResources(
-        run.id,
+        run,
         dependencies.credentialDependencies
       ),
     resourceLifecycle: dependencies.resourceLifecycle,

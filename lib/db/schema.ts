@@ -311,18 +311,27 @@ export type RunUsage = InferSelectModel<typeof runUsage>;
  * `tenantHash` is an HMAC pseudonym, never the raw tenant identifier.
  * `periodMonth` retains the historical name from the budget design, but its
  * value is the subscriber's billing-period start rather than a calendar month.
+ *
+ * Units are minutes of run time. `reservedUnits` is what admission held, the
+ * runner's execution time limit; `costUnits` is what the tenant is charged,
+ * which starts equal and is settled down to the whole minutes the run used
+ * once terminal cleanup knows when it started and ended. Settlement can only
+ * lower the charge — the check constraint makes that a database invariant.
  */
 export const runReservation = pgTable(
   "RunReservation",
   {
     consumedAt: timestamp("consumedAt"),
     costUnits: integer("costUnits").notNull(),
+    durationSeconds: integer("durationSeconds"),
     expiresAt: timestamp("expiresAt").notNull(),
     periodDay: date("periodDay").notNull(),
     periodMonth: timestamp("periodMonth").notNull(),
     releasedAt: timestamp("releasedAt"),
     reservedAt: timestamp("reservedAt").notNull().defaultNow(),
+    reservedUnits: integer("reservedUnits").notNull(),
     runId: varchar("runId", { length: 64 }).primaryKey().notNull(),
+    settledAt: timestamp("settledAt"),
     state: varchar("state", {
       enum: ["reserved", "consumed", "released"],
       length: 16,
@@ -347,6 +356,14 @@ export const runReservation = pgTable(
       .on(table.expiresAt)
       .where(sql`${table.state} = 'reserved'`),
     check("RunReservation_costUnits_positive", sql`${table.costUnits} > 0`),
+    check(
+      "RunReservation_costUnits_within_reserved",
+      sql`${table.costUnits} <= ${table.reservedUnits}`
+    ),
+    check(
+      "RunReservation_settlement_valid",
+      sql`(${table.settledAt} is null and ${table.durationSeconds} is null) or (${table.settledAt} is not null and ${table.durationSeconds} is not null and ${table.durationSeconds} >= 0)`
+    ),
     check(
       "RunReservation_state_valid",
       sql`${table.state} in ('reserved', 'consumed', 'released')`

@@ -1,4 +1,4 @@
-import { MONTHLY_RUN_CAP } from "@/lib/billing/limits";
+import { MONTHLY_MINUTE_CAP } from "@/lib/billing/limits";
 
 export function usageResponsePayload(input: {
   globalAdmissionClosed: boolean;
@@ -7,11 +7,12 @@ export function usageResponsePayload(input: {
   tenantMonthlyRemaining: number;
 }) {
   return {
-    cap: MONTHLY_RUN_CAP,
+    cap: MONTHLY_MINUTE_CAP,
     dailyRemaining: input.tenantDailyRemaining,
     globalAdmissionClosed: input.globalAdmissionClosed,
     monthlyRemaining: input.tenantMonthlyRemaining,
     resetsAt: input.resetsAt?.toISOString() ?? null,
-    used: Math.max(0, MONTHLY_RUN_CAP - input.tenantMonthlyRemaining),
+    unit: "minutes",
+    used: Math.max(0, MONTHLY_MINUTE_CAP - input.tenantMonthlyRemaining),
   };
 }

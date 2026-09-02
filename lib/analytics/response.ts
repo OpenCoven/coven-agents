@@ -6,7 +6,7 @@ import type { SessionLike } from "@/lib/auth/subscriber-access";
 import { subscriberAccessResponse } from "@/lib/auth/subscriber-access";
 import type { authorizeSubscriberAccess } from "@/lib/auth/subscriber-authorization.server";
 import { windowStart } from "@/lib/billing/history";
-import { MONTHLY_RUN_CAP } from "@/lib/billing/limits";
+import { MONTHLY_MINUTE_CAP } from "@/lib/billing/limits";
 import type { runHistory } from "@/lib/db/queries";
 import { tenantForUser } from "@/lib/session";
 
@@ -60,10 +60,12 @@ export async function analyticsResponse(
 
   return Response.json(
     {
-      cap: MONTHLY_RUN_CAP,
+      cap: MONTHLY_MINUTE_CAP,
       days: series,
+      minutes: series.reduce((sum, entry) => sum + entry.minutes, 0),
       range: days,
       total: series.reduce((sum, entry) => sum + entry.runs, 0),
+      unit: "minutes",
     },
     { headers: { "cache-control": "no-store" } }
   );

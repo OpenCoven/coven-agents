@@ -7,7 +7,7 @@ import {
 import { periodStart } from "@/lib/billing/period";
 import {
   globalDailyRunCapFromEnv,
-  TENANT_DAILY_RUN_CAP,
+  TENANT_DAILY_MINUTE_CAP,
 } from "@/lib/billing/run-reservations";
 import { findUserById, runReservationUsageForTenant } from "@/lib/db/queries";
 import { tenantForUser } from "@/lib/session";
@@ -59,7 +59,7 @@ export async function GET(request: Request) {
       keySecret: process.env.ABUSE_KEY_SECRET ?? "",
       periodStart: since,
       tenant: tenantForUser(session.user.id),
-      tenantDailyCap: TENANT_DAILY_RUN_CAP,
+      tenantDailyCap: TENANT_DAILY_MINUTE_CAP,
     });
 
     return Response.json(usageResponsePayload({ ...usage, resetsAt }), {

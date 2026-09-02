@@ -27,6 +27,7 @@ const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 type Analytics = {
   cap: number;
   days: DayCount[];
+  minutes: number;
   range: number;
   total: number;
 };
@@ -361,7 +362,8 @@ export function Analytics() {
                     {data.total}
                   </span>
                   <span style={{ ...type_.meta, ...tabular }}>
-                    {data.total === 1 ? "run" : "runs"} counted
+                    {data.total === 1 ? "run" : "runs"} counted · {data.minutes}{" "}
+                    {data.minutes === 1 ? "minute" : "minutes"} used
                     {busiest && busiest.runs > 0
                       ? ` · busiest ${shortDay(busiest.day)}`
                       : ""}
@@ -377,8 +379,9 @@ export function Analytics() {
                   }}
                 >
                   A run is counted when an agent starts, whether it succeeds or
-                  not — the same row the cap is enforced against, so this and
-                  your usage cannot disagree.
+                  not. Its minutes are the charge settled against the cap from
+                  the same reservation admission checked, so this and your usage
+                  cannot disagree.
                 </p>
 
                 <details>
@@ -426,6 +429,17 @@ export function Analytics() {
                           >
                             Runs
                           </th>
+                          <th
+                            style={{
+                              borderBottom: hairline,
+                              color: "var(--text-muted)",
+                              fontWeight: 500,
+                              padding: "4px 0",
+                              textAlign: "right",
+                            }}
+                          >
+                            Minutes
+                          </th>
                         </tr>
                       </thead>
                       <tbody>
@@ -448,6 +462,16 @@ export function Analytics() {
                               }}
                             >
                               {entry.runs}
+                            </td>
+                            <td
+                              style={{
+                                color: "var(--text-primary)",
+                                padding: "3px 0",
+                                textAlign: "right",
+                                ...tabular,
+                              }}
+                            >
+                              {entry.minutes}
                             </td>
                           </tr>
                         ))}
@@ -501,9 +525,10 @@ export function Analytics() {
           >
             Three panels above are empty because the data behind them is not
             recorded, not because they are unfinished. The run record stores one
-            row per counted run — a tenant, a run id and an instant — which is
-            enough to say how many runs happened and when, and nothing about how
-            they went.
+            row per counted run — a tenant, a run id, an instant and the minutes
+            settled against the cap — which is enough to say how many runs
+            happened, when, and how long they held, and nothing about how they
+            went.
           </p>
         </div>
       </div>

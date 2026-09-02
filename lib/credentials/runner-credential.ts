@@ -1,12 +1,14 @@
 import "server-only";
 
 import { inspect } from "node:util";
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import {
   consumeRunReservation,
   drizzleRunReservationDatabase,
   type ReserveRunResult,
+  type RunReservationSettlement,
   reserveRun,
+  settledRunMinutes,
 } from "@/lib/billing/run-reservations";
 import type { databaseFor } from "@/lib/db/access";
 import {
@@ -34,9 +36,20 @@ type ReservationInput = Parameters<typeof reserveRun>[1];
 type LeaseInput = Parameters<typeof issueCredentialLease>[1];
 const SERIALIZABLE = { isolationLevel: "serializable" } as const;
 
+/**
+ * Terminal cleanup carries the run's timestamps so the consumed reservation
+ * can be settled from the minutes the run actually held. Either timestamp may
+ * be absent — a run recovered without a start or end keeps its full reserved
+ * charge rather than an invented smaller one.
+ */
 export type RunnerCredentialCleanupInput =
   | Readonly<{ mode: "prelaunch"; runId: string; tenant: string }>
-  | Readonly<{ mode: "terminal"; runId: string }>;
+  | Readonly<{
+      completedAt?: Date | null;
+      mode: "terminal";
+      runId: string;
+      startedAt?: Date | null;
+    }>;
 
 export type RunnerCredentialCleanupResult =
   | Readonly<{ kind: "cleaned" }>
@@ -47,6 +60,15 @@ export interface RunnerCredentialCleanupTransaction {
   deleteReservation: (runId: string) => Promise<RunReservation | null>;
   deleteUsageForRun: (runId: string, tenant: string) => Promise<void>;
   lockReservation: (runId: string) => Promise<RunReservation | null>;
+  /**
+   * Lowers a consumed, unsettled reservation to its measured charge. Returns
+   * null when there is nothing to settle, which is not a failure: a replayed
+   * terminal cleanup finds the row already settled.
+   */
+  settleReservation: (
+    runId: string,
+    settlement: RunReservationSettlement & Readonly<{ settledAt: Date }>
+  ) => Promise<RunReservation | null>;
 }
 
 export interface RunnerCredentialCleanupDatabase {
@@ -164,6 +186,24 @@ export function drizzleRunnerCredentialCleanupDatabase(
                 .limit(1);
               return reservation ?? null;
             },
+            settleReservation: async (runId, settlement) => {
+              const [settled] = await transaction
+                .update(runReservation)
+                .set({
+                  costUnits: settlement.costUnits,
+                  durationSeconds: settlement.durationSeconds,
+                  settledAt: settlement.settledAt,
+                })
+                .where(
+                  and(
+                    eq(runReservation.runId, runId),
+                    eq(runReservation.state, "consumed"),
+                    isNull(runReservation.settledAt)
+                  )
+                )
+                .returning();
+              return settled ?? null;
+            },
           }),
         SERIALIZABLE
       ),
@@ -174,6 +214,11 @@ export function drizzleRunnerCredentialCleanupDatabase(
  * Locks the reservation before deleting its credential lease. A concurrent
  * consumer must wait for this transaction, then finds no lease/reservation and
  * cannot launch using accounting that is being rolled back.
+ *
+ * Terminal cleanup of a launched run also settles its charge in the same
+ * transaction: the reservation held the runner's full time limit, and now that
+ * the run has ended the tenant is charged the whole minutes it actually used.
+ * A run whose timestamps cannot be measured keeps the full reservation.
  */
 export async function cleanupRunnerCredentialResourcesAtomically(
   database: RunnerCredentialCleanupDatabase,
@@ -192,6 +237,23 @@ export async function cleanupRunnerCredentialResourcesAtomically(
         !(await transaction.deleteReservation(input.runId))
       ) {
         throw new Error("Runner reservation cleanup was rejected.");
+      }
+      if (
+        input.mode === "terminal" &&
+        reservation?.state === "consumed" &&
+        reservation.settledAt === null
+      ) {
+        const settlement = settledRunMinutes({
+          completedAt: input.completedAt,
+          reservedUnits: reservation.reservedUnits,
+          startedAt: input.startedAt,
+        });
+        if (settlement && input.completedAt) {
+          await transaction.settleReservation(input.runId, {
+            ...settlement,
+            settledAt: input.completedAt,
+          });
+        }
       }
     });
     return { kind: "cleaned" };
@@ -572,15 +634,27 @@ export async function acquireRunnerCredential(
 
 /**
  * Releases transient credential state after terminal cleanup while preserving
- * the consumed reservation for a command that did launch. Failures are
- * surfaced so callers retain their recovery ownership instead of silently
- * completing cleanup.
+ * the consumed reservation for a command that did launch, settled to the
+ * minutes the run held. Failures are surfaced so callers retain their
+ * recovery ownership instead of silently completing cleanup.
  */
 export async function releaseRunnerCredentialResources(
-  runId: string,
+  run: Readonly<{
+    completedAt?: Date | null;
+    id: string;
+    startedAt?: Date | null;
+  }>,
   dependencies: Pick<RunnerCredentialDependencies, "cleanupResources">
 ): Promise<void> {
-  await completeCredentialCleanup({ mode: "terminal", runId }, dependencies);
+  await completeCredentialCleanup(
+    {
+      completedAt: run.completedAt ?? null,
+      mode: "terminal",
+      runId: run.id,
+      startedAt: run.startedAt ?? null,
+    },
+    dependencies
+  );
 }
 
 /**

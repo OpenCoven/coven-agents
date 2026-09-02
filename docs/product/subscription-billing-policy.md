@@ -1,7 +1,7 @@
 # Subscription and Billing Policy
 
 - Status: living repository policy
-- Last reviewed: 2026-08-31
+- Last reviewed: 2026-09-02
 - Scope: subscriber entitlement, Stripe checkout and webhook handling, billing
   period usage, and recovery expectations
 
@@ -29,11 +29,20 @@ release does not expose plan changes, payment-method management, invoice
 history, or cancellation controls. Operators must not imply that those
 features are available.
 
-The included monthly allowance is `MONTHLY_RUN_CAP = 750`, defined in
-`lib/billing/limits.ts`. That constant is the current source read by admission,
-usage responses, and analytics. Any subscription offer must disclose the cap
-before purchase; the account usage surfaces must continue to report the same
-value rather than maintain a separate copy.
+The included monthly allowance is `MONTHLY_MINUTE_CAP = 1500` minutes of
+agent run time, defined in `lib/billing/limits.ts`. That constant is the
+current source read by admission, usage responses, and analytics. Any
+subscription offer must disclose the cap before purchase; the account usage
+surfaces must continue to report the same value rather than maintain a
+separate copy. The intended price is USD 30 per month, but the repository does
+not encode it; see the Stripe verification note above.
+
+Each admitted run reserves `RUN_MINUTE_RESERVATION = 15` minutes, the runner's
+execution time limit, and is settled to the whole minutes it actually held
+when it ends. A tenant with fewer than fifteen unreserved minutes remaining
+cannot start a run. The reservation size is pinned to the runner limit by a
+test, so the cap can never be overcommitted by a run admitted on a partial
+allowance.
 
 ## Entitlement authority and timing
 
@@ -473,6 +482,18 @@ run does not consume a second allowance. Reserved capacity is discarded when
 credential preparation fails before launch, and a consumed reservation is
 compensated only after cleanup proves no command launched. In-flight work that
 did launch retains its consumed usage record.
+
+Units are minutes. Admission charges `RUN_MINUTE_RESERVATION` minutes against
+the tenant daily cap (`TENANT_DAILY_MINUTE_CAP`), the billing-period cap, and
+the deployment-wide `GLOBAL_DAILY_RUN_CAP`, which is likewise sized in
+minutes. Terminal credential cleanup settles a consumed reservation to the
+whole minutes between the run's recorded start and completion, rounded up and
+never below one, inside the same transaction that retires the lease.
+Settlement can only lower a charge; the database enforces that the settled
+charge never exceeds what admission reserved. A run whose start or completion
+was not recorded keeps its full reservation rather than an invented smaller
+charge. Reservations written before minute accounting carry their original
+one-unit charge and are never settled.
 
 `GET /api/usage` reads the current account period and returns cap, used,
 remaining, and reset information from the same reservation accounting used by

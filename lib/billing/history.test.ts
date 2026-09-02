@@ -8,19 +8,19 @@ test("a day with no runs is a zero, not an absence", () => {
   // steady use when the truth is that nothing happened.
   const filled = fillDays(
     [
-      { day: "2026-08-20", runs: 3 },
-      { day: "2026-08-23", runs: 1 },
+      { day: "2026-08-20", minutes: 12, runs: 3 },
+      { day: "2026-08-23", minutes: 4, runs: 1 },
     ],
     new Date("2026-08-20T00:00:00.000Z"),
     new Date("2026-08-24T00:00:00.000Z")
   );
 
   assert.deepEqual(filled, [
-    { day: "2026-08-20", runs: 3 },
-    { day: "2026-08-21", runs: 0 },
-    { day: "2026-08-22", runs: 0 },
-    { day: "2026-08-23", runs: 1 },
-    { day: "2026-08-24", runs: 0 },
+    { day: "2026-08-20", minutes: 12, runs: 3 },
+    { day: "2026-08-21", minutes: 0, runs: 0 },
+    { day: "2026-08-22", minutes: 0, runs: 0 },
+    { day: "2026-08-23", minutes: 4, runs: 1 },
+    { day: "2026-08-24", minutes: 0, runs: 0 },
   ]);
 });
 
@@ -32,7 +32,7 @@ test("an empty tenant still gets a full window of zeroes", () => {
   );
 
   assert.equal(filled.length, 3);
-  assert.ok(filled.every((entry) => entry.runs === 0));
+  assert.ok(filled.every((entry) => entry.runs === 0 && entry.minutes === 0));
 });
 
 test("the window is inclusive of both ends", () => {
@@ -62,7 +62,7 @@ test("a day is bucketed in UTC regardless of the server's zone", () => {
 
 test("a month boundary does not break the fill", () => {
   const filled = fillDays(
-    [{ day: "2026-09-01", runs: 2 }],
+    [{ day: "2026-09-01", minutes: 9, runs: 2 }],
     new Date("2026-08-30T00:00:00.000Z"),
     new Date("2026-09-02T00:00:00.000Z")
   );
@@ -72,4 +72,5 @@ test("a month boundary does not break the fill", () => {
     ["2026-08-30", "2026-08-31", "2026-09-01", "2026-09-02"]
   );
   assert.equal(filled[2]?.runs, 2);
+  assert.equal(filled[2]?.minutes, 9);
 });

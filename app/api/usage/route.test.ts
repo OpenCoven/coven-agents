@@ -13,12 +13,13 @@ test("usage returns tenant remaining budgets without global capacity numbers", (
   });
 
   assert.deepEqual(payload, {
-    cap: 750,
+    cap: 1500,
     dailyRemaining: 17,
     globalAdmissionClosed: true,
     monthlyRemaining: 612,
     resetsAt: RESETS_AT.toISOString(),
-    used: 138,
+    unit: "minutes",
+    used: 888,
   });
   assert.doesNotMatch(
     JSON.stringify(payload),
