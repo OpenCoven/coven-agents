@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   buildReasoningCardModel,
   foldReasoningCardSteps,
+  reasoningActivityStatus,
   reasoningCardActivities,
 } from "./reasoning-card";
 
@@ -177,6 +178,26 @@ test("streaming and terminal cards use honest status copy", () => {
   assert.equal(empty.summary, "Working through the request");
   assert.equal(empty.stepCount, 1);
   assert.equal(empty.steps[0]?.state, "active");
+});
+
+test("streaming status aggregates across every reasoning part", () => {
+  const activities = reasoningCardActivities([
+    {
+      state: "streaming",
+      text: "Still checking the first source.",
+      type: "reasoning",
+    },
+    {
+      state: "done",
+      text: "The second source is already complete.",
+      type: "reasoning",
+    },
+  ]);
+
+  assert.deepEqual(reasoningActivityStatus(activities), {
+    isStreaming: true,
+    present: true,
+  });
 });
 
 test("long routine runs fold while failures and reasoning remain visible", () => {

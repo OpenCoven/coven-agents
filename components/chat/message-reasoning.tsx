@@ -3,16 +3,19 @@
 import { useEffect, useState } from "react";
 import {
   buildReasoningCardModel,
-  reasoningCardActivities,
+  type ReasoningActivity,
 } from "@/lib/reasoning-card";
 import { ReasoningCard } from "./reasoning-card";
 
 type MessageReasoningProps = {
+  activities: readonly ReasoningActivity[];
   isLoading: boolean;
-  parts: readonly unknown[];
 };
 
-export function MessageReasoning({ isLoading, parts }: MessageReasoningProps) {
+export function MessageReasoning({
+  activities,
+  isLoading,
+}: MessageReasoningProps) {
   const [hasBeenStreaming, setHasBeenStreaming] = useState(isLoading);
 
   useEffect(() => {
@@ -22,7 +25,7 @@ export function MessageReasoning({ isLoading, parts }: MessageReasoningProps) {
   }, [isLoading]);
 
   const model = buildReasoningCardModel({
-    activities: reasoningCardActivities(parts),
+    activities,
     isStreaming: isLoading,
   });
 

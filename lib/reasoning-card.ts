@@ -147,6 +147,21 @@ export function reasoningCardActivities(
   return activities;
 }
 
+export function reasoningActivityStatus(
+  activities: readonly ReasoningActivity[]
+): Readonly<{ isStreaming: boolean; present: boolean }> {
+  let isStreaming = false;
+  let present = false;
+  for (const activity of activities) {
+    if (activity.kind !== "reasoning") {
+      continue;
+    }
+    present = true;
+    isStreaming ||= activity.state === "active";
+  }
+  return { isStreaming, present };
+}
+
 function toolDescription(state: ReasoningToolActivity["state"]): string {
   switch (state) {
     case "completed":

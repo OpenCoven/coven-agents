@@ -3,6 +3,10 @@ import type { UseChatHelpers } from "@ai-sdk/react";
 import { useCallback } from "react";
 import { BrandMark } from "@/components/brand/brand-mark";
 import type { Vote } from "@/lib/db/schema";
+import {
+  reasoningActivityStatus,
+  reasoningCardActivities,
+} from "@/lib/reasoning-card";
 import type { ChatMessage } from "@/lib/types";
 import { cn, sanitizeText } from "@/lib/utils";
 import { MessageContent, MessageResponse } from "../ai-elements/message";
@@ -141,21 +145,9 @@ const PurePreviewMessage = ({
     </div>
   );
 
-  const reasoningState = message.parts?.reduce(
-    (acc, part) => {
-      if (part.type === "reasoning" && part.text?.trim().length > 0) {
-        return {
-          isStreaming:
-            acc.isStreaming ||
-            ("state" in part ? part.state === "streaming" : false),
-          present: true,
-          rendered: false,
-        };
-      }
-      return acc;
-    },
-    { isStreaming: false, present: false, rendered: false }
-  ) ?? { isStreaming: false, present: false, rendered: false };
+  const reasoningActivities = reasoningCardActivities(message.parts ?? []);
+  const reasoningStatus = reasoningActivityStatus(reasoningActivities);
+  const reasoningState = { ...reasoningStatus, rendered: false };
 
   const parts = message.parts?.map((part, index) => {
     const { type } = part;
@@ -166,9 +158,9 @@ const PurePreviewMessage = ({
         reasoningState.rendered = true;
         return (
           <MessageReasoning
+            activities={reasoningActivities}
             isLoading={isLoading || reasoningState.isStreaming}
             key={key}
-            parts={message.parts}
           />
         );
       }
