@@ -522,6 +522,148 @@ test("valid token candidates in a malformed exchange response are revoked before
   ]);
 });
 
+test("token candidates preceding malformed trailing exchange data are revoked", async () => {
+  const refreshToken = `ghr_${"B".repeat(32)}`;
+  const requests: CapturedRequest[] = [];
+  const client = clientFor(
+    sequenceFetch(requests, [
+      new Response(`${JSON.stringify(tokenBody(USER_TOKEN, refreshToken))}{`, {
+        status: 200,
+      }),
+      new Response(null, { status: 202 }),
+      new Response(null, { status: 204 }),
+    ])
+  );
+
+  await assert.rejects(
+    client.proveInstallationAccess(proofInput()),
+    providerError("github_provider_invalid_json", false)
+  );
+  assert.deepEqual(revokedCredentials(requests).sort(), [
+    refreshToken,
+    USER_TOKEN,
+  ]);
+});
+
+test("token scanning recovers after an earlier malformed string", async () => {
+  const refreshToken = `ghr_${"B".repeat(32)}`;
+  const malformed = `{"junk":"\\q","access_token":"${USER_TOKEN}","refresh_token":"${refreshToken}","scope":"","token_type":"bearer"}`;
+  const requests: CapturedRequest[] = [];
+  const client = clientFor(
+    sequenceFetch(requests, [
+      new Response(malformed, { status: 200 }),
+      new Response(null, { status: 202 }),
+      new Response(null, { status: 204 }),
+    ])
+  );
+
+  await assert.rejects(
+    client.proveInstallationAccess(proofInput()),
+    providerError("github_provider_invalid_json", false)
+  );
+  assert.deepEqual(revokedCredentials(requests).sort(), [
+    refreshToken,
+    USER_TOKEN,
+  ]);
+});
+
+test("token candidates delivered before an exchange stream failure are revoked", async () => {
+  const refreshToken = `ghr_${"B".repeat(32)}`;
+  const encoded = new TextEncoder().encode(
+    JSON.stringify(tokenBody(USER_TOKEN, refreshToken))
+  );
+  let delivered = false;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (!delivered) {
+        delivered = true;
+        controller.enqueue(encoded);
+        return;
+      }
+      controller.error(new Error("stream failed"));
+    },
+  });
+  const requests: CapturedRequest[] = [];
+  const client = clientFor(
+    sequenceFetch(requests, [
+      new Response(body, { status: 200 }),
+      new Response(null, { status: 202 }),
+      new Response(null, { status: 204 }),
+    ])
+  );
+
+  await assert.rejects(
+    client.proveInstallationAccess(proofInput()),
+    providerError("github_provider_unavailable", true)
+  );
+  assert.deepEqual(revokedCredentials(requests).sort(), [
+    refreshToken,
+    USER_TOKEN,
+  ]);
+});
+
+test("token candidates in an oversized exchange prefix are revoked", async () => {
+  const refreshToken = `ghr_${"B".repeat(32)}`;
+  const prefix = JSON.stringify(tokenBody(USER_TOKEN, refreshToken));
+  const oversized = `${prefix}${" ".repeat(300)}`;
+  const requests: CapturedRequest[] = [];
+  const client = clientFor(
+    sequenceFetch(requests, [
+      new Response(oversized, {
+        headers: { "content-length": String(Buffer.byteLength(oversized)) },
+        status: 200,
+      }),
+      new Response(null, { status: 202 }),
+      new Response(null, { status: 204 }),
+    ]),
+    { maxResponseBytes: Buffer.byteLength(prefix) }
+  );
+
+  await assert.rejects(
+    client.proveInstallationAccess(proofInput()),
+    providerError("github_provider_response_too_large", false)
+  );
+  assert.deepEqual(revokedCredentials(requests).sort(), [
+    refreshToken,
+    USER_TOKEN,
+  ]);
+});
+
+test("duplicate token fields have a bounded cleanup fan-out", async () => {
+  const accessTokens = Array.from(
+    { length: 10 },
+    (_, index) => `ghu_${String(index).padStart(2, "0")}${"A".repeat(30)}`
+  );
+  const refreshToken = `ghr_${"B".repeat(32)}`;
+  const duplicateFields = accessTokens
+    .map((token) => `"access_token":"${token}"`)
+    .join(",");
+  const requests: CapturedRequest[] = [];
+  const client = clientFor(
+    sequenceFetch(requests, [
+      new Response(
+        `{${duplicateFields},"refresh_token":"${refreshToken}","scope":"","token_type":"bearer"}`,
+        { status: 200 }
+      ),
+      new Response(null, { status: 202 }),
+      ...Array.from({ length: 4 }, () => new Response(null, { status: 204 })),
+    ])
+  );
+
+  await assert.rejects(
+    client.proveInstallationAccess(proofInput()),
+    providerError("github_provider_invalid_response", false)
+  );
+  const revoked = revokedCredentials(requests);
+  assert.equal(revoked.length, 5);
+  assert.ok(revoked.includes(refreshToken));
+  assert.ok(revoked.includes(accessTokens.at(-1) ?? ""));
+  assert.equal(
+    requests.some(({ url }) => url.includes("/user/installations")),
+    false
+  );
+});
+
 test("a valid refresh candidate is revoked when its access-token companion is malformed", async () => {
   const refreshToken = `ghr_${"B".repeat(32)}`;
   const requests: CapturedRequest[] = [];

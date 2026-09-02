@@ -14,6 +14,7 @@ const DEFAULT_MAX_PAGES = 10;
 const DEFAULT_MAX_INSTALLATIONS = 1000;
 const DEFAULT_MAX_REPOSITORIES = 16;
 const MAX_TOKEN_BYTES = 4096;
+const MAX_TOKEN_CANDIDATES_PER_TYPE = 4;
 const MAX_CODE_BYTES = 1024;
 const MAX_REDIRECT_URI_BYTES = 2048;
 const DECIMAL_ID = /^[1-9][0-9]{0,19}$/u;
@@ -29,6 +30,11 @@ const REQUEST_ID = /^[A-Za-z0-9:-]{1,128}$/u;
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 type JsonObject = Record<string, unknown>;
+type TokenCandidates = Readonly<{
+  access: readonly string[];
+  overflow: boolean;
+  refresh: readonly string[];
+}>;
 
 export type GitHubUserAuthorizationClient = Readonly<{
   proveInstallationAccess: (
@@ -113,28 +119,49 @@ export function createGitHubUserAuthorizationClient(
   function requestJson(
     url: string,
     init: RequestInit,
-    stage: "exchange" | "user"
+    stage: "user"
   ): Promise<Readonly<{ timedOut: boolean; value: unknown }>> {
     return timedRequest(url, init, stage, async (response) => {
       const text = await readBoundedText(response, maxResponseBytes);
+      return parseJson(text);
+    });
+  }
+
+  function requestExchange(
+    url: string,
+    init: RequestInit
+  ): Promise<
+    Readonly<{
+      timedOut: boolean;
+      value: Readonly<{
+        candidates: TokenCandidates;
+        error: GitHubProviderError | null;
+        parsed: unknown | null;
+      }>;
+    }>
+  > {
+    return timedRequest(url, init, "exchange", async (response) => {
+      const body = await readBoundedBody(response, maxResponseBytes, true);
+      const candidateText = new TextDecoder("utf-8").decode(body.bytes);
+      const candidates = topLevelTokenCandidates(candidateText);
+      const responseError = response.ok
+        ? body.error
+        : statusError(response, "exchange");
+      if (responseError !== null) {
+        return { candidates, error: responseError, parsed: null };
+      }
       try {
-        const preserveIntegers = ((
-          _key: string,
-          value: unknown,
-          context?: Readonly<{ source?: string }>
-        ) =>
-          typeof value === "number" &&
-          context?.source !== undefined &&
-          /^-?[0-9]+$/u.test(context.source)
-            ? context.source
-            : value) as (this: unknown, key: string, value: unknown) => unknown;
-        return JSON.parse(text, preserveIntegers) as unknown;
-      } catch {
-        // biome-ignore lint/style/useErrorCause: parser errors can echo user tokens or provider response fragments
-        throw new GitHubProviderError("github_provider_invalid_json", {
-          retryable: false,
-          status: 502,
-        });
+        const text = new TextDecoder("utf-8", { fatal: true }).decode(
+          body.bytes
+        );
+        return { candidates, error: null, parsed: parseJson(text) };
+      } catch (error) {
+        return {
+          candidates,
+          error:
+            error instanceof GitHubProviderError ? error : invalidJsonError(),
+          parsed: null,
+        };
       }
     });
   }
@@ -171,7 +198,7 @@ export function createGitHubUserAuthorizationClient(
         if (
           (stage === "revoke" && response.status !== 204) ||
           (stage === "refresh-revoke" && response.status !== 202) ||
-          (stage !== "refresh-revoke" && stage !== "revoke" && !response.ok)
+          (stage === "user" && !response.ok)
         ) {
           await response.body?.cancel().catch(() => undefined);
           throw statusError(response, stage);
@@ -211,7 +238,11 @@ export function createGitHubUserAuthorizationClient(
   ): Promise<
     Readonly<{
       error: GitHubProviderError | null;
-      tokens: Readonly<{ access: string | null; refresh: string | null }>;
+      tokens: Readonly<{
+        access: string | null;
+        revokeAccess: readonly string[];
+        revokeRefresh: readonly string[];
+      }>;
     }>
   > {
     return withClientSecret(input.clientSecret, async (clientSecret) => {
@@ -222,7 +253,7 @@ export function createGitHubUserAuthorizationClient(
         code_verifier: proof.codeVerifier,
         redirect_uri: proof.redirectUri,
       });
-      const exchange = await requestJson(
+      const exchange = await requestExchange(
         `${GITHUB_OAUTH_ORIGIN}/login/oauth/access_token`,
         {
           body: body.toString(),
@@ -232,29 +263,60 @@ export function createGitHubUserAuthorizationClient(
             "user-agent": "OpenCoven-GitHub-App",
           },
           method: "POST",
-        },
-        "exchange"
+        }
       );
-      const parsed = object(exchange.value);
+      const parsed =
+        exchange.value.parsed === null ? null : object(exchange.value.parsed);
       let validationError: GitHubProviderError | null = exchange.timedOut
         ? timeoutError()
-        : parsed.access_token === undefined && typeof parsed.error === "string"
-          ? new GitHubProviderError("github_oauth_exchange_rejected", {
-              retryable: false,
-              status: 400,
-            })
-          : null;
+        : exchange.value.error;
+      if (
+        validationError === null &&
+        parsed !== null &&
+        parsed.access_token === undefined &&
+        typeof parsed.error === "string"
+      ) {
+        validationError = new GitHubProviderError(
+          "github_oauth_exchange_rejected",
+          {
+            retryable: false,
+            status: 400,
+          }
+        );
+      }
+      const revokeAccess = new Set(exchange.value.candidates.access);
+      const revokeRefresh = new Set(exchange.value.candidates.refresh);
+      let candidateOverflow = exchange.value.candidates.overflow;
+      if (candidateOverflow) {
+        validationError ??= invalidResponse();
+      }
       let accessToken: string | null = null;
-      let refreshToken: string | null = null;
+      if (parsed === null) {
+        return {
+          error: validationError ?? invalidResponse(),
+          tokens: {
+            access: null,
+            revokeAccess: [...revokeAccess],
+            revokeRefresh: [...revokeRefresh],
+          },
+        };
+      }
       try {
         accessToken = boundedTokenCandidate(parsed.access_token);
+        candidateOverflow =
+          retainEffectiveCandidate(revokeAccess, accessToken) ||
+          candidateOverflow;
       } catch (error) {
         validationError ??=
           error instanceof GitHubProviderError ? error : invalidResponse();
       }
       try {
         if (parsed.refresh_token !== undefined) {
-          refreshToken = boundedTokenCandidate(parsed.refresh_token);
+          candidateOverflow =
+            retainEffectiveCandidate(
+              revokeRefresh,
+              boundedTokenCandidate(parsed.refresh_token)
+            ) || candidateOverflow;
         }
         if (
           parsed.error !== undefined ||
@@ -271,9 +333,16 @@ export function createGitHubUserAuthorizationClient(
       if (accessToken !== null && !OAUTH_USER_PATTERN.test(accessToken)) {
         validationError ??= invalidResponse();
       }
+      if (candidateOverflow) {
+        validationError ??= invalidResponse();
+      }
       return {
         error: validationError,
-        tokens: { access: accessToken, refresh: refreshToken },
+        tokens: {
+          access: accessToken,
+          revokeAccess: [...revokeAccess],
+          revokeRefresh: [...revokeRefresh],
+        },
       };
     });
   }
@@ -499,7 +568,8 @@ export function createGitHubUserAuthorizationClient(
       const { error: exchangeError, tokens: exchangedTokens } =
         await exchangeCode(proof);
       let accessToken = exchangedTokens.access;
-      let refreshToken = exchangedTokens.refresh;
+      const accessTokensToRevoke = [...exchangedTokens.revokeAccess];
+      const refreshTokensToRevoke = [...exchangedTokens.revokeRefresh];
       let operationError: unknown = exchangeError ?? undefined;
       let authority: GitHubUserInstallationAuthority | undefined;
       if (operationError === undefined && accessToken !== null) {
@@ -529,8 +599,8 @@ export function createGitHubUserAuthorizationClient(
       let revocationError: unknown;
       try {
         const revocations = [
-          ...(refreshToken === null ? [] : [revokeRefreshToken(refreshToken)]),
-          ...(accessToken === null ? [] : [revokeToken(accessToken)]),
+          ...refreshTokensToRevoke.map((token) => revokeRefreshToken(token)),
+          ...accessTokensToRevoke.map((token) => revokeToken(token)),
         ];
         const results = await Promise.allSettled(revocations);
         revocationError = results.find(
@@ -539,7 +609,10 @@ export function createGitHubUserAuthorizationClient(
         )?.reason;
       } finally {
         accessToken = null;
-        refreshToken = null;
+        accessTokensToRevoke.fill("");
+        accessTokensToRevoke.length = 0;
+        refreshTokensToRevoke.fill("");
+        refreshTokensToRevoke.length = 0;
       }
       if (revocationError !== undefined) {
         throw revocationError;
@@ -749,48 +822,250 @@ async function readBoundedText(
   response: Response,
   maxBytes: number
 ): Promise<string> {
+  const body = await readBoundedBody(response, maxBytes);
+  if (body.error !== null) {
+    throw body.error;
+  }
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(body.bytes);
+  } catch {
+    // biome-ignore lint/style/useErrorCause: decoder errors can echo provider response fragments
+    throw invalidJsonError();
+  }
+}
+
+async function readBoundedBody(
+  response: Response,
+  maxBytes: number,
+  captureOversizePrefix = false
+): Promise<Readonly<{ bytes: Uint8Array; error: GitHubProviderError | null }>> {
   const contentLength = response.headers.get("content-length");
-  if (
+  const declaredOversize =
     contentLength &&
     /^[0-9]+$/u.test(contentLength) &&
-    Number(contentLength) > maxBytes
-  ) {
-    throw responseTooLarge();
+    Number(contentLength) > maxBytes;
+  if (declaredOversize && !captureOversizePrefix) {
+    return { bytes: new Uint8Array(), error: responseTooLarge() };
   }
   if (!response.body) {
-    return "";
+    return { bytes: new Uint8Array(), error: null };
   }
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
   while (true) {
-    // biome-ignore lint/performance/noAwaitInLoops: streaming enforces the byte ceiling before buffering
-    const next = await reader.read();
+    let next: ReadableStreamReadResult<Uint8Array>;
+    try {
+      // biome-ignore lint/performance/noAwaitInLoops: streaming enforces the byte ceiling before buffering
+      next = await reader.read();
+    } catch {
+      return {
+        bytes: concatenateBytes(chunks, total),
+        error: declaredOversize ? responseTooLarge() : unavailableError(),
+      };
+    }
     if (next.done) {
       break;
     }
-    total += next.value.byteLength;
-    if (total > maxBytes) {
-      await reader.cancel();
-      throw responseTooLarge();
+    const remaining = maxBytes - total;
+    if (next.value.byteLength > remaining) {
+      if (remaining > 0) {
+        chunks.push(next.value.subarray(0, remaining));
+        total += remaining;
+      }
+      await reader.cancel().catch(() => undefined);
+      return {
+        bytes: concatenateBytes(chunks, total),
+        error: responseTooLarge(),
+      };
     }
     chunks.push(next.value);
+    total += next.value.byteLength;
   }
+  return {
+    bytes: concatenateBytes(chunks, total),
+    error: declaredOversize ? responseTooLarge() : null,
+  };
+}
+
+function concatenateBytes(
+  chunks: readonly Uint8Array[],
+  total: number
+): Uint8Array {
   const bytes = new Uint8Array(total);
   let offset = 0;
   for (const chunk of chunks) {
     bytes.set(chunk, offset);
     offset += chunk.byteLength;
   }
+  return bytes;
+}
+
+function parseJson(text: string): unknown {
   try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    const preserveIntegers = ((
+      _key: string,
+      value: unknown,
+      context?: Readonly<{ source?: string }>
+    ) =>
+      typeof value === "number" &&
+      context?.source !== undefined &&
+      /^-?[0-9]+$/u.test(context.source)
+        ? context.source
+        : value) as (this: unknown, key: string, value: unknown) => unknown;
+    return JSON.parse(text, preserveIntegers) as unknown;
   } catch {
-    // biome-ignore lint/style/useErrorCause: decoder errors can echo user tokens or provider response fragments
-    throw new GitHubProviderError("github_provider_invalid_json", {
-      retryable: false,
-      status: 502,
-    });
+    // biome-ignore lint/style/useErrorCause: parser errors can echo provider response fragments
+    throw invalidJsonError();
   }
+}
+
+function invalidJsonError(): GitHubProviderError {
+  return new GitHubProviderError("github_provider_invalid_json", {
+    retryable: false,
+    status: 502,
+  });
+}
+
+function topLevelTokenCandidates(text: string): TokenCandidates {
+  const access = new Set<string>();
+  const refresh = new Set<string>();
+  let overflow = false;
+  let depth = 0;
+  let index = 0;
+  while (index < text.length) {
+    const character = text[index];
+    if (character === "{" || character === "[") {
+      depth += 1;
+      index += 1;
+      continue;
+    }
+    if (character === "}" || character === "]") {
+      depth -= 1;
+      if (depth < 0) {
+        break;
+      }
+      index += 1;
+      continue;
+    }
+    if (character !== '"') {
+      index += 1;
+      continue;
+    }
+    const key = jsonStringAt(text, index);
+    if (key === null) {
+      break;
+    }
+    index = key.end;
+    if (
+      depth !== 1 ||
+      key.value === null ||
+      (key.value !== "access_token" && key.value !== "refresh_token")
+    ) {
+      continue;
+    }
+    let valueStart = skipJsonWhitespace(text, key.end);
+    if (text[valueStart] !== ":") {
+      continue;
+    }
+    valueStart = skipJsonWhitespace(text, valueStart + 1);
+    const value = jsonStringAt(text, valueStart);
+    if (value === null) {
+      continue;
+    }
+    index = value.end;
+    if (value.value === null) {
+      continue;
+    }
+    try {
+      const candidate = boundedTokenCandidate(value.value);
+      overflow =
+        retainCandidate(
+          key.value === "access_token" ? access : refresh,
+          candidate
+        ) || overflow;
+    } catch {
+      // Invalid strings are not safe credential revocation inputs.
+    }
+  }
+  return { access: [...access], overflow, refresh: [...refresh] };
+}
+
+function jsonStringAt(
+  text: string,
+  start: number
+): Readonly<{ end: number; value: string | null }> | null {
+  if (text[start] !== '"') {
+    return null;
+  }
+  let escaped = false;
+  for (let index = start + 1; index < text.length; index += 1) {
+    const character = text[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (character !== '"') {
+      continue;
+    }
+    try {
+      return {
+        end: index + 1,
+        value: JSON.parse(text.slice(start, index + 1)) as string,
+      };
+    } catch {
+      return { end: index + 1, value: null };
+    }
+  }
+  return null;
+}
+
+function retainCandidate(candidates: Set<string>, candidate: string): boolean {
+  if (candidates.has(candidate)) {
+    return false;
+  }
+  if (candidates.size >= MAX_TOKEN_CANDIDATES_PER_TYPE) {
+    return true;
+  }
+  candidates.add(candidate);
+  return false;
+}
+
+function retainEffectiveCandidate(
+  candidates: Set<string>,
+  candidate: string
+): boolean {
+  if (candidates.has(candidate)) {
+    return false;
+  }
+  if (candidates.size >= MAX_TOKEN_CANDIDATES_PER_TYPE) {
+    const lastCandidate = [...candidates].at(-1);
+    if (lastCandidate !== undefined) {
+      candidates.delete(lastCandidate);
+    }
+    candidates.add(candidate);
+    return true;
+  }
+  candidates.add(candidate);
+  return false;
+}
+
+function skipJsonWhitespace(text: string, start: number): number {
+  let index = start;
+  while (
+    index < text.length &&
+    (text[index] === " " ||
+      text[index] === "\n" ||
+      text[index] === "\r" ||
+      text[index] === "\t")
+  ) {
+    index += 1;
+  }
+  return index;
 }
 
 function boundedToken(value: unknown, pattern: RegExp): string {
