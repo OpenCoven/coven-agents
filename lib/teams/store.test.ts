@@ -139,6 +139,7 @@ function githubConnectionRow(
     accountId: "18446744073709551615",
     accountLogin: "OpenCoven",
     accountType: "Organization",
+    appContentsPermission: "write",
     appIssuesPermission: "write",
     appOrganizationProjectsPermission: "write",
     appPullRequestsPermission: "write",
@@ -164,6 +165,7 @@ function githubConnectionRow(
 
 function githubConnectionAuthority(connection: GitHubConnectionRecord) {
   return {
+    appContentsPermission: connection.appContentsPermission,
     appIssuesPermission: connection.appIssuesPermission,
     appOrganizationProjectsPermission:
       connection.appOrganizationProjectsPermission,
@@ -448,6 +450,26 @@ test("forward migration persists team authority, approval audit, and execution s
   assert.doesNotMatch(
     reservationMigration,
     /FOREIGN KEY \("plannedRunnerRunId"[^)]*\).*"RunnerRun"/u
+  );
+});
+
+test("GitHub delivery migration enables contents authority and repository commits fail closed", async () => {
+  const migration = await readFile(
+    new URL("../db/migrations/0034_certain_veda.sql", import.meta.url),
+    "utf8"
+  );
+
+  assert.match(
+    migration,
+    /ADD COLUMN "appContentsPermission" varchar\(8\) DEFAULT 'none' NOT NULL/u
+  );
+  assert.match(
+    migration,
+    /DROP CONSTRAINT "RGHOp_kind_valid".*ADD CONSTRAINT "RGHOp_kind_valid" CHECK \("RunnerGitHubOperation"\."kind" in \('repository\.commit'/su
+  );
+  assert.match(
+    migration,
+    /WHEN "RunnerGitHubOperation"\."kind" = 'repository\.commit' THEN 'github\.contents\.write'/u
   );
 });
 

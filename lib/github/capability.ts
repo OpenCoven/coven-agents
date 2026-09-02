@@ -47,6 +47,7 @@ const TOKEN_HASH = /^[a-f0-9]{64}$/u;
 const REQUEST_ID = /^[A-Za-z0-9:-]{1,128}$/u;
 const PUBLIC_URL = /^https:\/\/github\.com\//u;
 const GITHUB_CAPABILITIES = new Set<TeamCapability>([
+  "github.contents.write",
   "github.issues.read",
   "github.issues.write",
   "github.pull_requests.read",
@@ -91,6 +92,7 @@ export type GitHubBrokerRepository = Readonly<{
   accountId: string;
   accountLogin: string;
   accountType: "Organization" | "User";
+  appContentsPermission: GitHubAppRepositoryPermission;
   appIssuesPermission: GitHubAppRepositoryPermission;
   appOrganizationProjectsPermission: GitHubAppRepositoryPermission;
   appPullRequestsPermission: GitHubAppRepositoryPermission;
@@ -180,6 +182,7 @@ function brokerRepository(
     !REPOSITORY_PART.test(connection.repositoryName) ||
     !DECIMAL_ID.test(connection.githubUserId) ||
     !REPOSITORY_PART.test(connection.githubUserLogin) ||
+    !validAppRepositoryPermission(connection.appContentsPermission) ||
     !validAppRepositoryPermission(connection.appIssuesPermission) ||
     !validAppRepositoryPermission(connection.appPullRequestsPermission) ||
     !validAppRepositoryPermission(
@@ -204,6 +207,7 @@ function brokerRepository(
     accountId: connection.accountId,
     accountLogin: connection.accountLogin,
     accountType: connection.accountType,
+    appContentsPermission: connection.appContentsPermission,
     appIssuesPermission: connection.appIssuesPermission,
     appOrganizationProjectsPermission:
       connection.appOrganizationProjectsPermission,
@@ -240,9 +244,11 @@ function repositoryAllowsCapability(
       )
     );
   }
-  const appPermission = capability.startsWith("github.issues.")
-    ? repository.appIssuesPermission
-    : repository.appPullRequestsPermission;
+  const appPermission = capability.startsWith("github.contents.")
+    ? repository.appContentsPermission
+    : capability.startsWith("github.issues.")
+      ? repository.appIssuesPermission
+      : repository.appPullRequestsPermission;
   return (
     appPermissionAtLeast(appPermission, write ? "write" : "read") &&
     userPermissionAtLeast(
@@ -898,6 +904,8 @@ function capabilityAuthorityIsLive(
       column(row, "userProjectManagementCeiling") &&
     policyRepository.userProjectManagementCurrent ===
       column(row, "userProjectManagementCurrent") &&
+    policyRepository.appContentsPermission ===
+      column(row, "appContentsPermission") &&
     policyRepository.appIssuesPermission ===
       column(row, "appIssuesPermission") &&
     policyRepository.appPullRequestsPermission ===
@@ -1026,6 +1034,11 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
                   AND (
                     (
                       "operation"."requiredCapability" =
+                        'github.contents.write'
+                      AND "connection"."appContentsPermission" = 'write'
+                    )
+                    OR (
+                      "operation"."requiredCapability" =
                         'github.issues.write'
                       AND "connection"."appIssuesPermission" = 'write'
                     )
@@ -1070,6 +1083,8 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
                         "connection"."userProjectManagementCeiling",
                       'userProjectManagementCurrent',
                         "connection"."userProjectManagementCurrent",
+                      'appContentsPermission',
+                        "connection"."appContentsPermission",
                       'appIssuesPermission',
                         "connection"."appIssuesPermission",
                       'appPullRequestsPermission',
@@ -1598,6 +1613,7 @@ export function createGitHubGatewayStore(database: TeamStoreDatabase) {
                 "connection"."accountId",
                 "connection"."accountLogin",
                 "connection"."accountType",
+                "connection"."appContentsPermission",
                 "connection"."appIssuesPermission",
                 "connection"."appOrganizationProjectsPermission",
                 "connection"."appPullRequestsPermission",

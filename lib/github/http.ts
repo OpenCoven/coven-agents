@@ -38,6 +38,7 @@ const GITHUB_API_ORIGIN = "https://api.github.com";
 const GITHUB_API_VERSION = "2022-11-28";
 const REQUEST_ID = /^[A-Za-z0-9:-]{1,128}$/u;
 const NODE_ID = /^[A-Za-z0-9_=-]{1,256}$/u;
+const GIT_SHA = /^[a-f0-9]{40}$/u;
 const DEFAULT_TIMEOUT_MS = 5000;
 const DEFAULT_MAX_RESPONSE_BYTES = 256 * 1024;
 const DEFAULT_AUTHORITY_REFRESH_TIMEOUT_MS = 15_000;
@@ -168,6 +169,74 @@ function publicBody(value: unknown): string {
       .trimEnd(),
     GITHUB_TOOL_LIMITS.resultBodyBytes
   );
+}
+
+function gitSha(value: unknown): string {
+  return string(value, 40, GIT_SHA);
+}
+
+function gitRefSha(value: unknown, expectedRef: string): string {
+  const body = object(value);
+  const target = object(body.object);
+  if (body.ref !== expectedRef || target.type !== "commit") {
+    throw invalidResponse();
+  }
+  return gitSha(target.sha);
+}
+
+function gitCommitTreeSha(value: unknown, expectedSha: string): string {
+  const body = object(value);
+  if (gitSha(body.sha) !== expectedSha) {
+    throw invalidResponse();
+  }
+  return gitSha(object(body.tree).sha);
+}
+
+type GitBlobMode = "100644" | "100755";
+
+type GitTreeEntry = Readonly<{
+  mode: "040000" | "100644" | "100755" | "120000" | "160000";
+  path: string;
+  sha: string;
+  type: "blob" | "commit" | "tree";
+}>;
+
+function gitTreeEntries(
+  value: unknown,
+  expectedSha: string
+): readonly GitTreeEntry[] {
+  const body = object(value);
+  if (gitSha(body.sha) !== expectedSha || body.truncated === true) {
+    throw invalidResponse();
+  }
+  if (body.truncated !== undefined && typeof body.truncated !== "boolean") {
+    throw invalidResponse();
+  }
+  const entries = array(body.tree, 4096);
+  const paths = new Set<string>();
+  return entries.map((value) => {
+    const entry = object(value);
+    const mode = string(entry.mode, 6);
+    const path = string(entry.path, 1024);
+    const type = string(entry.type, 6);
+    if (
+      !["040000", "100644", "100755", "120000", "160000"].includes(mode) ||
+      !["blob", "commit", "tree"].includes(type) ||
+      (type === "tree" && mode !== "040000") ||
+      (type === "commit" && mode !== "160000") ||
+      (type === "blob" && !["100644", "100755", "120000"].includes(mode)) ||
+      paths.has(path)
+    ) {
+      throw invalidResponse();
+    }
+    paths.add(path);
+    return {
+      mode: mode as GitTreeEntry["mode"],
+      path,
+      sha: gitSha(entry.sha),
+      type: type as GitTreeEntry["type"],
+    };
+  });
 }
 
 async function readBoundedText(
@@ -668,6 +737,8 @@ export function createGitHubOperationProvider(
       case "pull.comment":
       case "pull.review":
         return { metadata: "read", pull_requests: "write" };
+      case "repository.commit":
+        return { contents: "write", metadata: "read" };
       case "project.item.add":
       case "project.item.field.update":
         return {
@@ -1451,6 +1522,240 @@ export function createGitHubOperationProvider(
             );
           },
           recover
+        );
+      }
+      case "repository.commit": {
+        const operationMarker = marker(context);
+        const branchRef = `refs/heads/${operation.branch}`;
+        const branchPath = `${basePath}/git/ref/heads/${encodeURIComponent(operation.branch)}`;
+        const resultFromCommit = (
+          response: Readonly<{ body: unknown; requestId: string | null }>,
+          expectedSha?: string
+        ): GitHubProviderOperationResult => {
+          const body = object(response.body);
+          const sha = gitSha(body.sha);
+          const url = string(body.html_url, 2048);
+          if (
+            (expectedSha !== undefined && sha !== expectedSha) ||
+            body.message !== `${operation.message}\n\n${operationMarker}`
+          ) {
+            throw new GitHubToolProviderError("github_target_mismatch", {
+              retryable: false,
+              status: 409,
+            });
+          }
+          if (
+            !url.startsWith(
+              `https://github.com/${context.repositoryOwner}/${context.repositoryName}/commit/`
+            ) ||
+            !url.endsWith(`/${sha}`)
+          ) {
+            throw invalidResponse();
+          }
+          return {
+            providerRequestId: response.requestId,
+            result: githubToolResultSchema.parse({
+              branch: operation.branch,
+              commit: { sha, url },
+              kind: operation.kind,
+              repository: `${context.repositoryOwner}/${context.repositoryName}`,
+            }),
+            resultNodeId: sha,
+            resultUrl: url,
+          };
+        };
+        const inspect = async () => {
+          let branch: Awaited<ReturnType<typeof request>>;
+          try {
+            branch = await request(authorization, branchPath, {
+              method: "GET",
+            });
+          } catch (error) {
+            if (
+              error instanceof GitHubToolProviderError &&
+              error.code === "github_provider_not_found"
+            ) {
+              return null;
+            }
+            throw error;
+          }
+          const sha = gitRefSha(branch.body, branchRef);
+          const commit = await request(
+            authorization,
+            `${basePath}/git/commits/${sha}`,
+            { method: "GET" }
+          );
+          return resultFromCommit(commit, sha);
+        };
+        if (execution.mode === "recover") {
+          return executeWrite(
+            execution,
+            () => Promise.reject(uncertain()),
+            inspect
+          );
+        }
+        const existing = await inspect();
+        if (existing) {
+          return existing;
+        }
+        const baseRef = `refs/heads/${operation.base}`;
+        const base = await request(
+          authorization,
+          `${basePath}/git/ref/heads/${encodeURIComponent(operation.base)}`,
+          { method: "GET" }
+        );
+        const baseSha = gitRefSha(base.body, baseRef);
+        const baseCommit = await request(
+          authorization,
+          `${basePath}/git/commits/${baseSha}`,
+          { method: "GET" }
+        );
+        const baseTreeSha = gitCommitTreeSha(baseCommit.body, baseSha);
+        const treeCache = new Map<string, readonly GitTreeEntry[]>();
+        const loadTree = async (sha: string) => {
+          const cached = treeCache.get(sha);
+          if (cached) {
+            return cached;
+          }
+          const response = await request(
+            authorization,
+            `${basePath}/git/trees/${sha}`,
+            { method: "GET" }
+          );
+          const entries = gitTreeEntries(response.body, sha);
+          treeCache.set(sha, entries);
+          return entries;
+        };
+        const existingBlobMode = async (path: string): Promise<GitBlobMode> => {
+          const segments = path.split("/");
+          let treeSha = baseTreeSha;
+          for (const [index, segment] of segments.entries()) {
+            const entry = (await loadTree(treeSha)).find(
+              (candidate) => candidate.path === segment
+            );
+            if (!entry) {
+              return "100644";
+            }
+            if (index === segments.length - 1) {
+              if (
+                entry.type === "blob" &&
+                (entry.mode === "100644" || entry.mode === "100755")
+              ) {
+                return entry.mode;
+              }
+              throw new GitHubToolProviderError("github_target_mismatch", {
+                retryable: false,
+                status: 409,
+              });
+            }
+            if (entry.type !== "tree" || entry.mode !== "040000") {
+              throw new GitHubToolProviderError("github_target_mismatch", {
+                retryable: false,
+                status: 409,
+              });
+            }
+            treeSha = entry.sha;
+          }
+          return "100644";
+        };
+        const upsertModes = new Map<string, GitBlobMode>();
+        for (const file of operation.files) {
+          if (file.operation === "upsert") {
+            upsertModes.set(file.path, await existingBlobMode(file.path));
+          }
+        }
+        return executeWrite(
+          execution,
+          async () => {
+            await authorizeMutation(execution.authorizeMutation, deadlineAt);
+            const tree: Array<{
+              mode: GitBlobMode;
+              path: string;
+              sha: string | null;
+              type: "blob";
+            }> = [];
+            for (const file of operation.files) {
+              if (file.operation === "delete") {
+                tree.push({
+                  mode: "100644",
+                  path: file.path,
+                  sha: null,
+                  type: "blob",
+                });
+                continue;
+              }
+              const mode = upsertModes.get(file.path);
+              if (!mode) {
+                throw invalidResponse();
+              }
+              const blob = await request(
+                authorization,
+                `${basePath}/git/blobs`,
+                {
+                  body: JSON.stringify({
+                    content: file.content,
+                    encoding: "utf-8",
+                  }),
+                  method: "POST",
+                },
+                "mutation"
+              );
+              tree.push({
+                mode,
+                path: file.path,
+                sha: gitSha(object(blob.body).sha),
+                type: "blob",
+              });
+            }
+            const createdTree = await request(
+              authorization,
+              `${basePath}/git/trees`,
+              {
+                body: JSON.stringify({ base_tree: baseTreeSha, tree }),
+                method: "POST",
+              },
+              "mutation"
+            );
+            const treeSha = gitSha(object(createdTree.body).sha);
+            const createdCommit = await request(
+              authorization,
+              `${basePath}/git/commits`,
+              {
+                body: JSON.stringify({
+                  message: `${operation.message}\n\n${operationMarker}`,
+                  parents: [baseSha],
+                  tree: treeSha,
+                }),
+                method: "POST",
+              },
+              "mutation"
+            );
+            const result = parseMutationResult(createdCommit, () =>
+              resultFromCommit(createdCommit)
+            );
+            const commitSha = result.resultNodeId;
+            if (!commitSha) {
+              throw invalidResponse();
+            }
+            const createdRef = await request(
+              authorization,
+              `${basePath}/git/refs`,
+              {
+                body: JSON.stringify({ ref: branchRef, sha: commitSha }),
+                method: "POST",
+              },
+              "mutation"
+            );
+            if (gitRefSha(createdRef.body, branchRef) !== commitSha) {
+              throw invalidResponse();
+            }
+            return {
+              ...result,
+              providerRequestId:
+                createdRef.requestId ?? result.providerRequestId,
+            };
+          },
+          inspect
         );
       }
       case "project.item.add": {

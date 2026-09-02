@@ -1233,6 +1233,9 @@ async function verifiedInstallationAuthority(
       }>
 ): Promise<VerifiedInstallationAuthority> {
   const installation = await provider.getInstallation(installationId);
+  const appContentsPermission = normalizedAppPermission(
+    installation.permissions.contents
+  );
   const appIssuesPermission = normalizedAppPermission(
     installation.permissions.issues
   );
@@ -1249,7 +1252,9 @@ async function verifiedInstallationAuthority(
     installation.suspendedAt !== null ||
     installation.repositorySelection !== "selected" ||
     !permissionAtLeast(installation.permissions.metadata, "read") ||
-    (appIssuesPermission === "none" && appPullRequestsPermission === "none")
+    (appContentsPermission === "none" &&
+      appIssuesPermission === "none" &&
+      appPullRequestsPermission === "none")
   ) {
     throw new GitHubProviderError("github_installation_unusable", {
       retryable: false,
@@ -1291,6 +1296,7 @@ async function verifiedInstallationAuthority(
         });
       }
       repositories.push({
+        appContentsPermission,
         appIssuesPermission,
         appOrganizationProjectsPermission,
         appPullRequestsPermission,
@@ -1362,6 +1368,7 @@ async function verifiedInstallationAuthority(
         continue;
       }
       repositories.push({
+        appContentsPermission,
         appIssuesPermission,
         appOrganizationProjectsPermission,
         appPullRequestsPermission,

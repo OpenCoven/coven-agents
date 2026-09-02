@@ -33,7 +33,9 @@ function context(
     ? `github.issues.${write ? "write" : "read"}`
     : operation.kind.startsWith("pull.")
       ? `github.pull_requests.${write ? "write" : "read"}`
-      : "github.projects.write";
+      : operation.kind === "repository.commit"
+        ? "github.contents.write"
+        : "github.projects.write";
   return {
     accountId: "123",
     accountLogin: "OpenCoven",
@@ -433,6 +435,311 @@ test("issue and pull writes use exact REST endpoints, marker bodies, and mutatio
       },
     ]);
     assert.equal(authorizations, 1);
+  }
+});
+
+test("repository.commit publishes one bounded branch commit through Git data", async () => {
+  const marker =
+    "<!-- coven-github:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->";
+  const baseSha = "1".repeat(40);
+  const baseTreeSha = "2".repeat(40);
+  const sourceTreeSha = "6".repeat(40);
+  const blobSha = "3".repeat(40);
+  const treeSha = "4".repeat(40);
+  const commitSha = "5".repeat(40);
+  const operation = {
+    base: "main",
+    branch: "feat/familiar-delivery",
+    files: [
+      {
+        content: "export const delivered = true;\n",
+        operation: "upsert" as const,
+        path: "src/delivery.ts",
+      },
+      { operation: "delete" as const, path: "src/obsolete.ts" },
+    ],
+    kind: "repository.commit" as const,
+    message: "feat: deliver familiar changes",
+    owner: "OpenCoven",
+    repo: "coven-agents",
+  };
+  const sequence = sequenceProvider([
+    Response.json({ message: "Not Found" }, { status: 404 }),
+    Response.json({
+      object: { sha: baseSha, type: "commit" },
+      ref: "refs/heads/main",
+    }),
+    Response.json({ sha: baseSha, tree: { sha: baseTreeSha } }),
+    Response.json({
+      sha: baseTreeSha,
+      tree: [
+        {
+          mode: "040000",
+          path: "src",
+          sha: sourceTreeSha,
+          type: "tree",
+        },
+      ],
+      truncated: false,
+    }),
+    Response.json({
+      sha: sourceTreeSha,
+      tree: [
+        {
+          mode: "100755",
+          path: "delivery.ts",
+          sha: "7".repeat(40),
+          type: "blob",
+        },
+      ],
+      truncated: false,
+    }),
+    Response.json({ sha: blobSha }),
+    Response.json({ sha: treeSha }),
+    Response.json({
+      html_url: `https://github.com/OpenCoven/coven-agents/commit/${commitSha}`,
+      message: `${operation.message}\n\n${marker}`,
+      parents: [{ sha: baseSha }],
+      sha: commitSha,
+      tree: { sha: treeSha },
+    }),
+    Response.json(
+      {
+        object: { sha: commitSha, type: "commit" },
+        ref: `refs/heads/${operation.branch}`,
+      },
+      { status: 201 }
+    ),
+  ]);
+  let authorizations = 0;
+
+  const result = await sequence.provider.execute({
+    authorizeMutation: () => {
+      authorizations += 1;
+      return Promise.resolve(true);
+    },
+    context: context(operation, marker),
+    mode: "execute",
+    operation,
+  });
+
+  assert.deepEqual(sequence.scopes, [
+    {
+      installationId: "456",
+      permissions: { contents: "write", metadata: "read" },
+      repositoryIds: ["789"],
+    },
+  ]);
+  assert.equal(authorizations, 1);
+  assert.deepEqual(
+    sequence.requests.map(({ method, url }) => [method, new URL(url).pathname]),
+    [
+      [
+        "GET",
+        "/repos/OpenCoven/coven-agents/git/ref/heads/feat%2Ffamiliar-delivery",
+      ],
+      ["GET", "/repos/OpenCoven/coven-agents/git/ref/heads/main"],
+      ["GET", `/repos/OpenCoven/coven-agents/git/commits/${baseSha}`],
+      ["GET", `/repos/OpenCoven/coven-agents/git/trees/${baseTreeSha}`],
+      ["GET", `/repos/OpenCoven/coven-agents/git/trees/${sourceTreeSha}`],
+      ["POST", "/repos/OpenCoven/coven-agents/git/blobs"],
+      ["POST", "/repos/OpenCoven/coven-agents/git/trees"],
+      ["POST", "/repos/OpenCoven/coven-agents/git/commits"],
+      ["POST", "/repos/OpenCoven/coven-agents/git/refs"],
+    ]
+  );
+  assert.deepEqual(JSON.parse(sequence.requests[5]?.body ?? ""), {
+    content: operation.files[0].content,
+    encoding: "utf-8",
+  });
+  assert.deepEqual(JSON.parse(sequence.requests[6]?.body ?? ""), {
+    base_tree: baseTreeSha,
+    tree: [
+      {
+        mode: "100755",
+        path: "src/delivery.ts",
+        sha: blobSha,
+        type: "blob",
+      },
+      {
+        mode: "100644",
+        path: "src/obsolete.ts",
+        sha: null,
+        type: "blob",
+      },
+    ],
+  });
+  assert.deepEqual(JSON.parse(sequence.requests[7]?.body ?? ""), {
+    message: `${operation.message}\n\n${marker}`,
+    parents: [baseSha],
+    tree: treeSha,
+  });
+  assert.deepEqual(JSON.parse(sequence.requests[8]?.body ?? ""), {
+    ref: `refs/heads/${operation.branch}`,
+    sha: commitSha,
+  });
+  assert.deepEqual(result, {
+    providerRequestId: null,
+    result: {
+      branch: operation.branch,
+      commit: {
+        sha: commitSha,
+        url: `https://github.com/OpenCoven/coven-agents/commit/${commitSha}`,
+      },
+      kind: "repository.commit",
+      repository: "OpenCoven/coven-agents",
+    },
+    resultNodeId: commitSha,
+    resultUrl: `https://github.com/OpenCoven/coven-agents/commit/${commitSha}`,
+  });
+});
+
+test("repository.commit recovers only the exact marked branch tip", async () => {
+  const operation = {
+    base: "main",
+    branch: "feat/familiar-delivery",
+    files: [
+      {
+        content: "export const enabled = true;\n",
+        operation: "upsert" as const,
+        path: "src/feature.ts",
+      },
+    ],
+    kind: "repository.commit" as const,
+    message: "feat: add familiar delivery",
+    owner: "OpenCoven",
+    repo: "coven-agents",
+  };
+  const marker =
+    "<!-- coven-github:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->";
+  const commit = {
+    html_url:
+      "https://github.com/OpenCoven/coven-agents/commit/2222222222222222222222222222222222222222",
+    message: `${operation.message}\n\n${marker}`,
+    node_id: "C_kwDOExample",
+    sha: "2222222222222222222222222222222222222222",
+    tree: { sha: "3333333333333333333333333333333333333333" },
+  };
+  const recovered = sequenceProvider([
+    Response.json({
+      object: {
+        sha: commit.sha,
+        type: "commit",
+      },
+      ref: "refs/heads/feat/familiar-delivery",
+    }),
+    Response.json(commit),
+  ]);
+
+  const result = await recovered.provider.execute({
+    authorizeMutation: () => Promise.resolve(false),
+    context: context(operation, marker),
+    mode: "recover",
+    operation,
+  });
+  assert.deepEqual(result.result, {
+    branch: operation.branch,
+    commit: {
+      sha: commit.sha,
+      url: commit.html_url,
+    },
+    kind: "repository.commit",
+    repository: "OpenCoven/coven-agents",
+  });
+
+  const foreignSha = "4444444444444444444444444444444444444444";
+  const foreign = sequenceProvider([
+    Response.json({
+      object: {
+        sha: foreignSha,
+        type: "commit",
+      },
+      ref: "refs/heads/feat/familiar-delivery",
+    }),
+    Response.json({
+      ...commit,
+      message: "feat: unrelated branch",
+      sha: foreignSha,
+    }),
+  ]);
+  await assert.rejects(
+    foreign.provider.execute({
+      authorizeMutation: () => Promise.resolve(false),
+      context: context(operation, marker),
+      mode: "execute",
+      operation,
+    }),
+    (error: unknown) =>
+      error instanceof GitHubToolProviderError &&
+      error.code === "github_target_mismatch"
+  );
+});
+
+test("repository.commit rejects symlink and submodule upserts before mutation authority", async () => {
+  for (const entry of [
+    { mode: "120000", type: "blob" },
+    { mode: "160000", type: "commit" },
+  ] as const) {
+    const baseSha = "1".repeat(40);
+    const baseTreeSha = "2".repeat(40);
+    const operation = {
+      base: "main",
+      branch: "feat/familiar-delivery",
+      files: [
+        {
+          content: "replacement\n",
+          operation: "upsert" as const,
+          path: "target",
+        },
+      ],
+      kind: "repository.commit" as const,
+      message: "feat: replace target",
+      owner: "OpenCoven",
+      repo: "coven-agents",
+    };
+    const sequence = sequenceProvider([
+      Response.json({ message: "Not Found" }, { status: 404 }),
+      Response.json({
+        object: { sha: baseSha, type: "commit" },
+        ref: "refs/heads/main",
+      }),
+      Response.json({ sha: baseSha, tree: { sha: baseTreeSha } }),
+      Response.json({
+        sha: baseTreeSha,
+        tree: [
+          {
+            ...entry,
+            path: "target",
+            sha: "3".repeat(40),
+          },
+        ],
+        truncated: false,
+      }),
+    ]);
+    let authorizations = 0;
+
+    await assert.rejects(
+      sequence.provider.execute({
+        authorizeMutation: () => {
+          authorizations += 1;
+          return Promise.resolve(true);
+        },
+        context: context(
+          operation,
+          "<!-- coven-github:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->"
+        ),
+        mode: "execute",
+        operation,
+      }),
+      (error: unknown) =>
+        error instanceof GitHubToolProviderError &&
+        error.code === "github_target_mismatch"
+    );
+    assert.equal(authorizations, 0);
+    assert.equal(
+      sequence.requests.some(({ method }) => method === "POST"),
+      false
+    );
   }
 });
 

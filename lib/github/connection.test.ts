@@ -480,6 +480,7 @@ test("callback verifies provider authority, persists only provider metadata, and
     installationId: INSTALLATION_ID,
     repositories: [
       {
+        appContentsPermission: "write",
         appIssuesPermission: "write",
         appOrganizationProjectsPermission: "write",
         appPullRequestsPermission: "write",
@@ -496,6 +497,7 @@ test("callback verifies provider authority, persists only provider metadata, and
         userProjectManagementCurrent: false,
       },
       {
+        appContentsPermission: "write",
         appIssuesPermission: "write",
         appOrganizationProjectsPermission: "write",
         appPullRequestsPermission: "write",
@@ -534,6 +536,7 @@ test("personal installation connects without organization projects permission", 
               installation({
                 account: { id: "24682", login: "BunsDev", type: "User" },
                 permissions: {
+                  contents: "write",
                   issues: "write",
                   metadata: "read",
                   pull_requests: "write",
@@ -588,6 +591,7 @@ test("organization installation without organization projects permission keeps r
             Promise.resolve(
               installation({
                 permissions: {
+                  contents: "write",
                   issues: "write",
                   metadata: "read",
                   pull_requests: "write",
@@ -746,6 +750,7 @@ test("OAuth callback intersects app-selected repositories with exact user reposi
                 nodeId: "R_one",
                 owner: "OpenCoven",
                 permission: "triage",
+                projectIds: [],
               },
             ],
             user: { id: "112233", login: "BunsDev" },
@@ -762,6 +767,7 @@ test("OAuth callback intersects app-selected repositories with exact user reposi
   assert.equal(response.status, 303);
   assert.deepEqual(store.replacements[0]?.input.repositories, [
     {
+      appContentsPermission: "write",
       appIssuesPermission: "write",
       appOrganizationProjectsPermission: "write",
       appPullRequestsPermission: "write",
@@ -2108,6 +2114,7 @@ function installation(
     appSlug: CONFIG.appSlug,
     id: INSTALLATION_ID,
     permissions: {
+      contents: "write",
       issues: "write",
       metadata: "read",
       organization_projects: "write",
@@ -2144,6 +2151,7 @@ function userAuthority() {
     repositories: repositories().repositories.map((repository) => ({
       ...repository,
       permission: "write" as const,
+      projectIds: [],
     })),
     user: { id: "112233", login: "BunsDev" },
   };
@@ -2162,6 +2170,7 @@ function userAuthorityFor(
         nodeId: `R_${repositoryId}`,
         owner,
         permission: "write" as const,
+        projectIds: [],
       },
     ],
     user: { id: "112233", login: "BunsDev" },
@@ -2248,6 +2257,7 @@ function connection(
     accountId: "13579",
     accountLogin: "OpenCoven",
     accountType: "Organization",
+    appContentsPermission: "write",
     appIssuesPermission: "write",
     appOrganizationProjectsPermission: "write",
     appPullRequestsPermission: "write",

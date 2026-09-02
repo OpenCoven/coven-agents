@@ -32,6 +32,7 @@ const CONNECTIONS = [
     accountId: "123",
     accountLogin: "OpenCoven",
     accountType: "Organization" as const,
+    appContentsPermission: "write" as const,
     appIssuesPermission: "write" as const,
     appOrganizationProjectsPermission: "write" as const,
     appPullRequestsPermission: "write" as const,
@@ -89,6 +90,7 @@ test("broker policy derives only declared reads and actor-approved declared writ
         accountId: "123",
         accountLogin: "OpenCoven",
         accountType: "Organization",
+        appContentsPermission: "write",
         appIssuesPermission: "write",
         appOrganizationProjectsPermission: "write",
         appPullRequestsPermission: "write",
@@ -129,6 +131,7 @@ test("broker policy derives only declared reads and actor-approved declared writ
 
 test("broker policy intersects app permissions and per-repository user authority", () => {
   const declaredCapabilities = [
+    "github.contents.write",
     "github.issues.read",
     "github.issues.write",
     "github.pull_requests.read",
@@ -136,6 +139,7 @@ test("broker policy intersects app permissions and per-repository user authority
     "github.projects.write",
   ] as const;
   const approvedCapabilities = [
+    "github.contents.write",
     "github.issues.write",
     "github.pull_requests.write",
     "github.projects.write",
@@ -201,6 +205,7 @@ test("broker policy intersects app permissions and per-repository user authority
       teamStepId: TEAM_STEP_ID,
     });
     assert.deepEqual(built.allowedCapabilities, [
+      "github.contents.write",
       "github.issues.read",
       "github.issues.write",
       "github.pull_requests.read",
@@ -212,6 +217,30 @@ test("broker policy intersects app permissions and per-repository user authority
       "organization project writes must fail closed without exact user proof"
     );
   }
+});
+
+test("broker policy fails contents writes closed after an app permission downgrade", () => {
+  assert.throws(
+    () =>
+      buildGitHubBrokerPolicy({
+        actorUserId: USER_ID,
+        approvedCapabilities: ["github.contents.write"],
+        authVersion: 7,
+        connectionSnapshot: {
+          connections: [
+            {
+              ...CONNECTIONS[0],
+              appContentsPermission: "read",
+            },
+          ],
+          generation: 9,
+        },
+        declaredCapabilities: ["github.contents.write"],
+        teamRunId: TEAM_RUN_ID,
+        teamStepId: TEAM_STEP_ID,
+      }),
+    /no executable capability/u
+  );
 });
 
 test("custom approval text or undeclared approvals cannot broaden broker policy", () => {
@@ -640,6 +669,7 @@ function authorityRow(overrides: Record<string, unknown> = {}) {
     accountLogin: "OpenCoven",
     accountType: "Organization",
     actorUserId: USER_ID,
+    appContentsPermission: "write",
     appIssuesPermission: "write",
     appOrganizationProjectsPermission: "write",
     appPullRequestsPermission: "write",
@@ -1500,6 +1530,11 @@ test("provider mutation authorization rechecks every live fence immediately befo
   assert.match(query, /UPDATE "RunnerGitHubOperation"/u);
   assert.match(query, /"providerDispatchPhase" = 'sent'/u);
   assert.match(query, /"providerSentAt" = clock_timestamp\(\)/u);
+  assert.match(
+    query,
+    /'github\.contents\.write'\s+AND "connection"\."appContentsPermission" = 'write'/u
+  );
+  assert.match(query, /'appContentsPermission'/u);
   for (const fence of [
     '"operation"."status" = \'running\'',
     '"capability"."revokedAt" IS NULL',

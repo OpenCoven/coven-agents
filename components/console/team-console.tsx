@@ -35,6 +35,7 @@ import { pill, truncate } from "./styles";
 const ALL_CAPABILITIES: readonly TeamCapability[] = [
   "workspace.read",
   "workspace.write",
+  "github.contents.write",
   "github.issues.read",
   "github.issues.write",
   "github.pull_requests.read",

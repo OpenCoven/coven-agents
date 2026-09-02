@@ -33,6 +33,16 @@ test("every built-in team member references known templates and skills", () => {
 });
 
 test("GitHub write skills declare explicit write capabilities", () => {
+  const implementation = builtInSkill("repository-implementation");
+  assert.deepEqual(implementation.requiredCapabilities, [
+    "workspace.read",
+    "workspace.write",
+    "github.contents.write",
+    "github.pull_requests.read",
+    "github.pull_requests.write",
+  ]);
+  assert.match(implementation.instructions, /repository\.commit/u);
+  assert.match(implementation.instructions, /never request or expose.*token/iu);
   assert.deepEqual(builtInSkill("github-pr-delivery").requiredCapabilities, [
     "workspace.read",
     "github.pull_requests.read",
