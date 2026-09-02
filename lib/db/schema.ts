@@ -973,7 +973,7 @@ export const runnerSkill = pgTable(
     check("RSkill_version_valid", sql`${table.version} >= 0`),
     check(
       "RSkill_caps_valid",
-      sql`jsonb_typeof(${table.requiredCapabilities}) = 'array' and jsonb_array_length(${table.requiredCapabilities}) <= ${teamMaxSkillsPerMemberSql} and ${table.requiredCapabilities} <@ '["workspace.read","workspace.write","github.issues.read","github.issues.write","github.pull_requests.read","github.pull_requests.write","github.projects.read","github.projects.write"]'::jsonb`
+      sql`jsonb_typeof(${table.requiredCapabilities}) = 'array' and jsonb_array_length(${table.requiredCapabilities}) <= ${teamMaxSkillsPerMemberSql} and ${table.requiredCapabilities} <@ '["workspace.read","workspace.write","github.contents.write","github.issues.read","github.issues.write","github.pull_requests.read","github.pull_requests.write","github.projects.read","github.projects.write"]'::jsonb`
     ),
   ]
 );
@@ -1289,7 +1289,7 @@ export const runnerTeamStep = pgTable(
     ),
     check(
       "RTStep_approvedCapabilities_valid",
-      sql`jsonb_typeof(${table.approvedCapabilities}) = 'array' and jsonb_array_length(${table.approvedCapabilities}) <= ${teamMaxSkillsPerMemberSql} and ${table.approvedCapabilities} <@ '["github.issues.read","github.issues.write","github.pull_requests.read","github.pull_requests.write","github.projects.read","github.projects.write"]'::jsonb`
+      sql`jsonb_typeof(${table.approvedCapabilities}) = 'array' and jsonb_array_length(${table.approvedCapabilities}) <= ${teamMaxSkillsPerMemberSql} and ${table.approvedCapabilities} <@ '["github.contents.write","github.issues.read","github.issues.write","github.pull_requests.read","github.pull_requests.write","github.projects.read","github.projects.write"]'::jsonb`
     ),
     check(
       "RTStep_approval_audit_valid",
@@ -1362,6 +1362,12 @@ export const runnerGitHubConnection = pgTable(
       enum: ["Organization", "User"],
       length: 16,
     }).notNull(),
+    appContentsPermission: varchar("appContentsPermission", {
+      enum: ["none", "read", "write"],
+      length: 8,
+    })
+      .$type<GitHubAppRepositoryPermission>()
+      .notNull(),
     appIssuesPermission: varchar("appIssuesPermission", {
       enum: ["none", "read", "write"],
       length: 8,
@@ -1432,7 +1438,7 @@ export const runnerGitHubConnection = pgTable(
     ),
     check(
       "RGHConn_authority_valid",
-      sql`${table.appIssuesPermission} in ('none','read','write') and ${table.appPullRequestsPermission} in ('none','read','write') and ${table.appOrganizationProjectsPermission} in ('none','read','write') and ${table.userPermissionCeiling} in ('read','triage','write','maintain','admin') and ${table.userPermissionCurrent} in ('read','triage','write','maintain','admin') and CASE ${table.userPermissionCurrent} WHEN 'read' THEN 1 WHEN 'triage' THEN 2 WHEN 'write' THEN 3 WHEN 'maintain' THEN 4 WHEN 'admin' THEN 5 ELSE 0 END <= CASE ${table.userPermissionCeiling} WHEN 'read' THEN 1 WHEN 'triage' THEN 2 WHEN 'write' THEN 3 WHEN 'maintain' THEN 4 WHEN 'admin' THEN 5 ELSE 0 END and (not ${table.userProjectManagementCurrent} or ${table.userProjectManagementCeiling}) and char_length(${table.githubUserLogin}) between 1 and 100 and ${table.githubUserLogin} ~ '^[A-Za-z0-9_.-]+$'`
+      sql`${table.appContentsPermission} in ('none','read','write') and ${table.appIssuesPermission} in ('none','read','write') and ${table.appPullRequestsPermission} in ('none','read','write') and ${table.appOrganizationProjectsPermission} in ('none','read','write') and ${table.userPermissionCeiling} in ('read','triage','write','maintain','admin') and ${table.userPermissionCurrent} in ('read','triage','write','maintain','admin') and CASE ${table.userPermissionCurrent} WHEN 'read' THEN 1 WHEN 'triage' THEN 2 WHEN 'write' THEN 3 WHEN 'maintain' THEN 4 WHEN 'admin' THEN 5 ELSE 0 END <= CASE ${table.userPermissionCeiling} WHEN 'read' THEN 1 WHEN 'triage' THEN 2 WHEN 'write' THEN 3 WHEN 'maintain' THEN 4 WHEN 'admin' THEN 5 ELSE 0 END and (not ${table.userProjectManagementCurrent} or ${table.userProjectManagementCeiling}) and char_length(${table.githubUserLogin}) between 1 and 100 and ${table.githubUserLogin} ~ '^[A-Za-z0-9_.-]+$'`
     ),
     check("RGHConn_version_valid", sql`${table.version} >= 0`),
   ]
@@ -1503,7 +1509,7 @@ export const runnerGitHubCapability = pgTable(
     check("RGHCap_tokenHash_valid", sql`${table.tokenHash} ~ '^[a-f0-9]{64}$'`),
     check(
       "RGHCap_caps_valid",
-      sql`jsonb_typeof(${table.declaredCapabilities}) = 'array' and jsonb_array_length(${table.declaredCapabilities}) between 1 and ${teamMaxSkillsPerMemberSql} and ${table.declaredCapabilities} <@ '["github.issues.read","github.issues.write","github.pull_requests.read","github.pull_requests.write","github.projects.read","github.projects.write"]'::jsonb and jsonb_typeof(${table.approvedCapabilities}) = 'array' and jsonb_array_length(${table.approvedCapabilities}) <= ${teamMaxSkillsPerMemberSql} and ${table.approvedCapabilities} <@ ${table.declaredCapabilities} and jsonb_typeof(${table.allowedCapabilities}) = 'array' and jsonb_array_length(${table.allowedCapabilities}) between 1 and ${teamMaxSkillsPerMemberSql} and ${table.allowedCapabilities} <@ ${table.declaredCapabilities} and ${table.allowedCapabilities} <@ (jsonb_path_query_array(${table.declaredCapabilities}, '$[*] ? (@ like_regex "read$")') || ${table.approvedCapabilities})`
+      sql`jsonb_typeof(${table.declaredCapabilities}) = 'array' and jsonb_array_length(${table.declaredCapabilities}) between 1 and ${teamMaxSkillsPerMemberSql} and ${table.declaredCapabilities} <@ '["github.contents.write","github.issues.read","github.issues.write","github.pull_requests.read","github.pull_requests.write","github.projects.read","github.projects.write"]'::jsonb and jsonb_typeof(${table.approvedCapabilities}) = 'array' and jsonb_array_length(${table.approvedCapabilities}) <= ${teamMaxSkillsPerMemberSql} and ${table.approvedCapabilities} <@ ${table.declaredCapabilities} and jsonb_typeof(${table.allowedCapabilities}) = 'array' and jsonb_array_length(${table.allowedCapabilities}) between 1 and ${teamMaxSkillsPerMemberSql} and ${table.allowedCapabilities} <@ ${table.declaredCapabilities} and ${table.allowedCapabilities} <@ (jsonb_path_query_array(${table.declaredCapabilities}, '$[*] ? (@ like_regex "read$")') || ${table.approvedCapabilities})`
     ),
     check(
       "RGHCap_repos_valid",
@@ -1551,6 +1557,7 @@ export const runnerGitHubOperation = pgTable(
     installationId: varchar("installationId", { length: 20 }).notNull(),
     kind: varchar("kind", {
       enum: [
+        "repository.commit",
         "issue.get",
         "issue.search",
         "issue.create",
@@ -1586,6 +1593,7 @@ export const runnerGitHubOperation = pgTable(
     requestHash: varchar("requestHash", { length: 64 }).notNull(),
     requiredCapability: varchar("requiredCapability", {
       enum: [
+        "github.contents.write",
         "github.issues.read",
         "github.issues.write",
         "github.pull_requests.read",
@@ -1648,7 +1656,7 @@ export const runnerGitHubOperation = pgTable(
     check("RGHOp_tenant_valid", sql`${table.tenant} ~ '^[A-Za-z0-9_]{1,64}$'`),
     check(
       "RGHOp_kind_valid",
-      sql`${table.kind} in ('issue.get', 'issue.search', 'issue.create', 'issue.comment', 'pull.get', 'pull.create', 'pull.comment', 'pull.review', 'project.item.add', 'project.item.field.update')`
+      sql`${table.kind} in ('repository.commit', 'issue.get', 'issue.search', 'issue.create', 'issue.comment', 'pull.get', 'pull.create', 'pull.comment', 'pull.review', 'project.item.add', 'project.item.field.update')`
     ),
     check(
       "RGHOp_status_valid",
@@ -1660,7 +1668,7 @@ export const runnerGitHubOperation = pgTable(
     ),
     check(
       "RGHOp_binding_valid",
-      sql`${table.connectionGeneration} >= 0 and ${table.repository} ~ '^[a-z0-9_.-]{1,100}/[a-z0-9_.-]{1,100}$' and ${table.requiredCapability} in ('github.issues.read','github.issues.write','github.pull_requests.read','github.pull_requests.write','github.projects.read','github.projects.write')`
+      sql`${table.connectionGeneration} >= 0 and ${table.repository} ~ '^[a-z0-9_.-]{1,100}/[a-z0-9_.-]{1,100}$' and ${table.requiredCapability} in ('github.contents.write','github.issues.read','github.issues.write','github.pull_requests.read','github.pull_requests.write','github.projects.read','github.projects.write')`
     ),
     check(
       "RGHOp_connectionSnapshot_valid",
@@ -1668,7 +1676,7 @@ export const runnerGitHubOperation = pgTable(
     ),
     check(
       "RGHOp_capability_mapping_valid",
-      sql`${table.requiredCapability} = CASE WHEN ${table.kind} in ('issue.get','issue.search') THEN 'github.issues.read' WHEN ${table.kind} in ('issue.create','issue.comment') THEN 'github.issues.write' WHEN ${table.kind} = 'pull.get' THEN 'github.pull_requests.read' WHEN ${table.kind} in ('pull.create','pull.comment','pull.review') THEN 'github.pull_requests.write' WHEN ${table.kind} in ('project.item.add','project.item.field.update') THEN 'github.projects.write' ELSE '' END`
+      sql`${table.requiredCapability} = CASE WHEN ${table.kind} = 'repository.commit' THEN 'github.contents.write' WHEN ${table.kind} in ('issue.get','issue.search') THEN 'github.issues.read' WHEN ${table.kind} in ('issue.create','issue.comment') THEN 'github.issues.write' WHEN ${table.kind} = 'pull.get' THEN 'github.pull_requests.read' WHEN ${table.kind} in ('pull.create','pull.comment','pull.review') THEN 'github.pull_requests.write' WHEN ${table.kind} in ('project.item.add','project.item.field.update') THEN 'github.projects.write' ELSE '' END`
     ),
     check(
       "RGHOp_marker_valid",

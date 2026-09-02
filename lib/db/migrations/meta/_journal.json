@@ -239,6 +239,13 @@
       "when": 1788329833844,
       "tag": "0033_panoramic_agent_zero",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1788343321493,
+      "tag": "0034_certain_veda",
+      "breakpoints": true
     }
   ]
 }

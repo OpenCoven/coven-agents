@@ -62,6 +62,10 @@ const OPERATION_AUTHORITY = {
     capability: "github.pull_requests.write",
     classification: "write",
   },
+  "repository.commit": {
+    capability: "github.contents.write",
+    classification: "write",
+  },
 } as const satisfies Record<GitHubOperationKind, GitHubOperationAuthority>;
 
 export function githubOperationAuthority(
@@ -160,6 +164,9 @@ export function githubOperationTarget(operation: GitHubToolOperation): string {
       break;
     case "pull.review":
       resource = operation.pullNumber;
+      break;
+    case "repository.commit":
+      resource = digest(`${operation.base}\0${operation.branch}`);
       break;
     case "project.item.add":
       resource = digest(`${operation.projectId}\0${operation.contentId}`);
