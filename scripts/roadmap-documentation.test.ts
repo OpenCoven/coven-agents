@@ -89,16 +89,33 @@ test("the cutover attestation matches the exact preview receipt", () => {
     receipt.deployment.sourceCommit,
     receipt.deployment.sourceTree,
     ...receipt.deployment.requiredRoutes,
-    ...receipt.checks.flatMap(
-      (check: { outcome: string; requestId?: string }) => [
-        check.outcome,
-        check.requestId,
-      ]
-    ),
   ]) {
     if (value) {
       assert.match(attestation, new RegExp(value.replaceAll("/", "\\/"), "u"));
     }
+  }
+
+  assert.match(
+    attestation,
+    new RegExp(`route count: \`${receipt.deployment.routeCount}\``, "u")
+  );
+  assert.match(attestation, /Credential material retained: `no`/u);
+  assert.match(attestation, /Provider lifecycle certified: `no`/u);
+
+  for (const check of receipt.checks as {
+    outcome: string;
+    requestId?: string;
+    retryable?: boolean;
+    route: string;
+    status: number;
+  }[]) {
+    const requestId = check.requestId ? `\`${check.requestId}\`` : "n/a";
+    const retryable = check.retryable ? "yes" : "n/a";
+    assert.ok(
+      attestation.includes(
+        `| \`${check.route}\` | ${check.status} | \`${check.outcome}\` | ${requestId} | ${retryable} |`
+      )
+    );
   }
 });
 
