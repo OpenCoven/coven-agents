@@ -1158,3 +1158,35 @@ test("the start command uses the explicit release preflight", () => {
   );
   assert.match(manifest.scripts?.start ?? "", /^pnpm validate:release && /);
 });
+
+/**
+ * Validation exists to predict what `register()` enforces at boot, and boot
+ * reads NODE_ENV. These two pin both directions of that parity, because the
+ * obvious alternative — reusing the production-release notion — is wrong: a
+ * Vercel preview is not the approved production audience but still boots with
+ * NODE_ENV=production, so it must be validated as production.
+ */
+test("a Vercel preview validates reservation settings, matching what it boots with", () => {
+  const result = runValidator({
+    GLOBAL_DAILY_RUN_CAP: "not-a-number",
+    NODE_ENV: "production",
+    RELEASE_AUDIENCE: undefined,
+    VERCEL_ENV: "preview",
+  });
+
+  assertRejectedWithMessage(
+    result,
+    "GLOBAL_DAILY_RUN_CAP must be a positive integer."
+  );
+});
+
+test("development does not enforce reservation settings the server would skip", () => {
+  const result = runValidator({
+    GLOBAL_DAILY_RUN_CAP: "not-a-number",
+    NODE_ENV: "development",
+    RELEASE_AUDIENCE: undefined,
+    VERCEL_ENV: undefined,
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+});
