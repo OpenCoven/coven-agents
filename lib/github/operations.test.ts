@@ -124,6 +124,64 @@ const OPERATIONS = [
   },
 ] as const;
 
+const REPOSITORY_COMMIT = {
+  base: "main",
+  branch: "feat/familiar-github-delivery",
+  files: [
+    {
+      content: "export const enabled = true;\n",
+      operation: "upsert",
+      path: "src/capability.ts",
+    },
+    {
+      operation: "delete",
+      path: "src/obsolete.ts",
+    },
+  ],
+  kind: "repository.commit",
+  message: "feat: enable familiar delivery",
+  owner: "OpenCoven",
+  repo: "coven-agents",
+} as const;
+
+test("repository commits use one strict bounded high-level operation", () => {
+  assert.deepEqual(
+    githubToolOperationSchema.parse(REPOSITORY_COMMIT),
+    REPOSITORY_COMMIT
+  );
+  assert.deepEqual(githubOperationAuthority(REPOSITORY_COMMIT.kind), {
+    capability: "github.contents.write",
+    classification: "write",
+  });
+  for (const invalid of [
+    { ...REPOSITORY_COMMIT, base: REPOSITORY_COMMIT.branch },
+    {
+      ...REPOSITORY_COMMIT,
+      files: [
+        REPOSITORY_COMMIT.files[0],
+        { ...REPOSITORY_COMMIT.files[0], content: "duplicate" },
+      ],
+    },
+    {
+      ...REPOSITORY_COMMIT,
+      files: [{ ...REPOSITORY_COMMIT.files[0], path: "../escape.ts" }],
+    },
+    {
+      ...REPOSITORY_COMMIT,
+      files: [
+        {
+          content: "not allowed",
+          operation: "delete",
+          path: "src/obsolete.ts",
+        },
+      ],
+    },
+    { ...REPOSITORY_COMMIT, method: "POST" },
+  ]) {
+    assert.equal(githubToolOperationSchema.safeParse(invalid).success, false);
+  }
+});
+
 test("the operation union covers only the ten approved exact shapes", () => {
   for (const operation of OPERATIONS) {
     assert.deepEqual(githubToolOperationSchema.parse(operation), operation);
@@ -543,4 +601,14 @@ test("public operation results are discriminated, strict, and bounded", () => {
     }).success,
     false
   );
+  const commitResult = {
+    branch: REPOSITORY_COMMIT.branch,
+    commit: {
+      sha: "a".repeat(40),
+      url: `https://github.com/OpenCoven/coven-agents/commit/${"a".repeat(40)}`,
+    },
+    kind: "repository.commit",
+    repository: "OpenCoven/coven-agents",
+  } as const;
+  assert.deepEqual(githubToolResultSchema.parse(commitResult), commitResult);
 });

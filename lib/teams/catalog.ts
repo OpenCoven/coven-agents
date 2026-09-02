@@ -39,9 +39,15 @@ export const BUILT_IN_SKILLS: readonly BuiltInTeamSkill[] = [
       "Implement an approved issue scope and produce focused verification.",
     id: "repository-implementation",
     instructions:
-      "Implement only the approved scope in the workspace. Add focused regression coverage and report the changed files and verification evidence.",
+      "Implement only the approved scope in the workspace. Add focused regression coverage, publish the changed files to an approved branch with the server-authorized repository.commit operation, and create the pull request when requested. Never request or expose a GitHub token.",
     name: "Repository implementation",
-    requiredCapabilities: ["workspace.read", "workspace.write"],
+    requiredCapabilities: [
+      "workspace.read",
+      "workspace.write",
+      "github.contents.write",
+      "github.pull_requests.read",
+      "github.pull_requests.write",
+    ],
   },
   {
     description:

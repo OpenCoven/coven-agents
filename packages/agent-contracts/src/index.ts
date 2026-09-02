@@ -59,7 +59,11 @@ export const TEAM_LIMITS = Object.freeze({
 export const GITHUB_TOOL_LIMITS = Object.freeze({
   bodyBytes: 60_000,
   branchBytes: 200,
+  commitFileBytes: 60_000,
+  commitMessageBytes: 512,
+  commitPathBytes: 512,
   maxAssignees: 10,
+  maxCommitFiles: 32,
   maxLabels: 10,
   maxSearchResults: 30,
   queryBytes: 256,
@@ -176,6 +180,7 @@ export const ownerSchema = agentOwnerSchema;
 export const teamCapabilitySchema = z.enum([
   "workspace.read",
   "workspace.write",
+  "github.contents.write",
   "github.issues.read",
   "github.issues.write",
   "github.pull_requests.read",
@@ -546,6 +551,7 @@ export const githubOperationKindSchema = z.enum([
   "pull.create",
   "pull.comment",
   "pull.review",
+  "repository.commit",
   "project.item.add",
   "project.item.field.update",
 ]);
@@ -608,6 +614,57 @@ const githubRepositoryOperationShape = {
   owner: githubRepositoryPartSchema,
   repo: githubRepositoryPartSchema,
 };
+const githubCommitPathSchema = githubTextSchema(
+  GITHUB_TOOL_LIMITS.commitPathBytes
+).refine(
+  (value) =>
+    !value.startsWith("/") &&
+    !value.endsWith("/") &&
+    !value.includes("\\") &&
+    !value
+      .split("/")
+      .some((segment) => !segment || segment === "." || segment === ".."),
+  "Commit path must be a canonical repository-relative file path."
+);
+const githubCommitFileSchema = z.discriminatedUnion("operation", [
+  z
+    .object({
+      content: githubOptionalTextSchema(GITHUB_TOOL_LIMITS.commitFileBytes),
+      operation: z.literal("upsert"),
+      path: githubCommitPathSchema,
+    })
+    .strict(),
+  z
+    .object({
+      operation: z.literal("delete"),
+      path: githubCommitPathSchema,
+    })
+    .strict(),
+]);
+const repositoryCommitOperationSchema = z
+  .object({
+    base: githubBranchSchema,
+    branch: githubBranchSchema,
+    files: z
+      .array(githubCommitFileSchema)
+      .min(1)
+      .max(GITHUB_TOOL_LIMITS.maxCommitFiles)
+      .superRefine((files, context) =>
+        distinctValues(
+          files.map(({ path }) => path),
+          context,
+          "Commit file paths must be unique."
+        )
+      ),
+    kind: z.literal("repository.commit"),
+    message: githubTextSchema(GITHUB_TOOL_LIMITS.commitMessageBytes),
+    ...githubRepositoryOperationShape,
+  })
+  .strict()
+  .refine((value) => value.base !== value.branch, {
+    message: "Commit branch must differ from its base branch.",
+    path: ["branch"],
+  });
 const issueGetOperationSchema = z
   .object({
     issueNumber: githubDecimalSchema,
@@ -775,6 +832,7 @@ export const githubToolOperationSchema = z.discriminatedUnion("kind", [
   pullCreateOperationSchema,
   pullCommentOperationSchema,
   pullReviewOperationSchema,
+  repositoryCommitOperationSchema,
   projectItemAddOperationSchema,
   projectItemFieldUpdateOperationSchema,
 ]);
@@ -837,6 +895,13 @@ const githubCommentResultSchema = z
 const githubReviewResultSchema = githubCommentResultSchema.extend({
   state: z.enum(["approved", "commented", "changes_requested"]),
 });
+const githubCommitShaSchema = z.string().regex(/^[a-f0-9]{40}$/u);
+const githubCommitResultSchema = z
+  .object({
+    sha: githubCommitShaSchema,
+    url: githubResultUrlSchema,
+  })
+  .strict();
 
 export const githubToolResultSchema = z.discriminatedUnion("kind", [
   z
@@ -895,6 +960,14 @@ export const githubToolResultSchema = z.discriminatedUnion("kind", [
       kind: z.literal("pull.review"),
       repository: githubResultRepositorySchema,
       review: githubReviewResultSchema,
+    })
+    .strict(),
+  z
+    .object({
+      branch: githubBranchSchema,
+      commit: githubCommitResultSchema,
+      kind: z.literal("repository.commit"),
+      repository: githubResultRepositorySchema,
     })
     .strict(),
   z
