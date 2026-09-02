@@ -79,10 +79,50 @@ test("the cutover attestation matches the exact preview receipt", () => {
     read("docs/operations/p0-exact-preview-receipt-2026-09-01.json")
   );
 
-  assert.equal(receipt.schemaVersion, 1);
-  assert.equal(receipt.deployment.staticGenerationCount, 42);
-  assert.equal(receipt.containsCredentialMaterial, false);
-  assert.equal(receipt.providerLifecycleCertified, false);
+  assert.deepEqual(receipt, {
+    capturedAt: "2026-09-01",
+    checks: [
+      {
+        outcome: "cloud_health_v1",
+        route: "/api/health",
+        status: 200,
+      },
+      {
+        outcome: "unauthorized",
+        requestId: "e155ed8b-13eb-46b3-aa55-b9edb3044414",
+        retryable: false,
+        route: "/api/agents",
+        status: 401,
+      },
+      {
+        outcome: "diagnostic_unavailable",
+        requestId: "2be60f00-5882-4909-af1d-8f1de5c40695",
+        retryable: true,
+        route: "/api/diagnostics/sandbox",
+        status: 503,
+      },
+      {
+        outcome: "reconcile_unavailable",
+        requestId: "b091ba86-b3df-4cb0-be21-e13df7e0de45",
+        retryable: true,
+        route: "/api/internal/runner-resource-inventory",
+        status: 503,
+      },
+    ],
+    containsCredentialMaterial: false,
+    deployment: {
+      id: "dpl_83qug3pWqY3rHQRsJRcjYEABAaqo",
+      requiredRoutes: [
+        "/api/internal/runner-resource-inventory",
+        "/api/internal/stripe-reconcile",
+      ],
+      sourceCommit: "52fe9f8a28b5b06099ad70c25eb6504d70597ee4",
+      sourceTree: "28ec05d475ff8464a4fbe2f09e4416714fced78a",
+      staticGenerationCount: 42,
+    },
+    providerLifecycleCertified: false,
+    schemaVersion: 1,
+  });
 
   for (const value of [
     receipt.deployment.id,
@@ -112,16 +152,6 @@ test("the cutover attestation matches the exact preview receipt", () => {
     route: string;
     status: number;
   }[];
-  assert.deepEqual(
-    checks.map((check) => check.route),
-    [
-      "/api/health",
-      "/api/agents",
-      "/api/diagnostics/sandbox",
-      "/api/internal/runner-resource-inventory",
-    ]
-  );
-
   const expectedRows = checks.map((check) => {
     const requestId = check.requestId ? `\`${check.requestId}\`` : "n/a";
     const retryable =
