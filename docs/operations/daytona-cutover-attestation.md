@@ -9,7 +9,7 @@
 
 This record separates facts proved by tracked source and local commands from
 actions that require an authorized production operator. It contains no
-credentials, private planning content, or provider output.
+credentials, private planning content, or unsanitized provider payloads.
 
 ## Public delivery artifacts
 
@@ -99,9 +99,9 @@ and squash merge both resolve to tree
 guest replay timeline implementation and merged as application baseline
 `3ad1232f061b5eaf4440b6fd3c7c13967a6c423f`, tree
 `e5696dd81ca6a5d6a6e6c9f80cd4af06d20c98f0`. PR #185 records the separate
-credential-free public exact-build replay receipt. PR #186 then removed only
-unreachable UI and orphaned dependency residue and is the current repository
-baseline.
+credential-free public exact-build replay receipt. PR #186 then removed
+unreachable UI and orphaned dependency residue, updated license attribution,
+and became the current repository baseline.
 
 Deployment from a linked Git worktree was rejected as evidence after its route
 manifest showed that Vercel had uploaded the parent checkout. The retained
