@@ -57,6 +57,10 @@ test("the verification matrix records the newly verified repository boundaries",
     matrix,
     /application baseline `3ad1232f061b5eaf4440b6fd3c7c13967a6c423f`/u
   );
+  assert.match(
+    matrix,
+    /Hermetic PostgreSQL browser certification.*application baseline `3ad1232f061b5eaf4440b6fd3c7c13967a6c423f`/u
+  );
 
   for (const capability of [
     "Console profile execution",
