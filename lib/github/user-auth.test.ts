@@ -149,6 +149,47 @@ test("user authorization enumerates exact installation repositories and derives 
   }
 });
 
+test("user repository pages accept an omitted selection but reject explicit all access", async () => {
+  const { repository_selection: _repositorySelection, ...firstPage } =
+    userRepositoriesBody(
+      { admin: false, pull: true, push: true },
+      { repositoryId: "24680", totalCount: 2 }
+    );
+  const client = clientFor(
+    authorityFetch(
+      [],
+      firstPage,
+      userRepositoriesBody(
+        { admin: false, pull: true, push: false },
+        { repositoryId: "24681", totalCount: 2 }
+      )
+    )
+  );
+
+  const authority = await client.proveInstallationAccess(proofInput());
+
+  assert.deepEqual(
+    authority.repositories.map(({ id, permission }) => ({ id, permission })),
+    [
+      { id: "24680", permission: "write" },
+      { id: "24681", permission: "read" },
+    ]
+  );
+
+  const allRepositories = userRepositoriesBody({
+    admin: false,
+    pull: true,
+    push: true,
+  });
+  allRepositories.repository_selection = "all";
+  await assert.rejects(
+    clientFor(authorityFetch([], allRepositories)).proveInstallationAccess(
+      proofInput()
+    ),
+    providerError("github_provider_invalid_response", false)
+  );
+});
+
 test("user repository enumeration fails closed when bounded pagination is exhausted", async () => {
   const requests: CapturedRequest[] = [];
   const client = clientFor(

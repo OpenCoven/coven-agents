@@ -356,13 +356,17 @@ export function createGitHubUserAuthorizationClient(
       }
       const body = object(pageValue);
       const currentSelection = repositorySelection(body.repository_selection);
-      if (selection !== null && selection !== currentSelection) {
+      if (currentSelection === "all") {
         throw invalidResponse();
       }
-      selection = currentSelection;
-      if (selection !== "selected") {
+      if (
+        selection !== null &&
+        currentSelection !== null &&
+        selection !== currentSelection
+      ) {
         throw invalidResponse();
       }
+      selection ??= currentSelection;
       const currentTotal = nonNegativeInteger(body.total_count);
       if (currentTotal > maxRepositories) {
         throw responseTooLarge();
@@ -763,7 +767,10 @@ function namedString(value: unknown): string {
   return value;
 }
 
-function repositorySelection(value: unknown): "all" | "selected" {
+function repositorySelection(value: unknown): "all" | "selected" | null {
+  if (value === undefined) {
+    return null;
+  }
   if (value !== "all" && value !== "selected") {
     throw invalidResponse();
   }
