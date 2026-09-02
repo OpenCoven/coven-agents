@@ -3,19 +3,26 @@
 "use client";
 
 import type { FileEvidence } from "@opencoven/agent-contracts";
-import { useState } from "react";
+import {
+  Activity,
+  CheckCircle2,
+  CircleX,
+  FileCode2,
+  Terminal,
+} from "lucide-react";
+import { type CSSProperties, useState } from "react";
 import { BrandMark } from "@/components/brand/brand-mark";
 import { MarkdownPreview } from "@/components/console/markdown-preview";
 import { Btn, Caret, Eyebrow, Spinner } from "@/components/console/primitives";
 import {
   card,
-  dot,
   hairline,
   pill,
+  type Tone,
   tabular,
+  toneInk,
   truncate,
   type as type_,
-  well,
 } from "@/components/console/styles";
 import type { LiveActivity, ThreadBlock } from "@/lib/console/blocks";
 import { formatDuration, splitPath } from "@/lib/console/format";
@@ -30,6 +37,49 @@ import { formatDuration, splitPath } from "@/lib/console/format";
  */
 
 const MONO = "var(--font-mono)";
+const RUN_EVENT_CARD: CSSProperties = {
+  ...card,
+  background:
+    "color-mix(in oklch, var(--bg-raised) 96%, var(--accent-presence))",
+  boxShadow: "0 12px 30px color-mix(in oklch, var(--bg-desk) 68%, transparent)",
+};
+const RUN_EVENT_HEADER: CSSProperties = {
+  alignItems: "center",
+  borderBottom: hairline,
+  display: "flex",
+  flexWrap: "wrap",
+  gap: 9,
+  minHeight: 44,
+  padding: "9px 13px",
+};
+
+function EventGlyph({
+  children,
+  tone,
+}: {
+  children: React.ReactNode;
+  tone: Tone;
+}) {
+  const ink = toneInk(tone);
+  return (
+    <span
+      style={{
+        alignItems: "center",
+        background: `color-mix(in oklch, ${ink} 12%, transparent)`,
+        border: `1px solid color-mix(in oklch, ${ink} 24%, transparent)`,
+        borderRadius: 8,
+        color: ink,
+        display: "inline-flex",
+        flex: "none",
+        height: 26,
+        justifyContent: "center",
+        width: 26,
+      }}
+    >
+      {children}
+    </span>
+  );
+}
 
 function Duration({ ms }: { ms: number | null }) {
   return (
@@ -69,6 +119,7 @@ function DisclosureRow({
         border: 0,
         cursor: "pointer",
         display: "flex",
+        flexWrap: "wrap",
         gap: 9,
         padding: "9px 13px",
         textAlign: "left",
@@ -161,30 +212,32 @@ function LifecycleBlock({
 }) {
   return (
     <div
+      className="oc-run-event-card"
       style={{
-        alignItems: "center",
-        display: "flex",
-        gap: 10,
-        padding: "1px 0",
-        width: "fit-content",
+        ...RUN_EVENT_CARD,
+        ...RUN_EVENT_HEADER,
       }}
     >
-      <span
-        style={dot(
+      <EventGlyph
+        tone={
           block.status === "running"
             ? "warning"
             : block.status === "completed"
               ? "success"
               : block.status === "failed"
                 ? "danger"
-                : "muted",
-          6
-        )}
-      />
+                : "muted"
+        }
+      >
+        <Activity aria-hidden="true" size={14} />
+      </EventGlyph>
+      <h3 style={type_.label}>Status update</h3>
       <span
         style={{
           color: "var(--text-secondary)",
-          font: "400 12px/1 var(--font-ui)",
+          flex: 1,
+          font: "400 11px/1 var(--font-mono)",
+          ...truncate,
           whiteSpace: "nowrap",
         }}
       >
@@ -301,17 +354,23 @@ function CommandBlock({
 
   return (
     <div
+      className="oc-run-event-card"
       style={{
-        ...card,
+        ...RUN_EVENT_CARD,
         border: failed
           ? "1px solid var(--danger-border)"
           : "1px solid var(--border-hairline)",
       }}
     >
       <DisclosureRow onToggle={() => setOpen((value) => !value)} open={open}>
-        <span style={{ ...type_.label, whiteSpace: "nowrap" }}>
-          Ran command
-        </span>
+        <EventGlyph
+          tone={failed ? "danger" : block.live ? "warning" : "accent"}
+        >
+          <Terminal aria-hidden="true" size={14} />
+        </EventGlyph>
+        <h3 style={{ ...type_.label, whiteSpace: "nowrap" }}>
+          {block.live ? "Command running" : "Command finished"}
+        </h3>
         <span
           style={{
             color: "var(--text-secondary)",
@@ -407,10 +466,14 @@ function FilesBlock({
   block: Extract<ThreadBlock, { kind: "files" }>;
 }) {
   const [open, setOpen] = useState(false);
+  const heading = block.files.length === 1 ? "File changed" : "Files changed";
   return (
-    <div style={card}>
+    <div className="oc-run-event-card" style={RUN_EVENT_CARD}>
       <DisclosureRow onToggle={() => setOpen((value) => !value)} open={open}>
-        <span style={type_.label}>{block.label}</span>
+        <EventGlyph tone="accent">
+          <FileCode2 aria-hidden="true" size={14} />
+        </EventGlyph>
+        <h3 style={type_.label}>{heading}</h3>
         <span
           style={{
             color: "var(--text-muted)",
@@ -458,11 +521,19 @@ function TextBlock({
   block: Extract<ThreadBlock, { kind: "text" }>;
 }) {
   return (
-    <div style={{ display: "flex", gap: 11, padding: "2px 0" }}>
-      <span style={well(false, 24)}>
-        <BrandMark style={{ height: 11, width: 12 }} />
-      </span>
-      <MarkdownPreview live={block.live}>{block.text}</MarkdownPreview>
+    <div className="oc-run-event-card" style={RUN_EVENT_CARD}>
+      <div style={RUN_EVENT_HEADER}>
+        <EventGlyph tone="accent">
+          <BrandMark aria-hidden="true" style={{ height: 12, width: 13 }} />
+        </EventGlyph>
+        <h3 style={type_.label}>Agent output</h3>
+        <div style={{ flex: 1 }} />
+        {block.live ? <span style={pill("warning")}>streaming</span> : null}
+        <Duration ms={block.durationMs} />
+      </div>
+      <div style={{ padding: "12px 14px 14px" }}>
+        <MarkdownPreview live={block.live}>{block.text}</MarkdownPreview>
+      </div>
     </div>
   );
 }
@@ -480,6 +551,7 @@ function ErrorBlock({
 }) {
   return (
     <div
+      className="oc-run-event-card"
       role="alert"
       style={{
         background: "var(--danger-bg)",
@@ -493,26 +565,31 @@ function ErrorBlock({
           alignItems: "center",
           borderBottom: "1px solid var(--danger-border)",
           display: "flex",
+          flexWrap: "wrap",
           gap: 9,
           padding: "11px 14px",
         }}
       >
-        <span style={dot("danger")} />
-        <span
+        <EventGlyph tone="danger">
+          <CircleX aria-hidden="true" size={14} />
+        </EventGlyph>
+        <h3
           style={{
             color: "var(--danger-text)",
             font: "600 12px/1 var(--font-ui)",
           }}
         >
           {block.retryable ? "Run stopped — retryable" : "Run stopped"}
-        </span>
+        </h3>
         <div style={{ flex: 1 }} />
         <span
           style={{
             color: "var(--danger-text)",
             font: `500 10px/1 ${MONO}`,
             letterSpacing: "0.1em",
+            maxWidth: "100%",
             opacity: 0.75,
+            overflowWrap: "anywhere",
             textTransform: "uppercase",
           }}
         >
@@ -607,7 +684,7 @@ function EvidenceBlock({
 
   return (
     <div
-      className="oc-evidence-card oc-lift"
+      className="oc-evidence-card oc-lift oc-run-event-card"
       data-layout={compact ? "compact" : "report"}
       style={{
         background: "var(--bg-elevated)",
@@ -625,21 +702,31 @@ function EvidenceBlock({
             "color-mix(in oklch, var(--color-success) 7%, transparent)",
           borderBottom: hairline,
           display: "flex",
+          flexWrap: "wrap",
           gap: 9,
           padding: "11px 14px",
         }}
       >
-        <span style={dot("success")} />
-        <span
+        <EventGlyph tone="success">
+          <CheckCircle2 aria-hidden="true" size={14} />
+        </EventGlyph>
+        <h3
           style={{
             color: "var(--text-primary)",
             font: "600 12px/1 var(--font-ui)",
           }}
         >
-          {compact ? "Run complete" : "Evidence"}
+          Run completed
+        </h3>
+        <span
+          style={{
+            ...type_.meta,
+            flex: "1 1 120px",
+            ...truncate,
+          }}
+        >
+          {block.meta}
         </span>
-        <span style={type_.meta}>{block.meta}</span>
-        <div style={{ flex: 1 }} />
         {copied ? (
           <span
             role="status"

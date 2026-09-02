@@ -314,6 +314,32 @@ test("Stripe webhook admission precedes body and provider work", () => {
   assert.match(response, /status: 413/);
 });
 
+test("Stripe reconciliation admission precedes cron validation and provider work", () => {
+  const routeSource = read("app/api/internal/stripe-reconcile/route.ts");
+  const response = exportedFunctionBlock(
+    read("lib/billing/stripe-reconciliation-route.ts"),
+    "stripeReconciliationResponse"
+  );
+  const admissionIndex = response.indexOf("dependencies.enforceAbuse({");
+  const secretIndex = response.indexOf("dependencies.authorize(request)");
+  const bodyIndex = response.indexOf("readBoundedBytes(request, 0)");
+  const providerIndex = response.indexOf("dependencies.createProvider(");
+  const serviceIndex = response.indexOf("dependencies.reconcile(");
+
+  assert.match(routeSource, /from "@vercel\/functions"/);
+  assert.match(routeSource, /from "@\/lib\/abuse\/enforce"/);
+  assert.match(
+    exportedFunctionBlock(routeSource, "GET"),
+    /ipAddress\(request\)/
+  );
+  assert.ok(admissionIndex >= 0);
+  assert.match(response, /route: "stripe_reconcile"/);
+  assert.ok(secretIndex > admissionIndex);
+  assert.ok(bodyIndex > secretIndex);
+  assert.ok(providerIndex > bodyIndex);
+  assert.ok(serviceIndex > providerIndex);
+});
+
 test("Stripe webhook path never reads the Checkout launch flag", () => {
   for (const file of [
     "app/api/stripe/webhook/route.ts",

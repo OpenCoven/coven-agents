@@ -1,0 +1,1 @@
+ALTER TABLE "RunnerRun" ADD COLUMN "authorityRevalidation" boolean DEFAULT false NOT NULL;

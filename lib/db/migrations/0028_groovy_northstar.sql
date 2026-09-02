@@ -1,0 +1,3 @@
+ALTER TABLE "User" ADD COLUMN "subscriptionOverrideAction" varchar(6);--> statement-breakpoint
+ALTER TABLE "User" ADD COLUMN "subscriptionOverrideAt" timestamp;--> statement-breakpoint
+ALTER TABLE "User" ADD CONSTRAINT "User_subscriptionOverride_shape" CHECK (("User"."subscriptionOverrideAction" is null and "User"."subscriptionOverrideAt" is null) or ("User"."subscriptionOverrideAction" in ('grant', 'revoke') and "User"."subscriptionOverrideAt" is not null and isfinite("User"."subscriptionOverrideAt")));

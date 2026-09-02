@@ -5,7 +5,11 @@ import type {
   SessionCommandLogsResponse,
   SessionExecuteResponse,
 } from "@daytona/sdk";
-import { sanitizeEvidenceText } from "@opencoven/agent-contracts";
+import {
+  type EvidenceRedactionInput,
+  exactEvidenceRedactions,
+  sanitizeEvidenceText,
+} from "@opencoven/agent-contracts";
 import { harnessStatus } from "@opencoven/harness";
 import {
   buildHarnessCommand,
@@ -98,6 +102,8 @@ export type DaytonaProcessService = Readonly<{
 }>;
 
 export type DaytonaProcessSandbox = Readonly<{
+  id?: string;
+  name?: string;
   process: DaytonaProcessService;
 }>;
 
@@ -193,15 +199,35 @@ function asyncCommand(
   harnessCommand: string
 ): string {
   const providerCredentialVariables = [
+    "AI_GATEWAY_API_KEY",
     "ANTHROPIC_API_KEY",
     "AZURE_OPENAI_API_KEY",
     "GOOGLE_API_KEY",
     "OPENAI_API_KEY",
   ];
+  const controlPlaneCredentialVariables = [
+    "ABUSE_KEY_SECRET",
+    "AUTH_GITHUB_SECRET",
+    "AUTH_SECRET",
+    "BLOB_READ_WRITE_TOKEN",
+    "CREDENTIAL_KEK",
+    "CREDENTIAL_KEK_CURRENT_VERSION",
+    "CREDENTIAL_KEK_V1",
+    "CREDENTIAL_KEK_V2",
+    "CRON_SECRET",
+    "DAYTONA_API_KEY",
+    "OPERATOR_DIAGNOSTIC_TOKEN",
+    "POSTGRES_URL",
+    "REDIS_URL",
+    "RUNNER_MANUAL_RECONCILE_SECRET",
+    "STRIPE_SECRET_KEY",
+    "STRIPE_WEBHOOK_SECRET",
+  ];
   const credentialVariables = [
     ...new Set([
       ...HARNESS_SPECS.flatMap((spec) => spec.authEnvVars),
       ...providerCredentialVariables,
+      ...controlPlaneCredentialVariables,
     ]),
   ].filter((name) => name !== authName);
   const restricted = executionPermission !== "unrestricted";
@@ -954,7 +980,7 @@ function isTerminalDaytonaCommand(
 export async function snapshotDaytonaProcess(input: {
   attemptId: DaytonaAttemptId;
   commandId: string;
-  credential: string | null;
+  credential: EvidenceRedactionInput;
   cursor: number;
   harness: "copilot";
   now?: () => Date;
@@ -962,6 +988,14 @@ export async function snapshotDaytonaProcess(input: {
   runId: string;
 }): Promise<DaytonaLogSnapshot> {
   const sessionId = daytonaRunSessionName(input.runId, input.attemptId);
+  const redactions = exactEvidenceRedactions(
+    input.attemptId,
+    input.commandId,
+    sessionId,
+    input.sandbox.id,
+    input.sandbox.name,
+    input.credential
+  );
   const normalizedCommand = normalizeDaytonaCommand(
     await input.sandbox.process.getSessionCommand(sessionId, input.commandId)
   );
@@ -977,7 +1011,7 @@ export async function snapshotDaytonaProcess(input: {
     normalizedLogs.stdout,
     input.cursor,
     terminal,
-    input.credential,
+    redactions,
     (input.now?.() ?? new Date()).toISOString()
   );
   // Daytona returns cumulative logs. Parse the complete sanitized transcript
@@ -988,7 +1022,7 @@ export async function snapshotDaytonaProcess(input: {
     normalizedLogs.stdout,
     0,
     terminal,
-    input.credential,
+    redactions,
     (input.now?.() ?? new Date()).toISOString()
   );
   const { events } = parsed;
@@ -1448,7 +1482,7 @@ async function probeDaytonaHarnessesInSession(
 /** A final defensive check for error payloads that cross this module boundary. */
 export function sanitizeDaytonaProcessMessage(
   message: string,
-  credential: string | null
+  credential: EvidenceRedactionInput
 ): string {
-  return sanitizeEvidenceText(message, credential ? [credential] : []);
+  return sanitizeEvidenceText(message, credential);
 }

@@ -23,6 +23,7 @@ import type {
   AbuseEnforcementInput,
 } from "@/lib/abuse/enforce";
 import { admitAndScheduleRunnerRun } from "./admit-and-schedule";
+import type { RunnerReconciliationExecutionResult } from "./attempt-reconcile";
 import type {
   RunnerAuth,
   RunnerAuthenticatedSubscriber,
@@ -30,8 +31,11 @@ import type {
   RunnerSubscriberAuthorization,
 } from "./auth";
 import { RunnerServiceError } from "./errors";
-import type { RunnerReconciliationExecutionResult } from "./reconcile";
-import type { RunnerDiagnosticResult, RunnerService } from "./service";
+import type {
+  RunnerDiagnosticResult,
+  RunnerInventoryResourcesResult,
+  RunnerService,
+} from "./service";
 import { createRunEventStream } from "./sse";
 import {
   readRunnerJson as boundedJson,
@@ -51,12 +55,38 @@ const diagnosticResponseSchema = z
     output: z.string().max(1024),
   })
   .strict();
+const resourceInventoryResponseSchema = z
+  .object({
+    ambiguous: z.number().int().nonnegative(),
+    appOwnedMappings: z.number().int().nonnegative(),
+    databaseCapped: z.boolean(),
+    examined: z.number().int().nonnegative(),
+    matched: z.number().int().nonnegative(),
+    providerCapped: z.boolean(),
+    states: z
+      .object({
+        active: z.number().int().nonnegative(),
+        archived: z.number().int().nonnegative(),
+        other: z.number().int().nonnegative(),
+        stopped: z.number().int().nonnegative(),
+      })
+      .strict(),
+    status: z.enum(["bounded", "complete"]),
+    unowned: z.number().int().nonnegative(),
+    version: z.literal(1),
+  })
+  .strict();
 
 type RunnerHttpLogger = Readonly<{
-  error: (message: string, details: Readonly<{ name: string }>) => void;
+  error: (
+    message: string,
+    details: Readonly<{ name: "runner_service" | "unknown" }>
+  ) => void;
 }>;
 
-type After = (callback: () => void | Promise<void>) => void;
+type AfterTask = Promise<unknown> | (() => void | Promise<void>);
+
+type After = (task: AfterTask) => void;
 
 export type RunnerHttpDependencies = Readonly<{
   after?: After;
@@ -86,6 +116,7 @@ export type RunnerHttpHandlers = Readonly<{
   health: (request: Request) => Promise<Response>;
   listAgentRuns: (request: Request, agentId: string) => Promise<Response>;
   listAgents: (request: Request) => Promise<Response>;
+  inventoryResources: (request: Request) => Promise<Response>;
   prewarmTenant: (request: Request) => Promise<Response>;
   reconcile: (request: Request) => Promise<Response>;
   startAgentRun: (request: Request, agentId: string) => Promise<Response>;
@@ -264,6 +295,37 @@ function schedule(
   }
 }
 
+function scheduleLiveRunReconciliation(
+  dependencies: RunnerHttpDependencies,
+  service: RunnerService,
+  live: boolean
+): void {
+  if (!live) {
+    return;
+  }
+  schedule(dependencies, async () => {
+    await service.reconcileAndDispatch();
+  });
+}
+
+function startLiveRunReconciliation(
+  dependencies: RunnerHttpDependencies,
+  service: RunnerService,
+  live: boolean
+): void {
+  if (!dependencies.after || !live) {
+    return;
+  }
+  try {
+    const task = service.reconcileAndDispatch().catch(() => {
+      // The durable queue and authenticated cron are the correctness path.
+    });
+    dependencies.after(task);
+  } catch {
+    // `after` is a latency optimization and must never change a response.
+  }
+}
+
 async function warmAndReconcile(
   service: RunnerService,
   principal: RunnerAuthenticatedSubscriber["principal"],
@@ -341,6 +403,13 @@ function reconciliationCounts(
   return { ...counts, execution: "executed" };
 }
 
+function resourceInventoryCounts(
+  result: Exclude<RunnerInventoryResourcesResult, { kind: "unavailable" }>
+) {
+  const { kind: _kind, ...counts } = result;
+  return resourceInventoryResponseSchema.parse(counts);
+}
+
 function serviceFailure(
   dependencies: RunnerHttpDependencies,
   error: unknown
@@ -354,11 +423,10 @@ function serviceFailure(
       case "service_unavailable":
         return runnerUnavailable(dependencies);
       default: {
-        const unsupportedCode: never = error.code;
         dependencies.logger?.error(
           "Runner service error code is unsupported.",
           {
-            name: String(unsupportedCode),
+            name: "runner_service",
           }
         );
         return runnerErrorResponse(dependencies, "internal_error");
@@ -366,7 +434,7 @@ function serviceFailure(
     }
   }
   dependencies.logger?.error("Runner HTTP request failed.", {
-    name: error instanceof Error ? error.name : typeof error,
+    name: "unknown",
   });
   return runnerErrorResponse(dependencies, "internal_error");
 }
@@ -556,12 +624,18 @@ export function createRunnerHttpHandlers(
         }
         const service = await dependencies.createService(context);
         const result = await service.getRun(context.principal, runId);
-        return result.kind === "found"
-          ? runnerJsonResponse(runSnapshotEnvelopeSchema, {
-              apiVersion: AGENT_RUNNER_API_VERSION,
-              run: result.run,
-            })
-          : runNotFound(dependencies);
+        if (result.kind !== "found") {
+          return runNotFound(dependencies);
+        }
+        scheduleLiveRunReconciliation(
+          dependencies,
+          service,
+          result.run.status === "queued" || result.run.status === "running"
+        );
+        return runnerJsonResponse(runSnapshotEnvelopeSchema, {
+          apiVersion: AGENT_RUNNER_API_VERSION,
+          run: result.run,
+        });
       }),
 
     getRunEvents: (request, runId) =>
@@ -593,6 +667,7 @@ export function createRunnerHttpHandlers(
         if (initial.kind === "not_found") {
           return runNotFound(dependencies);
         }
+        startLiveRunReconciliation(dependencies, service, !initial.terminal);
         const stream = eventStream({
           lastEventId,
           read: async (cursor) => {
@@ -633,6 +708,32 @@ export function createRunnerHttpHandlers(
         });
       }),
 
+    inventoryResources: (request) =>
+      safely(dependencies, async () => {
+        const rejected = await authorizeSecret(
+          request,
+          "runner_reconcile",
+          dependencies
+        );
+        if (rejected) {
+          return rejected;
+        }
+        const body = await emptyBody(request, "runner_reconcile", dependencies);
+        if (body.kind !== "ok") {
+          return body.response;
+        }
+        const service = await dependencies.createOperatorService();
+        const result = await service.inventoryResources();
+        if (result.kind === "unavailable") {
+          return result.source === "provider"
+            ? providerUnavailable(dependencies)
+            : runnerUnavailable(dependencies);
+        }
+        return Response.json(resourceInventoryCounts(result), {
+          headers: { "cache-control": "no-store" },
+        });
+      }),
+
     listAgentRuns: (request, agentId) =>
       safely(dependencies, async () => {
         const context = await authorizeSubscriber(
@@ -649,12 +750,20 @@ export function createRunnerHttpHandlers(
         }
         const service = await dependencies.createService(context);
         const result = await service.listAgentRuns(context.principal, agentId);
-        return result.kind === "found"
-          ? runnerJsonResponse(runListEnvelopeSchema, {
-              apiVersion: AGENT_RUNNER_API_VERSION,
-              runs: result.runs,
-            })
-          : agentNotFound(dependencies);
+        if (result.kind !== "found") {
+          return agentNotFound(dependencies);
+        }
+        scheduleLiveRunReconciliation(
+          dependencies,
+          service,
+          result.runs.some(
+            (run) => run.status === "queued" || run.status === "running"
+          )
+        );
+        return runnerJsonResponse(runListEnvelopeSchema, {
+          apiVersion: AGENT_RUNNER_API_VERSION,
+          runs: result.runs,
+        });
       }),
 
     listAgents: (request) =>

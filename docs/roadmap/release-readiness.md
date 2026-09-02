@@ -24,6 +24,9 @@ Do not promote when:
 - subscriber or tenant authority can be supplied by request input;
 - checkout or credential controls remain enabled after current subscription
   authority is invalidated or expires;
+- a revoked or lapsed queued dispatch can reach capacity, credential, sandbox,
+  or provider work, or a running attempt lacks its bounded finish-current
+  recovery and explicit cancellation path;
 - a team child can exceed its immutable workspace/tool authority or a
   GitHub-capable step can run without the approved capability broker;
 - Daytona credentials, snapshot, target, or domain policy are missing;
@@ -95,6 +98,9 @@ Record the candidate SHA and exact exit status for every command.
 - SSE reconnect from `Last-Event-ID`;
 - stop and terminal convergence;
 - credential acquisition compensation on injected launch failure;
+- revocation before queued dispatch, plus revocation after durable launch:
+  verify the former has no credential/provider effect and the latter converges
+  only the exact running attempt within its time bound;
 - scheduled and manual reconciliation;
 - diagnostics with its distinct operator credential.
 
@@ -165,7 +171,8 @@ For ongoing webhook delivery:
 - verify signature validation;
 - prove event deduplication and ordering;
 - prove subscription activation and expiry update server-owned authority;
-- confirm retry behavior after a transient database failure;
+- confirm a failed owner mutation rolls back the atomic event claim, so the
+  same Stripe delivery remains retryable;
 - retain a sanitized event ID and status only.
 
 To stop new sales, return `SUBSCRIPTION_CHECKOUT_ENABLED` to `off` and verify
@@ -207,7 +214,9 @@ repository output.
 
 1. Pause new starts.
 2. Preserve PostgreSQL execution ownership.
-3. Reconcile in-flight attempts.
+3. Reconcile already-launched attempts without minting fresh authority; cancel
+   an exact attempt explicitly when a security or operational response
+   requires it.
 4. Redeploy the previously verified schema-compatible release.
 5. Verify same-origin authorization and Daytona ownership remain intact.
 6. Resume traffic only after lifecycle and security smoke paths pass.

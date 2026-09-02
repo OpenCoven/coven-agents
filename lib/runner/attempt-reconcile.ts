@@ -1,55 +1,39 @@
 import "server-only";
 
 import { randomBytes } from "node:crypto";
-import type { Sandbox } from "@daytona/sdk";
 import {
   AGENT_RUNNER_LIMITS,
   type CommandEvidence,
+  type EvidenceRedactionInput,
+  exactEvidenceRedactions,
   type FileEvidence,
   type RunError,
-  type RunEvent,
+  type RunEvent as RunnerPersistedEvent,
 } from "@opencoven/agent-contracts";
-import {
-  consumeRunnerCredentialReservation,
-  releaseRunnerCredentialResources,
-  rollbackRunnerCredentialResources,
-} from "@/lib/credentials/runner-credential";
-import {
-  type DaytonaRunnerDispatchDependencies,
-  daytonaRunnerDispatchDependencies,
-  dispatchNextRunnerRun,
-} from "./admission";
 import {
   openRunnerAttemptRedactionFromEnvironment,
   type RunnerAttemptRedactionEnvelope,
   type RunnerAttemptRedactionScope,
 } from "./attempt-redaction";
-import { daytonaProbeSessionName, daytonaSandboxName } from "./daytona/names";
 import {
-  cleanupDaytonaProbeSession,
-  type DaytonaLogSnapshot,
-  type DaytonaProcessSandbox,
-  snapshotDaytonaProcess,
-  stopDaytonaProcess,
-} from "./daytona/process";
-import {
-  classifyDaytonaProviderError,
-  type DaytonaSandboxLifecycleDependencies,
-  type DaytonaSandboxService,
-  resetDaytonaSandboxForCancellation,
-  SANDBOX_PROVISIONING_TIMEOUT_MS,
-  SANDBOX_WARM_TIMEOUT_MS,
-} from "./daytona/sandbox";
+  RUNNER_MID_RUN_ENTITLEMENT_POLICY,
+  runnerEntitlementContinuation,
+} from "./entitlement-policy";
 import {
   projectHarnessRunEvent,
   sanitizeRunText,
   truncateUtf8,
 } from "./evidence";
+import type { RunEvent, RunSummary } from "./harness";
+import type {
+  RunnerPersistentResourceLifecycle,
+  RunnerResourceResetResult,
+} from "./resource-lifecycle";
 import type { RunnerStore } from "./store";
 import type {
-  RunnerAgentRecord,
   RunnerClaimedDispatch,
   RunnerDispatchAuthority,
+  RunnerExecutionAttemptId,
   RunnerOperator,
   RunnerRunRecord,
 } from "./types";
@@ -58,7 +42,67 @@ const DEFAULT_BATCH_SIZE = 20;
 const DEFAULT_DISPATCH_LIMIT = 1;
 const DEFAULT_PROVIDER_CONCURRENCY = 4;
 const DISPATCH_LEASE_MS = 60_000;
-export const RUNNER_MAX_RUN_DURATION_MS = 15 * 60_000;
+
+declare const runnerReconciliationContextBrand: unique symbol;
+
+/** Opaque provider-owned context used only to reconcile one fenced attempt. */
+export type RunnerReconciliationContext = Readonly<{
+  readonly [runnerReconciliationContextBrand]: "RunnerReconciliationContext";
+}>;
+
+export type RunnerAttemptLogSnapshot = Readonly<{
+  cursor: number;
+  events: readonly RunEvent[];
+  exitCode: number | null;
+  logsSettled: boolean;
+  status: "running" | "completed" | "failed";
+  summary: RunSummary;
+}>;
+
+export type RunnerAttemptSnapshotInput = Readonly<{
+  attemptId: RunnerExecutionAttemptId;
+  commandId: string;
+  context: RunnerReconciliationContext;
+  credential: EvidenceRedactionInput;
+  cursor: number;
+  harness: "copilot";
+  runId: string;
+}>;
+
+export type RunnerStopAttemptResult = Readonly<{
+  kind:
+    | "provider_not_found"
+    | "provider_unavailable"
+    | "sandbox_reset_required"
+    | "stopped";
+}>;
+
+/**
+ * Provider-neutral attempt recovery boundary. Only confirmed absence is null;
+ * all provider failures throw so callers preserve the durable retry record.
+ */
+export type RunnerReconciliationProvider = Readonly<{
+  /**
+   * Production providers need the persisted credential only to redact opaque
+   * output. The hermetic adapter emits fixed, credential-free evidence and
+   * therefore must not retain credential material solely for recovery.
+   */
+  requiresAttemptRedaction?: boolean;
+  resolveExecutionContext: (
+    run: RunnerRunRecord,
+    authority: RunnerDispatchAuthority
+  ) => Promise<RunnerReconciliationContext | null>;
+  snapshot?: (
+    input: RunnerAttemptSnapshotInput
+  ) => Promise<RunnerAttemptLogSnapshot>;
+  stop: (
+    context: RunnerReconciliationContext,
+    input: Readonly<{
+      attemptId: RunnerExecutionAttemptId;
+      runId: string;
+    }>
+  ) => Promise<RunnerStopAttemptResult>;
+}>;
 
 type ReconciliationStore = Pick<
   RunnerStore,
@@ -86,130 +130,6 @@ type ReconciliationStore = Pick<
       | "scanTerminalLeaseCleanups"
     >
   >;
-
-export type RunnerReconciliationProvider = Readonly<{
-  /**
-   * `null` means Daytona confirmed that the persistent sandbox is absent.
-   * Throwing means its existence is ambiguous and must be retried.
-   */
-  resolveSandbox: (
-    run: RunnerRunRecord,
-    authority: RunnerDispatchAuthority
-  ) => Promise<DaytonaProcessSandbox | null>;
-  stop: (
-    sandbox: DaytonaProcessSandbox,
-    input: Readonly<{
-      attemptId: NonNullable<RunnerRunRecord["daytonaAttemptId"]>;
-      runId: string;
-    }>
-  ) => Promise<
-    Readonly<{
-      kind:
-        | "provider_not_found"
-        | "provider_unavailable"
-        | "sandbox_reset_required"
-        | "stopped";
-    }>
-  >;
-  snapshot?: (
-    input: Parameters<typeof snapshotDaytonaProcess>[0]
-  ) => Promise<DaytonaLogSnapshot>;
-  /** Fenced reset outcome after a stop cannot confirm exact cleanup. */
-  resetSandbox?: (
-    run: RunnerRunRecord,
-    authority: RunnerDispatchAuthority
-  ) => Promise<RunnerSandboxResetResult>;
-}>;
-
-export type RunnerSandboxResetResult =
-  | Readonly<{ kind: "provider_not_found" | "reset" }>
-  | Readonly<{
-      kind:
-        | "in_progress"
-        | "not_found"
-        | "sandbox_reset_required"
-        | "stale_version";
-    }>
-  | Readonly<{
-      kind: "unavailable";
-      source: "database" | "provider";
-    }>;
-
-export type DaytonaReconciliationProviderDependencies = Readonly<{
-  daytona: DaytonaSandboxService;
-  resetSandbox?: NonNullable<RunnerReconciliationProvider["resetSandbox"]>;
-}>;
-
-export function daytonaCancellationResetter(input: {
-  daytona: DaytonaSandboxService;
-  lifecycle?: DaytonaSandboxLifecycleDependencies;
-  operator: RunnerOperator;
-  store: RunnerStore;
-}): NonNullable<RunnerReconciliationProvider["resetSandbox"]> {
-  return async (_run, authority) =>
-    await resetDaytonaSandboxForCancellation(input.operator, authority, {
-      daytona: input.daytona,
-      lifecycle: input.lifecycle,
-      store: input.store,
-    });
-}
-
-/**
- * Concrete Daytona adapter. Not-found is the only confirmed-absence result;
- * every transport or unknown provider failure remains an ambiguous retry.
- */
-export function daytonaReconciliationProvider(
-  dependencies: DaytonaReconciliationProviderDependencies
-): RunnerReconciliationProvider {
-  return {
-    resetSandbox: dependencies.resetSandbox,
-    resolveSandbox: async (run) => {
-      try {
-        return (await dependencies.daytona.get(
-          daytonaSandboxName(run.tenant, run.agentId)
-        )) as unknown as DaytonaProcessSandbox;
-      } catch (error) {
-        if (classifyDaytonaProviderError(error) === "not_found") {
-          return null;
-        }
-        throw error;
-      }
-    },
-    snapshot: snapshotDaytonaProcess,
-    stop: async (sandbox, input) => {
-      const stopped = await stopDaytonaProcess(sandbox, input);
-      return { kind: stopped.kind };
-    },
-  };
-}
-
-type SandboxRecoveryStore = Pick<
-  RunnerStore,
-  | "attachDaytonaSandboxForRecovery"
-  | "deleteDecommissionedAgentForRecovery"
-  | "finishDaytonaSandboxWarmForRecovery"
-  | "finishDaytonaSandboxResetForRecovery"
-  | "resetDaytonaSandboxRecovery"
-  | "scanDaytonaSandboxRecoveries"
-  | "scanDaytonaWarmRecoveries"
->;
-
-export type ReconcileDaytonaSandboxesDependencies = Readonly<{
-  batchSize?: number;
-  clock?: () => Date;
-  daytona: DaytonaSandboxService;
-  operator: RunnerOperator;
-  providerConcurrency?: number;
-  provisioningStaleBefore?: Date;
-  store: SandboxRecoveryStore;
-  warmStaleBefore?: Date;
-}>;
-
-export type DaytonaSandboxReconciliationResult = Readonly<{
-  deferred: number;
-  failures: number;
-  recovered: number;
-}>;
 
 export type RunnerReconciliationResult = Readonly<{
   adopted: number;
@@ -249,6 +169,7 @@ export type ReconcileAndDispatchDependencies = Readonly<{
   provider: RunnerReconciliationProvider;
   providerConcurrency?: number;
   maxRunDurationMs?: number;
+  preflightQueuedDispatch?: () => Promise<void>;
   randomToken?: () => string;
   consumeCredentialReservation?: (run: RunnerRunRecord) => Promise<void>;
   openAttemptRedaction?: (
@@ -259,83 +180,12 @@ export type ReconcileAndDispatchDependencies = Readonly<{
     Readonly<{ cancellationDeferred: number; failures: number }>
   >;
   releaseCredentialResources?: (run: RunnerRunRecord) => Promise<void>;
-  rollbackCredentialResources?: (run: RunnerRunRecord) => Promise<void>;
-  sandboxRecovery?: Omit<
-    ReconcileDaytonaSandboxesDependencies,
-    "clock" | "operator"
+  resourceLifecycle?: Partial<
+    Pick<RunnerPersistentResourceLifecycle, "recover" | "reset">
   >;
+  rollbackCredentialResources?: (run: RunnerRunRecord) => Promise<void>;
   store: ReconciliationStore;
 }>;
-
-export type DaytonaRunnerReconciliationDependencies = Omit<
-  DaytonaRunnerDispatchDependencies,
-  "acquireCredential" | "ensureSandbox" | "sandboxDependencies"
-> &
-  Readonly<{
-    batchSize?: number;
-    daytona: DaytonaSandboxService;
-    lifecycle?: DaytonaSandboxLifecycleDependencies;
-    providerConcurrency?: number;
-  }>;
-
-/**
- * Composes the concrete Daytona, credential, sandbox, and runner-store
- * boundaries without introducing an HTTP dependency. Routes and cron can pass
- * the resulting object directly to `reconcileAndDispatch`.
- */
-export function daytonaRunnerReconciliationDependencies(
-  dependencies: DaytonaRunnerReconciliationDependencies
-): ReconcileAndDispatchDependencies {
-  const dispatch = daytonaRunnerDispatchDependencies({
-    ...dependencies,
-    credentialDependencies: dependencies.credentialDependencies,
-    sandboxDependencies: {
-      daytona: dependencies.daytona,
-      lifecycle: dependencies.lifecycle,
-    },
-  });
-  return {
-    batchSize: dependencies.batchSize,
-    clock: dependencies.clock,
-    consumeCredentialReservation: (run) =>
-      consumeRunnerCredentialReservation(
-        { runId: run.id, tenant: run.tenant },
-        dependencies.credentialDependencies
-      ),
-    dispatch: () => dispatchNextRunnerRun(dispatch),
-    openAttemptRedaction: (scope, envelope) =>
-      openRunnerAttemptRedactionFromEnvironment(scope, envelope),
-    operator: dependencies.operator,
-    provider: daytonaReconciliationProvider({
-      daytona: dependencies.daytona,
-      resetSandbox: daytonaCancellationResetter({
-        daytona: dependencies.daytona,
-        lifecycle: dependencies.lifecycle,
-        operator: dependencies.operator,
-        store: dependencies.store,
-      }),
-    }),
-    providerConcurrency: dependencies.providerConcurrency,
-    randomToken: dependencies.randomToken,
-    releaseCredentialResources: (run) =>
-      releaseRunnerCredentialResources(
-        run.id,
-        dependencies.credentialDependencies
-      ),
-    rollbackCredentialResources: (run) =>
-      rollbackRunnerCredentialResources(
-        { runId: run.id, tenant: run.tenant },
-        dependencies.credentialDependencies
-      ),
-    sandboxRecovery: {
-      batchSize: dependencies.batchSize,
-      daytona: dependencies.daytona,
-      providerConcurrency: dependencies.providerConcurrency,
-      store: dependencies.store,
-    },
-    store: dependencies.store,
-  };
-}
 
 type CancellationFinalizationStore = Pick<
   RunnerStore,
@@ -357,6 +207,7 @@ export type CancelRunnerRunDependencies = Readonly<{
   randomToken?: () => string;
   rollbackCredentialResources?: (run: RunnerRunRecord) => Promise<void>;
   releaseCredentialResources?: (run: RunnerRunRecord) => Promise<void>;
+  resourceLifecycle?: Partial<Pick<RunnerPersistentResourceLifecycle, "reset">>;
   store: CancellationStore;
 }>;
 
@@ -372,47 +223,6 @@ export type CancelRunnerRunResult =
       runId: string;
       source: "database" | "provider";
     };
-
-export type DaytonaRunnerCancellationDependencies = Readonly<{
-  clock?: () => Date;
-  credentialDependencies: DaytonaRunnerDispatchDependencies["credentialDependencies"];
-  daytona: DaytonaSandboxService;
-  lifecycle?: DaytonaSandboxLifecycleDependencies;
-  operator: RunnerOperator;
-  randomToken?: () => string;
-  store: RunnerStore;
-}>;
-
-/** Concrete cancellation composition with credential cleanup and reset fencing. */
-export function daytonaRunnerCancellationDependencies(
-  dependencies: DaytonaRunnerCancellationDependencies
-): CancelRunnerRunDependencies {
-  return {
-    clock: dependencies.clock,
-    operator: dependencies.operator,
-    provider: daytonaReconciliationProvider({
-      daytona: dependencies.daytona,
-      resetSandbox: daytonaCancellationResetter({
-        daytona: dependencies.daytona,
-        lifecycle: dependencies.lifecycle,
-        operator: dependencies.operator,
-        store: dependencies.store,
-      }),
-    }),
-    randomToken: dependencies.randomToken,
-    releaseCredentialResources: (run) =>
-      releaseRunnerCredentialResources(
-        run.id,
-        dependencies.credentialDependencies
-      ),
-    rollbackCredentialResources: (run) =>
-      rollbackRunnerCredentialResources(
-        { runId: run.id, tenant: run.tenant },
-        dependencies.credentialDependencies
-      ),
-    store: dependencies.store,
-  };
-}
 
 type RecoveryResult = Readonly<{
   adopted?: boolean;
@@ -566,16 +376,16 @@ async function retireAttemptRedaction(
   }
 }
 
-async function resetSandboxAfterStopFailure(
+async function resetResourceAfterStopFailure(
   run: RunnerRunRecord,
   authority: RunnerDispatchAuthority,
   dependencies: Pick<
     ReconcileAndDispatchDependencies | CancelRunnerRunDependencies,
-    "provider"
+    "resourceLifecycle"
   >
 ): Promise<boolean> {
   try {
-    const reset = await dependencies.provider.resetSandbox?.(run, authority);
+    const reset = await dependencies.resourceLifecycle?.reset?.(run, authority);
     return reset?.kind === "reset" || reset?.kind === "provider_not_found";
   } catch {
     return false;
@@ -591,13 +401,13 @@ function providerStopConfirmed(
 async function stopTerminalAttempt(
   run: RunnerRunRecord,
   authority: RunnerDispatchAuthority,
-  sandbox: DaytonaProcessSandbox,
+  context: RunnerReconciliationContext,
   dependencies: ReconcileAndDispatchDependencies
 ): Promise<boolean> {
   if (!authority.attemptId) {
     return false;
   }
-  const stopped = await dependencies.provider.stop(sandbox, {
+  const stopped = await dependencies.provider.stop(context, {
     attemptId: authority.attemptId,
     runId: run.id,
   });
@@ -606,7 +416,7 @@ async function stopTerminalAttempt(
   }
   if (
     stopped.kind === "sandbox_reset_required" &&
-    (await resetSandboxAfterStopFailure(run, authority, dependencies))
+    (await resetResourceAfterStopFailure(run, authority, dependencies))
   ) {
     return true;
   }
@@ -624,233 +434,9 @@ async function stopTerminalAttempt(
   return false;
 }
 
-type SandboxRecoveryOutcome = "deferred" | "failed" | "recovered";
-
-function classifySandboxRecoveryFailure(
-  error: unknown
-): SandboxRecoveryOutcome {
-  return classifyDaytonaProviderError(error) === "non_retryable"
-    ? "failed"
-    : "deferred";
-}
-
-async function findSandboxForRecovery(
-  agent: RunnerAgentRecord,
-  daytona: DaytonaSandboxService
-): Promise<Sandbox | null> {
-  const identifiers = [
-    ...(agent.daytonaSandboxId ? [agent.daytonaSandboxId] : []),
-    daytonaSandboxName(agent.tenant, agent.id),
-  ];
-  for (const identifier of new Set(identifiers)) {
-    try {
-      // biome-ignore lint/performance/noAwaitInLoops: Deterministic IDs are checked in priority order.
-      return await daytona.get(identifier);
-    } catch (error) {
-      if (classifyDaytonaProviderError(error) !== "not_found") {
-        throw error;
-      }
-    }
-  }
-  return null;
-}
-
-async function recoverSandbox(
-  agent: RunnerAgentRecord,
-  dependencies: ReconcileDaytonaSandboxesDependencies,
-  provisioningStaleBefore: Date,
-  warmStaleBefore: Date
-): Promise<SandboxRecoveryOutcome> {
-  const fence = {
-    agentId: agent.id,
-    expectedGeneration: agent.sandboxGeneration,
-    expectedVersion: agent.version,
-  };
-  if (
-    agent.sandboxLifecycle === "ready" &&
-    agent.warmStatus === "provisioning"
-  ) {
-    if (agent.warmUpdatedAt > warmStaleBefore) {
-      return "deferred";
-    }
-    let sandbox: Sandbox | null;
-    try {
-      sandbox = await findSandboxForRecovery(agent, dependencies.daytona);
-      if (sandbox) {
-        await cleanupDaytonaProbeSession(
-          sandbox as unknown as DaytonaProcessSandbox,
-          daytonaProbeSessionName(
-            agent.id,
-            agent.sandboxGeneration,
-            agent.warmAttemptVersion,
-            agent.warmUpdatedAt
-          )
-        );
-      }
-    } catch {
-      return "deferred";
-    }
-    try {
-      const finished =
-        await dependencies.store.finishDaytonaSandboxWarmForRecovery(
-          dependencies.operator,
-          fence
-        );
-      return finished.kind === "updated" ? "recovered" : "deferred";
-    } catch {
-      return "deferred";
-    }
-  }
-  if (
-    agent.sandboxLifecycle === "provisioning" &&
-    agent.sandboxUpdatedAt > provisioningStaleBefore
-  ) {
-    return "deferred";
-  }
-  if (
-    agent.sandboxLifecycle === "provisioning" ||
-    agent.sandboxLifecycle === "provisioning_ambiguous"
-  ) {
-    let sandbox: Sandbox | null;
-    try {
-      sandbox = await findSandboxForRecovery(agent, dependencies.daytona);
-    } catch (error) {
-      return classifySandboxRecoveryFailure(error);
-    }
-    const persisted = sandbox
-      ? await dependencies.store.attachDaytonaSandboxForRecovery(
-          dependencies.operator,
-          { ...fence, sandboxId: sandbox.id }
-        )
-      : await dependencies.store.resetDaytonaSandboxRecovery(
-          dependencies.operator,
-          fence
-        );
-    return persisted.kind === "updated" ? "recovered" : "deferred";
-  }
-  if (agent.sandboxLifecycle === "resetting") {
-    let sandbox: Sandbox | null;
-    try {
-      sandbox = await findSandboxForRecovery(agent, dependencies.daytona);
-    } catch (error) {
-      return classifySandboxRecoveryFailure(error);
-    }
-    if (sandbox) {
-      try {
-        await sandbox.delete(60, true);
-      } catch (error) {
-        if (classifyDaytonaProviderError(error) !== "not_found") {
-          return classifySandboxRecoveryFailure(error);
-        }
-      }
-    }
-    const reset = await dependencies.store.finishDaytonaSandboxResetForRecovery(
-      dependencies.operator,
-      fence
-    );
-    return reset.kind === "updated" ? "recovered" : "deferred";
-  }
-  if (agent.sandboxLifecycle !== "decommissioning") {
-    return "deferred";
-  }
-  let sandbox: Sandbox | null;
-  try {
-    sandbox = await findSandboxForRecovery(agent, dependencies.daytona);
-  } catch (error) {
-    return classifySandboxRecoveryFailure(error);
-  }
-  if (sandbox) {
-    try {
-      await sandbox.delete(60, true);
-    } catch (error) {
-      if (classifyDaytonaProviderError(error) !== "not_found") {
-        return classifySandboxRecoveryFailure(error);
-      }
-    }
-  }
-  const deleted = await dependencies.store.deleteDecommissionedAgentForRecovery(
-    dependencies.operator,
-    fence
-  );
-  return deleted.kind === "deleted" ? "recovered" : "deferred";
-}
-
-/**
- * Reconciles stale/ambiguous persistent sandbox lifecycle rows without
- * creating resources speculatively. All persistence is version/generation
- * fenced, so another lifecycle actor can safely win a race.
- */
-export async function reconcileDaytonaSandboxes(
-  dependencies: ReconcileDaytonaSandboxesDependencies
-): Promise<DaytonaSandboxReconciliationResult> {
-  const batchSize = boundedInteger(
-    dependencies.batchSize,
-    DEFAULT_BATCH_SIZE,
-    "Sandbox reconciliation batch size"
-  );
-  const providerConcurrency = boundedInteger(
-    dependencies.providerConcurrency,
-    DEFAULT_PROVIDER_CONCURRENCY,
-    "Sandbox provider concurrency",
-    16
-  );
-  const clock = dependencies.clock ?? (() => new Date());
-  const provisioningStaleBefore =
-    dependencies.provisioningStaleBefore ??
-    new Date(clock().getTime() - SANDBOX_PROVISIONING_TIMEOUT_MS);
-  const warmStaleBefore =
-    dependencies.warmStaleBefore ??
-    new Date(clock().getTime() - SANDBOX_WARM_TIMEOUT_MS);
-  let failures = 0;
-  let agents: RunnerAgentRecord[] = [];
-  try {
-    agents = await dependencies.store.scanDaytonaSandboxRecoveries(
-      dependencies.operator,
-      batchSize
-    );
-  } catch {
-    failures += 1;
-  }
-  let warmAgents: RunnerAgentRecord[] = [];
-  try {
-    warmAgents = await dependencies.store.scanDaytonaWarmRecoveries(
-      dependencies.operator,
-      warmStaleBefore,
-      batchSize
-    );
-  } catch {
-    failures += 1;
-  }
-  const recover = async (agent: RunnerAgentRecord) => {
-    try {
-      return await recoverSandbox(
-        agent,
-        dependencies,
-        provisioningStaleBefore,
-        warmStaleBefore
-      );
-    } catch {
-      return "failed" as const;
-    }
-  };
-  const [lifecycleOutcomes, warmOutcomes] = await Promise.all([
-    mapBounded(agents, providerConcurrency, recover),
-    mapBounded(warmAgents, providerConcurrency, recover),
-  ]);
-  const outcomes = [...lifecycleOutcomes, ...warmOutcomes];
-  return outcomes.reduce<DaytonaSandboxReconciliationResult>(
-    (result, outcome) => ({
-      deferred: result.deferred + (outcome === "deferred" ? 1 : 0),
-      failures: result.failures + (outcome === "failed" ? 1 : 0),
-      recovered: result.recovered + (outcome === "recovered" ? 1 : 0),
-    }),
-    { deferred: 0, failures, recovered: 0 }
-  );
-}
-
 function terminalEvidence(
-  snapshot: DaytonaLogSnapshot,
-  credential: string
+  snapshot: RunnerAttemptLogSnapshot,
+  credential: EvidenceRedactionInput
 ): Readonly<{
   commandEvidence: CommandEvidence[];
   error: RunError | null;
@@ -894,7 +480,26 @@ function terminalEvidence(
   };
 }
 
-function withoutEventId(event: RunEvent): Omit<RunEvent, "id"> {
+/**
+ * Provider identifiers stay internal for fenced provider calls, but are exact
+ * redactions at the neutral evidence boundary in case an adapter regresses.
+ * Product run IDs are intentionally not included in public evidence redaction.
+ */
+function attemptEvidenceRedactions(
+  run: RunnerRunRecord,
+  credential: string | null
+): EvidenceRedactionInput {
+  return exactEvidenceRedactions(
+    credential,
+    run.daytonaAttemptId,
+    run.daytonaSessionId,
+    run.daytonaCommandId
+  );
+}
+
+function withoutEventId(
+  event: RunnerPersistedEvent
+): Omit<RunnerPersistedEvent, "id"> {
   const { id: _id, ...withoutId } = event;
   return withoutId;
 }
@@ -947,20 +552,20 @@ async function reconcileAttachedProcess(
     return { kind: "deferred" };
   }
 
-  const sandbox = await dependencies.provider.resolveSandbox(
+  const context = await dependencies.provider.resolveExecutionContext(
     adopted.run,
     adopted.authority
   );
   if (adopted.run.cancellationRequestedAt) {
-    if (sandbox) {
-      const stopped = await dependencies.provider.stop(sandbox, {
+    if (context) {
+      const stopped = await dependencies.provider.stop(context, {
         attemptId: run.daytonaAttemptId,
         runId: run.id,
       });
       if (
         !providerStopConfirmed(stopped) &&
         (stopped.kind !== "sandbox_reset_required" ||
-          !(await resetSandboxAfterStopFailure(
+          !(await resetResourceAfterStopFailure(
             adopted.run,
             adopted.authority,
             dependencies
@@ -993,7 +598,7 @@ async function reconcileAttachedProcess(
       clock
     );
   }
-  if (!sandbox) {
+  if (!context) {
     if (!(await retireAttemptRedaction(adopted.authority, dependencies))) {
       return { adopted: true, kind: "deferred" };
     }
@@ -1025,10 +630,13 @@ async function reconcileAttachedProcess(
       adopted.authority,
       dependencies
     );
-    if (!redactionCredential) {
+    if (
+      !redactionCredential &&
+      (dependencies.provider.requiresAttemptRedaction ?? true)
+    ) {
       return { adopted: true, kind: "deferred" };
     }
-    const credentialForRedaction = redactionCredential;
+    const credentialForRedaction = redactionCredential ?? null;
     const { authority: adoptedAuthority, run: adoptedRun } = adopted;
     let authority = adoptedAuthority;
     let liveRun = adoptedRun;
@@ -1045,24 +653,29 @@ async function reconcileAttachedProcess(
       liveRun = markedRun;
     }
 
-    const snapshot = await (
-      dependencies.provider.snapshot ?? snapshotDaytonaProcess
-    )({
+    if (!dependencies.provider.snapshot) {
+      return { adopted: true, kind: "deferred" };
+    }
+    const evidenceRedactions = attemptEvidenceRedactions(
+      liveRun,
+      credentialForRedaction
+    );
+    const snapshot = await dependencies.provider.snapshot({
       attemptId: run.daytonaAttemptId,
       commandId: run.daytonaCommandId,
-      credential: credentialForRedaction,
+      context,
+      credential: evidenceRedactions,
       cursor: liveRun.daytonaLogCursor,
       harness: "copilot",
       runId: run.id,
-      sandbox,
     });
     const toolNames = new Map<string, string>();
     const projected = snapshot.events
       .map((event) =>
-        projectHarnessRunEvent(event, 0, credentialForRedaction, toolNames)
+        projectHarnessRunEvent(event, 0, evidenceRedactions, toolNames)
       )
-      .filter((event): event is RunEvent => event !== null);
-    const evidence = terminalEvidence(snapshot, credentialForRedaction);
+      .filter((event): event is RunnerPersistedEvent => event !== null);
+    const evidence = terminalEvidence(snapshot, evidenceRedactions);
     const appended = await dependencies.store.appendDispatchEventBatch(
       dependencies.operator,
       authority,
@@ -1083,8 +696,18 @@ async function reconcileAttachedProcess(
 
     const completedAt = clock();
     const runWindowExpired =
-      liveRun.startedAt !== null &&
-      completedAt.getTime() - liveRun.startedAt.getTime() >= maxRunDurationMs;
+      runnerEntitlementContinuation({
+        dispatchState: liveRun.dispatchState,
+        hasDurablyAuthorizedLaunch: Boolean(
+          liveRun.daytonaAttemptId && liveRun.daytonaCommandId
+        ),
+        now: completedAt,
+        policy: {
+          ...RUNNER_MID_RUN_ENTITLEMENT_POLICY,
+          maxDurationMs: maxRunDurationMs,
+        },
+        startedAt: liveRun.startedAt,
+      }) === "max_duration_elapsed";
     const timedOut = snapshot.status === "running" && runWindowExpired;
     const terminalOutputIncomplete =
       snapshot.status !== "running" &&
@@ -1147,7 +770,7 @@ async function reconcileAttachedProcess(
       !(await stopTerminalAttempt(
         finalized.run,
         terminalAuthority,
-        sandbox,
+        context,
         dependencies
       ))
     ) {
@@ -1264,12 +887,12 @@ async function recoverExpiredDispatch(
   if (claimed.kind !== "claimed") {
     return { kind: "deferred" };
   }
-  const sandbox = await dependencies.provider.resolveSandbox(
+  const context = await dependencies.provider.resolveExecutionContext(
     claimed.run,
     claimed.authority
   );
-  if (sandbox) {
-    const stopped = await dependencies.provider.stop(sandbox, {
+  if (context) {
+    const stopped = await dependencies.provider.stop(context, {
       attemptId: run.daytonaAttemptId,
       runId: run.id,
     });
@@ -1278,7 +901,7 @@ async function recoverExpiredDispatch(
     }
     if (
       !providerStopConfirmed(stopped) &&
-      !(await resetSandboxAfterStopFailure(
+      !(await resetResourceAfterStopFailure(
         claimed.run,
         claimed.authority,
         dependencies
@@ -1334,16 +957,16 @@ async function recoverTerminalAttempt(
   if (claimed.kind !== "claimed") {
     return "deferred";
   }
-  const sandbox = await dependencies.provider.resolveSandbox(
+  const context = await dependencies.provider.resolveExecutionContext(
     claimed.run,
     claimed.authority
   );
   if (
-    sandbox &&
+    context &&
     !(await stopTerminalAttempt(
       claimed.run,
       claimed.authority,
-      sandbox,
+      context,
       dependencies
     ))
   ) {
@@ -1551,14 +1174,14 @@ async function retireCancellationAttemptRedaction(
   }
 }
 
-async function resetSandboxForCancellation(
+async function resetResourceForCancellation(
   run: RunnerRunRecord,
   authority: RunnerDispatchAuthority,
   dependencies: CancelRunnerRunDependencies
 ): Promise<CancelRunnerRunResult | null> {
-  let reset: RunnerSandboxResetResult;
+  let reset: RunnerResourceResetResult;
   try {
-    reset = (await dependencies.provider.resetSandbox?.(run, authority)) ?? {
+    reset = (await dependencies.resourceLifecycle?.reset?.(run, authority)) ?? {
       kind: "sandbox_reset_required",
     };
   } catch {
@@ -1634,16 +1257,19 @@ export async function cancelRunnerRun(
     }
   }
 
-  let sandbox: DaytonaProcessSandbox | null;
+  let context: RunnerReconciliationContext | null;
   try {
-    sandbox = await dependencies.provider.resolveSandbox(run, authority);
+    context = await dependencies.provider.resolveExecutionContext(
+      run,
+      authority
+    );
   } catch {
     return { kind: "unavailable", runId, source: "provider" };
   }
-  if (sandbox) {
+  if (context) {
     let stopped: Awaited<ReturnType<RunnerReconciliationProvider["stop"]>>;
     try {
-      stopped = await dependencies.provider.stop(sandbox, {
+      stopped = await dependencies.provider.stop(context, {
         attemptId: run.daytonaAttemptId,
         runId,
       });
@@ -1654,7 +1280,7 @@ export async function cancelRunnerRun(
       return { kind: "unavailable", runId, source: "provider" };
     }
     if (stopped.kind === "sandbox_reset_required") {
-      const reset = await resetSandboxForCancellation(
+      const reset = await resetResourceForCancellation(
         run,
         authority,
         dependencies
@@ -1716,7 +1342,7 @@ export async function reconcileAndDispatch(
   const randomToken = dependencies.randomToken ?? secureToken;
   const maxRunDurationMs = boundedInteger(
     dependencies.maxRunDurationMs,
-    RUNNER_MAX_RUN_DURATION_MS,
+    RUNNER_MID_RUN_ENTITLEMENT_POLICY.maxDurationMs,
     "Maximum run duration",
     24 * 60 * 60 * 1000
   );
@@ -1777,12 +1403,8 @@ export async function reconcileAndDispatch(
     }
   }
 
-  if (dependencies.sandboxRecovery) {
-    const sandbox = await reconcileDaytonaSandboxes({
-      ...dependencies.sandboxRecovery,
-      clock,
-      operator: dependencies.operator,
-    });
+  if (dependencies.resourceLifecycle?.recover) {
+    const sandbox = await dependencies.resourceLifecycle.recover(clock);
     result.deferred += sandbox.deferred;
     result.failures += sandbox.failures;
     result.sandboxRecovered += sandbox.recovered;
@@ -1793,6 +1415,14 @@ export async function reconcileAndDispatch(
       const projected = await dependencies.projectTeamRuns();
       result.deferred += projected.cancellationDeferred;
       result.failures += projected.failures;
+    } catch {
+      result.failures += 1;
+    }
+  }
+
+  if (dependencies.preflightQueuedDispatch) {
+    try {
+      await dependencies.preflightQueuedDispatch();
     } catch {
       result.failures += 1;
     }

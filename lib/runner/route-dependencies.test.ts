@@ -82,6 +82,10 @@ test("the reconciliation route supports GET invocation", () => {
     source("../../app/api/internal/runner-reconcile/route.ts"),
     /export function GET/
   );
+  assert.match(
+    source("../../app/api/internal/runner-resource-inventory/route.ts"),
+    /export function GET/
+  );
 });
 
 test("Vercel does not schedule the reconciliation route", () => {

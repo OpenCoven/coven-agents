@@ -2,12 +2,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { DaytonaNotFoundError } from "@daytona/sdk";
-import { daytonaProbeSessionName } from "./daytona/names";
+import { sanitizeEvidenceText } from "@opencoven/agent-contracts";
 import {
   cancelRunnerRun,
+  type ReconcileAndDispatchDependencies,
   reconcileAndDispatch,
-  reconcileDaytonaSandboxes,
-} from "./reconcile";
+} from "./attempt-reconcile";
+import { daytonaProbeSessionName } from "./daytona/names";
+import { reconcileDaytonaSandboxes } from "./daytona/resource-recovery";
+import { RUNNER_MID_RUN_ENTITLEMENT_POLICY } from "./entitlement-policy";
 import type {
   RunnerAgentRecord,
   RunnerDaytonaAttemptId,
@@ -41,6 +44,7 @@ function run(overrides: Partial<RunnerRunRecord> = {}): RunnerRunRecord {
     dispatchState: "dispatching",
     error: null,
     executionPermission: "unrestricted",
+    executionProvenance: null,
     fileEvidence: [],
     id: "00000000-0000-4000-8000-000000000002",
     logCursor: 1,
@@ -90,7 +94,7 @@ test("reconciliation projects and claims teams before dispatch and retries termi
       return { cancellationDeferred: 0, failures: 0 };
     },
     provider: {
-      resolveSandbox: async () => null,
+      resolveExecutionContext: async () => null,
       stop: async () => ({ kind: "stopped" as const }),
     },
     store: {
@@ -140,7 +144,7 @@ test("one team projection failure does not abort claims or unrelated runner disp
       throw new Error("one team failed");
     },
     provider: {
-      resolveSandbox: async () => null,
+      resolveExecutionContext: async () => null,
       stop: async () => ({ kind: "stopped" as const }),
     },
     store: {
@@ -166,7 +170,7 @@ test("team claim and cancellation deferrals accumulate without becoming failures
       failures: 7,
     }),
     provider: {
-      resolveSandbox: async () => null,
+      resolveExecutionContext: async () => null,
       stop: async () => ({ kind: "stopped" as const }),
     },
     store: {
@@ -222,7 +226,7 @@ test("reconciliation claims exact expired preparation cleanup before requeue", a
     },
     operator,
     provider: {
-      resolveSandbox: async () => {
+      resolveExecutionContext: async () => {
         calls.push("resolve");
         return null;
       },
@@ -303,12 +307,7 @@ test("command-free recovery resets a fenced sandbox before requeueing", async ()
   const result = await reconcileAndDispatch({
     operator,
     provider: {
-      resetSandbox: async (_run, resetAuthority) => {
-        calls.push("reset");
-        assert.equal(resetAuthority, authority);
-        return { kind: "reset" as const };
-      },
-      resolveSandbox: async () => {
+      resolveExecutionContext: async () => {
         calls.push("resolve");
         return {} as never;
       },
@@ -318,6 +317,13 @@ test("command-free recovery resets a fenced sandbox before requeueing", async ()
       },
     },
     randomToken: () => "cleanup-lease",
+    resourceLifecycle: {
+      reset: async (_run, resetAuthority) => {
+        calls.push("reset");
+        assert.equal(resetAuthority, authority);
+        return { kind: "reset" as const };
+      },
+    },
     rollbackCredentialResources: async () => {
       calls.push("rollback-credential");
     },
@@ -376,11 +382,7 @@ test("retryable provider stop failure defers without resetting the sandbox", asy
   const result = await reconcileAndDispatch({
     operator,
     provider: {
-      resetSandbox: async () => {
-        calls.push("reset");
-        return { kind: "reset" as const };
-      },
-      resolveSandbox: async () => {
+      resolveExecutionContext: async () => {
         calls.push("resolve");
         return {} as never;
       },
@@ -390,6 +392,12 @@ test("retryable provider stop failure defers without resetting the sandbox", asy
       },
     },
     randomToken: () => "cleanup-lease",
+    resourceLifecycle: {
+      reset: async () => {
+        calls.push("reset");
+        return { kind: "reset" as const };
+      },
+    },
     store: {
       claimExpiredDaytonaAttemptCleanup: async () => {
         calls.push("claim-cleanup");
@@ -443,7 +451,7 @@ test("an absent attached sandbox resets accounting before fresh redispatch", asy
     },
     operator,
     provider: {
-      resolveSandbox: async () => {
+      resolveExecutionContext: async () => {
         calls.push("resolve");
         return null;
       },
@@ -950,11 +958,7 @@ test("terminal cleanup retries only after claiming the exact expired attempt", a
     dispatchLimit: 1,
     operator,
     provider: {
-      resetSandbox: async () => {
-        calls.push("reset");
-        return { kind: "reset" as const };
-      },
-      resolveSandbox: async () => {
+      resolveExecutionContext: async () => {
         calls.push("resolve");
         return null;
       },
@@ -966,6 +970,12 @@ test("terminal cleanup retries only after claiming the exact expired attempt", a
     randomToken: () => "terminal-cleanup",
     releaseCredentialResources: async () => {
       calls.push("release-credential");
+    },
+    resourceLifecycle: {
+      reset: async () => {
+        calls.push("reset");
+        return { kind: "reset" as const };
+      },
     },
     store: {
       claimTerminalDaytonaAttemptCleanup: async () => {
@@ -1039,11 +1049,7 @@ test("terminal cleanup resets a fenced sandbox before releasing its exact attemp
   const result = await reconcileAndDispatch({
     operator,
     provider: {
-      resetSandbox: async () => {
-        calls.push("reset");
-        return { kind: "reset" as const };
-      },
-      resolveSandbox: async () => {
+      resolveExecutionContext: async () => {
         calls.push("resolve");
         return {} as never;
       },
@@ -1055,6 +1061,12 @@ test("terminal cleanup resets a fenced sandbox before releasing its exact attemp
     randomToken: () => "terminal-cleanup",
     releaseCredentialResources: async () => {
       calls.push("release-credential");
+    },
+    resourceLifecycle: {
+      reset: async () => {
+        calls.push("reset");
+        return { kind: "reset" as const };
+      },
     },
     store: {
       claimTerminalDaytonaAttemptCleanup: async () => {
@@ -1125,11 +1137,7 @@ test("terminal reset failure records one safe diagnostic and defers later recove
   const result = await reconcileAndDispatch({
     operator,
     provider: {
-      resetSandbox: async () => {
-        calls.push("reset");
-        return { kind: "sandbox_reset_required" as const };
-      },
-      resolveSandbox: async () => {
+      resolveExecutionContext: async () => {
         calls.push("resolve");
         return {} as never;
       },
@@ -1139,6 +1147,12 @@ test("terminal reset failure records one safe diagnostic and defers later recove
       },
     },
     randomToken: () => "terminal-cleanup",
+    resourceLifecycle: {
+      reset: async () => {
+        calls.push("reset");
+        return { kind: "sandbox_reset_required" as const };
+      },
+    },
     store: {
       appendTerminalCleanupDiagnostic: async () => {
         calls.push("diagnostic");
@@ -1217,7 +1231,7 @@ test("reconciliation cleans only exact expired terminal residual leases without 
   const result = await reconcileAndDispatch({
     operator,
     provider: {
-      resolveSandbox: async () => {
+      resolveExecutionContext: async () => {
         throw new Error("must not resolve");
       },
       stop: async () => {
@@ -1271,7 +1285,7 @@ test("a provider outage for one expired run does not abort unrelated recovery", 
     clock: () => new Date("2026-08-28T15:00:00.000Z"),
     operator,
     provider: {
-      resolveSandbox: async (runnerRun) => {
+      resolveExecutionContext: async (runnerRun) => {
         if (runnerRun.id === first.id) {
           throw new Error("provider unavailable");
         }
@@ -1335,7 +1349,7 @@ test("expired cancellation intent terminalizes instead of requeueing", async () 
     clock: () => new Date("2026-08-28T15:00:00.000Z"),
     operator,
     provider: {
-      resolveSandbox: async () => {
+      resolveExecutionContext: async () => {
         throw new Error("must not resolve");
       },
       stop: async () => {
@@ -1422,7 +1436,7 @@ test("a terminal command with an unsettled log tail remains retryable", async ()
     },
     operator,
     provider: {
-      resolveSandbox: async () => {
+      resolveExecutionContext: async () => {
         calls.push("resolve");
         return {} as never;
       },
@@ -1537,11 +1551,11 @@ test("a terminal command with a persistently unsettled tail releases capacity af
   } as RunnerDispatchAuthority;
   const result = await reconcileAndDispatch({
     clock: () => new Date("2026-08-28T15:00:00.000Z"),
-    maxRunDurationMs: 15 * 60_000,
+    maxRunDurationMs: RUNNER_MID_RUN_ENTITLEMENT_POLICY.maxDurationMs,
     openAttemptRedaction: async () => "redaction-secret",
     operator,
     provider: {
-      resolveSandbox: async () => {
+      resolveExecutionContext: async () => {
         calls.push("resolve");
         return {} as never;
       },
@@ -1710,11 +1724,11 @@ test("the watchdog captures available evidence and terminalizes an overlong runn
   } as RunnerDispatchAuthority;
   const result = await reconcileAndDispatch({
     clock: () => new Date("2026-08-28T15:00:00.000Z"),
-    maxRunDurationMs: 15 * 60_000,
+    maxRunDurationMs: RUNNER_MID_RUN_ENTITLEMENT_POLICY.maxDurationMs,
     openAttemptRedaction: async () => "redaction-secret",
     operator,
     provider: {
-      resolveSandbox: async () => {
+      resolveExecutionContext: async () => {
         calls.push("resolve");
         return {} as never;
       },
@@ -1863,6 +1877,160 @@ test("the watchdog captures available evidence and terminalizes an overlong runn
   assert.equal(result.failures, 0);
 });
 
+test("finish-current recovery converges an exact running attempt without billing authority", async () => {
+  const calls: string[] = [];
+  let billingLookups = 0;
+  const attached = run({
+    daytonaCommandId: "command",
+    daytonaSessionId: "session",
+    dispatchState: "running",
+    executionProvenance: { provider: "durable-test" } as never,
+    startedAt: new Date("2026-08-28T14:59:00.000Z"),
+    status: "running",
+  });
+  const authority = {
+    attemptId,
+    expectedVersion: attached.version + 1,
+    leaseToken: "finish-current-lease",
+    runId: attached.id,
+  } as RunnerDispatchAuthority;
+  const afterEvent = {
+    ...authority,
+    expectedVersion: authority.expectedVersion + 1,
+  } as RunnerDispatchAuthority;
+  const afterTerminal = {
+    ...afterEvent,
+    expectedVersion: afterEvent.expectedVersion + 1,
+  } as RunnerDispatchAuthority;
+
+  const dependencies: ReconcileAndDispatchDependencies & {
+    findAccount: () => never;
+  } = {
+    clock: () => new Date("2026-08-28T15:00:00.000Z"),
+    consumeCredentialReservation: async () => {
+      calls.push("consume-existing-reservation");
+    },
+    // Reconciliation has no entitlement dependency. This sentinel proves the
+    // exact running-attempt path neither reads nor needs one.
+    findAccount: () => {
+      billingLookups += 1;
+      throw new Error("running attempt must not revalidate billing");
+    },
+    operator,
+    provider: {
+      requiresAttemptRedaction: false,
+      resolveExecutionContext: async () => {
+        calls.push("resolve");
+        return {} as never;
+      },
+      snapshot: async () => {
+        calls.push("snapshot");
+        return {
+          cursor: 1,
+          events: [],
+          exitCode: 0,
+          logsSettled: true,
+          status: "completed" as const,
+          summary: {
+            fileOperations: [],
+            output: "Finished after entitlement revocation.",
+            premiumRequests: 0,
+            sessionId: null,
+            status: "completed" as const,
+            toolCalls: [],
+          },
+        };
+      },
+      stop: async () => {
+        calls.push("stop");
+        return { kind: "stopped" as const };
+      },
+    },
+    randomToken: () => "finish-current-lease",
+    releaseCredentialResources: async () => {
+      calls.push("release-credential");
+    },
+    store: {
+      adoptExpiredDaytonaProcess: async () => {
+        calls.push("adopt");
+        return {
+          authority,
+          kind: "adopted" as const,
+          run: {
+            ...attached,
+            dispatchLeaseToken: authority.leaseToken,
+            version: authority.expectedVersion,
+          },
+        };
+      },
+      appendDispatchEventBatch: async () => {
+        calls.push("append-batch");
+        return {
+          authority: afterEvent,
+          events: [],
+          kind: "appended" as const,
+          run: attached,
+        };
+      },
+      cleanupTerminalLease: async () => {
+        calls.push("cleanup-lease");
+        return { kind: "updated" as const, value: attached };
+      },
+      deleteAttemptRedaction: async () => {
+        calls.push("delete-redaction");
+        return { kind: "deleted" as const };
+      },
+      finalizeRun: async () => {
+        calls.push("finalize");
+        return {
+          kind: "finalized" as const,
+          prunedRunIds: [],
+          run: {
+            ...attached,
+            completedAt: new Date("2026-08-28T15:00:00.000Z"),
+            dispatchState: "terminal",
+            status: "completed",
+            version: afterTerminal.expectedVersion,
+          },
+        };
+      },
+      readAttemptRedaction: async () => {
+        calls.push("read-redaction");
+        return { kind: "not_found" as const };
+      },
+      releaseTerminalDaytonaAttempt: async () => {
+        calls.push("release-attempt");
+        return { authority: afterTerminal, kind: "released" as const };
+      },
+      scanExpiredDispatchLeases: async () => {
+        calls.push("scan");
+        return [attached];
+      },
+    } as never,
+  };
+  const result = await reconcileAndDispatch(dependencies);
+
+  assert.equal(billingLookups, 0);
+  assert.deepEqual(calls, [
+    "scan",
+    "adopt",
+    "resolve",
+    "consume-existing-reservation",
+    "read-redaction",
+    "snapshot",
+    "append-batch",
+    "finalize",
+    "stop",
+    "release-credential",
+    "delete-redaction",
+    "release-attempt",
+    "cleanup-lease",
+  ]);
+  assert.equal(result.adopted, 1);
+  assert.equal(result.terminalized, 1);
+  assert.equal(result.failures, 0);
+});
+
 test("cancellation records durable intent before exact remote stop", async () => {
   const calls: string[] = [];
   const active = run({
@@ -1887,7 +2055,7 @@ test("cancellation records durable intent before exact remote stop", async () =>
     clock: () => new Date("2026-08-28T15:00:00.000Z"),
     operator,
     provider: {
-      resolveSandbox: async () => {
+      resolveExecutionContext: async () => {
         calls.push("resolve");
         return {} as never;
       },
@@ -1980,7 +2148,7 @@ test("cancelling a queued run compensates before finalizing without provider wor
   const result = await cancelRunnerRun(unstarted.id, {
     operator,
     provider: {
-      resolveSandbox: async () => {
+      resolveExecutionContext: async () => {
         throw new Error("must not resolve an unstarted dispatch");
       },
       stop: async () => {
@@ -2050,11 +2218,7 @@ test("cancellation keeps durable intent and records a safe diagnostic when reset
   const result = await cancelRunnerRun(active.id, {
     operator,
     provider: {
-      resetSandbox: async () => {
-        calls.push("reset");
-        return { kind: "sandbox_reset_required" as const };
-      },
-      resolveSandbox: async () => {
+      resolveExecutionContext: async () => {
         calls.push("resolve");
         return {} as never;
       },
@@ -2064,6 +2228,12 @@ test("cancellation keeps durable intent and records a safe diagnostic when reset
       },
     },
     randomToken: () => "cancel-lease",
+    resourceLifecycle: {
+      reset: async () => {
+        calls.push("reset");
+        return { kind: "sandbox_reset_required" as const };
+      },
+    },
     store: {
       appendCancellationDiagnostic: async () => {
         calls.push("diagnostic");
@@ -2109,7 +2279,7 @@ test("cancellation fails closed for an unfenced provider identifier", async () =
   const result = await cancelRunnerRun(active.id, {
     operator,
     provider: {
-      resolveSandbox: async () => {
+      resolveExecutionContext: async () => {
         throw new Error("must not resolve");
       },
       stop: async () => {
@@ -2138,7 +2308,7 @@ test("cancellation preserves database and provider unavailability", async () => 
   const databaseResult = await cancelRunnerRun(run().id, {
     operator,
     provider: {
-      resolveSandbox: async () => null,
+      resolveExecutionContext: async () => null,
       stop: async () => ({ kind: "stopped" as const }),
     },
     store: {
@@ -2168,7 +2338,7 @@ test("cancellation preserves database and provider unavailability", async () => 
   const providerResult = await cancelRunnerRun(active.id, {
     operator,
     provider: {
-      resolveSandbox: async () => {
+      resolveExecutionContext: async () => {
         throw new Error("provider=private-detail");
       },
       stop: async () => ({ kind: "stopped" as const }),
@@ -2215,7 +2385,7 @@ test("confirmed provider command absence continues exact cancellation cleanup", 
   const result = await cancelRunnerRun(active.id, {
     operator,
     provider: {
-      resolveSandbox: async () => {
+      resolveExecutionContext: async () => {
         calls.push("resolve");
         return {} as never;
       },
@@ -2300,7 +2470,7 @@ test("a cancelled attempt without an attached command rolls back accounting", as
   const result = await cancelRunnerRun(active.id, {
     operator,
     provider: {
-      resolveSandbox: async () => null,
+      resolveExecutionContext: async () => null,
       stop: async () => {
         throw new Error("must not stop an absent sandbox");
       },
@@ -2350,7 +2520,7 @@ test("cancellation cleanup failure keeps intent durable without terminalizing", 
   const result = await cancelRunnerRun(active.id, {
     operator,
     provider: {
-      resolveSandbox: async () => ({}) as never,
+      resolveExecutionContext: async () => ({}) as never,
       stop: async () => ({ kind: "stopped" as const }),
     },
     releaseCredentialResources: async () => {
@@ -2406,9 +2576,11 @@ test("cancellation preserves a stale sandbox reset fence", async () => {
   const result = await cancelRunnerRun(active.id, {
     operator,
     provider: {
-      resetSandbox: async () => ({ kind: "stale_version" as const }),
-      resolveSandbox: async () => ({}) as never,
+      resolveExecutionContext: async () => ({}) as never,
       stop: async () => ({ kind: "sandbox_reset_required" as const }),
+    },
+    resourceLifecycle: {
+      reset: async () => ({ kind: "stale_version" as const }),
     },
     store: {
       requestRunCancellation: async () => ({
@@ -2442,7 +2614,7 @@ test("cancellation preserves stale finalization fences without false success", a
   const result = await cancelRunnerRun(queued.id, {
     operator,
     provider: {
-      resolveSandbox: async () => null,
+      resolveExecutionContext: async () => null,
       stop: async () => ({ kind: "stopped" as const }),
     },
     rollbackCredentialResources: async () => undefined,
@@ -2476,7 +2648,7 @@ test("dirty terminal cancellation is cleanup-required, not stopped", async () =>
   const result = await cancelRunnerRun(terminal.id, {
     operator,
     provider: {
-      resolveSandbox: async () => {
+      resolveExecutionContext: async () => {
         throw new Error("must not resolve");
       },
       stop: async () => {
@@ -2507,7 +2679,7 @@ test("dirty terminal cancellation is cleanup-required, not stopped", async () =>
   const idempotent = await cancelRunnerRun(clean.id, {
     operator,
     provider: {
-      resolveSandbox: async () => {
+      resolveExecutionContext: async () => {
         throw new Error("must not resolve");
       },
       stop: async () => {
@@ -2530,13 +2702,22 @@ test("dirty terminal cancellation is cleanup-required, not stopped", async () =>
 test("reconciliation appends only fresh logs and terminalizes a settled command", async () => {
   const calls: string[] = [];
   const credential = "attempt-redaction-secret";
+  const commandId = "daytona-command-neutral-projection";
+  const sessionId = "daytona-session-neutral-projection";
   const attached = run({
-    daytonaCommandId: "command",
-    daytonaSessionId: "session",
+    daytonaCommandId: commandId,
+    daytonaSessionId: sessionId,
     dispatchState: "running",
     startedAt: new Date("2026-08-28T14:58:00.000Z"),
     status: "running",
   });
+  const privateValues = [
+    credential,
+    attached.daytonaAttemptId,
+    commandId,
+    sessionId,
+  ].filter((value): value is string => value !== null);
+  const planted = privateValues.join(" | ");
   const authority = {
     attemptId,
     expectedVersion: 2,
@@ -2561,17 +2742,19 @@ test("reconciliation appends only fresh logs and terminalizes a settled command"
     },
     operator,
     provider: {
-      resetSandbox: async () => {
-        calls.push("reset");
-        return { kind: "reset" as const };
-      },
-      resolveSandbox: async () => {
+      resolveExecutionContext: async () => {
         calls.push("resolve");
         return {} as never;
       },
       snapshot: async (input) => {
         calls.push("snapshot");
-        assert.equal(input.credential, credential);
+        for (const value of privateValues) {
+          assert.equal(
+            sanitizeEvidenceText(planted, input.credential).includes(value),
+            false,
+            `provider snapshot input must redact ${value}`
+          );
+        }
         return {
           cursor: 42,
           events: [
@@ -2579,41 +2762,39 @@ test("reconciliation appends only fresh logs and terminalizes a settled command"
               at: "2026-08-28T15:00:00.000Z",
               kind: "message",
               model: null,
-              text: `message ${credential}`,
+              text: `message ${planted}`,
             },
             {
               at: "2026-08-28T15:00:00.000Z",
-              callId: credential,
+              callId: planted,
               kind: "tool-start",
-              summary: credential,
-              tool: credential,
+              summary: planted,
+              tool: planted,
             },
             {
               at: "2026-08-28T15:00:00.000Z",
-              callId: credential,
+              callId: planted,
               kind: "tool-end",
               success: true,
-              summary: credential,
+              summary: planted,
             },
             {
               at: "2026-08-28T15:00:00.000Z",
               kind: "file",
               operation: "edit",
-              path: `/workspace/${credential}`,
+              path: `/workspace/${planted}`,
             },
           ],
           exitCode: 0,
           logsSettled: true,
           status: "completed",
           summary: {
-            fileOperations: [{ operation: "modify", path: credential }],
-            output: `output ${credential}`,
+            fileOperations: [{ operation: "modify", path: planted }],
+            output: `output ${planted}`,
             premiumRequests: null,
             sessionId: null,
             status: "completed",
-            toolCalls: [
-              { success: true, summary: credential, tool: credential },
-            ],
+            toolCalls: [{ success: true, summary: planted, tool: planted }],
           },
         };
       },
@@ -2625,6 +2806,12 @@ test("reconciliation appends only fresh logs and terminalizes a settled command"
     randomToken: () => "adopted-lease",
     releaseCredentialResources: async () => {
       calls.push("release-credential");
+    },
+    resourceLifecycle: {
+      reset: async () => {
+        calls.push("reset");
+        return { kind: "reset" as const };
+      },
     },
     store: {
       adoptExpiredDaytonaProcess: async () => {
@@ -2649,11 +2836,13 @@ test("reconciliation appends only fresh logs and terminalizes a settled command"
           (batch as { daytonaLogCursor: number }).daytonaLogCursor,
           42
         );
-        assert.equal(
-          JSON.stringify(batch).includes(credential),
-          false,
-          "provider events must be redacted before persistence"
-        );
+        for (const value of privateValues) {
+          assert.equal(
+            JSON.stringify(batch).includes(value),
+            false,
+            `provider events must redact ${value} before persistence`
+          );
+        }
         return {
           authority: afterEvent,
           events: [],
@@ -2671,11 +2860,13 @@ test("reconciliation appends only fresh logs and terminalizes a settled command"
       },
       finalizeRun: async (_operator: unknown, finalization: unknown) => {
         calls.push("finalize");
-        assert.equal(
-          JSON.stringify(finalization).includes(credential),
-          false,
-          "terminal evidence must be redacted before persistence"
-        );
+        for (const value of privateValues) {
+          assert.equal(
+            JSON.stringify(finalization).includes(value),
+            false,
+            `terminal evidence must redact ${value} before persistence`
+          );
+        }
         return {
           kind: "finalized" as const,
           prunedRunIds: [],

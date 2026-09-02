@@ -9,11 +9,17 @@ import {
 } from "@daytona/sdk";
 import type { RunnerStore } from "../store";
 import type { RunnerAgentRecord, RunnerPrincipal } from "../types";
-import { daytonaProbeSessionName, daytonaSandboxName } from "./names";
+import {
+  daytonaProbeSessionName,
+  daytonaSandboxLabels,
+  daytonaSandboxName,
+} from "./names";
 import { probeDaytonaHarnesses } from "./process";
 import {
   classifyDaytonaProviderError,
   classifyDaytonaSandboxCreateError,
+  type DaytonaSandboxConfiguration,
+  type DaytonaSandboxCreateParameters,
   DaytonaSandboxLifecycleError,
   daytonaSandboxConfiguration,
   deleteDaytonaSandbox,
@@ -27,10 +33,14 @@ const principal: RunnerPrincipal = {
   tenant: "private_tenant",
   userId: "user",
 };
-const config = {
+const config: DaytonaSandboxConfiguration = {
   autoArchiveInterval: 10_080,
+  autoDeleteInterval: -1,
   autoStopInterval: 15,
+  resources: { cpu: 2, disk: 20, memory: 4 },
   snapshotName: "coven-agents-copilot-1",
+  target: "us",
+  ttlMinutes: 0,
 };
 
 function agent(overrides: Partial<RunnerAgentRecord> = {}): RunnerAgentRecord {
@@ -684,7 +694,7 @@ test("a provider-not-found stored ID fences a replacement before persisting it",
     sandboxLifecycle: "provisioning",
     version: 9,
   });
-  let createParameters: Record<string, unknown> | undefined;
+  let createParameters: DaytonaSandboxCreateParameters | undefined;
   const result = await ensureDaytonaSandbox(principal, stale, config, {
     daytona: {
       create: (parameters) => {
@@ -720,9 +730,20 @@ test("a provider-not-found stored ID fences a replacement before persisting it",
     }),
   });
   assert.equal(result.agent.daytonaSandboxId, "sandbox-id");
-  assert.equal(createParameters?.snapshot, config.snapshotName);
-  assert.equal(createParameters?.ephemeral, false);
-  assert.equal(createParameters?.autoDeleteInterval, -1);
+  assert.deepEqual(createParameters, {
+    autoArchiveInterval: config.autoArchiveInterval,
+    autoDeleteInterval: -1,
+    autoPauseInterval: 0,
+    autoStopInterval: config.autoStopInterval,
+    ephemeral: false,
+    labels: daytonaSandboxLabels(principal.tenant, reserved.id),
+    language: "python",
+    name: daytonaSandboxName(principal.tenant, reserved.id),
+    public: false,
+    resources: config.resources,
+    snapshot: config.snapshotName,
+    ttlMinutes: 0,
+  });
   assert.equal(
     JSON.stringify(createParameters).includes(principal.tenant),
     false
@@ -1709,6 +1730,7 @@ test("production Daytona egress configuration is required and normalized", () =>
     daytonaSandboxConfiguration(environment).domainAllowList,
     "github.com,api.github.com"
   );
+  assert.equal(daytonaSandboxConfiguration(environment).target, "us");
   for (const invalidValue of [
     undefined,
     "",
@@ -1724,6 +1746,45 @@ test("production Daytona egress configuration is required and normalized", () =>
           DAYTONA_DOMAIN_ALLOW_LIST: invalidValue,
         }),
       /DAYTONA_DOMAIN_ALLOW_LIST/u
+    );
+  }
+});
+
+test("sandbox policy supplies bounded resource limits and persistent lifecycle settings", () => {
+  const environment = {
+    DAYTONA_API_KEY: "test-key",
+    DAYTONA_DOMAIN_ALLOW_LIST: "github.com",
+    DAYTONA_SNAPSHOT: "coven-agents-copilot-1",
+    NODE_ENV: "production",
+  } as NodeJS.ProcessEnv;
+
+  assert.deepEqual(daytonaSandboxConfiguration(environment), {
+    autoArchiveInterval: 10_080,
+    autoDeleteInterval: -1,
+    autoStopInterval: 15,
+    domainAllowList: "github.com",
+    resources: { cpu: 2, disk: 20, memory: 4 },
+    snapshotName: "coven-agents-copilot-1",
+    target: "us",
+    ttlMinutes: 0,
+  });
+
+  for (const [name, value] of [
+    ["DAYTONA_AUTO_ARCHIVE_MINUTES", "59"],
+    ["DAYTONA_AUTO_ARCHIVE_MINUTES", "43201"],
+    ["DAYTONA_AUTO_STOP_MINUTES", "4"],
+    ["DAYTONA_AUTO_STOP_MINUTES", "61"],
+    ["DAYTONA_SANDBOX_CPU_CORES", "0"],
+    ["DAYTONA_SANDBOX_CPU_CORES", "5"],
+    ["DAYTONA_SANDBOX_MEMORY_GIB", "0"],
+    ["DAYTONA_SANDBOX_MEMORY_GIB", "9"],
+    ["DAYTONA_SANDBOX_DISK_GIB", "9"],
+    ["DAYTONA_SANDBOX_DISK_GIB", "41"],
+    ["DAYTONA_SANDBOX_CPU_CORES", "1.5"],
+  ] as const) {
+    assert.throws(
+      () => daytonaSandboxConfiguration({ ...environment, [name]: value }),
+      new RegExp(name)
     );
   }
 });

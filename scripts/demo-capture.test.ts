@@ -402,7 +402,7 @@ test("accepts an exactly approved HTTPS origin and explicit loopback development
 
   for (const appOrigin of [
     "http://localhost:3000",
-    "http://127.0.0.1:3100",
+    "http://localhost:3100",
     "http://[::1]:3200",
   ]) {
     assert.equal(
@@ -458,7 +458,7 @@ test("loopback development capture sends the session cookie only to that origin"
           ...recorderLookup,
           createSessionCookie: () => Promise.resolve(SESSION_COOKIE),
           environment: recordingEnvironment({
-            APP_ORIGIN: "http://127.0.0.1:3100",
+            APP_ORIGIN: "http://localhost:3100",
             AUTH_URL: undefined,
           }),
           randomUUID: () => OPERATION_ID,
@@ -475,7 +475,7 @@ test("loopback development capture sends the session cookie only to that origin"
   );
 
   assert.equal(calls.length, 1);
-  assert.equal(calls[0]?.url, "http://127.0.0.1:3100/api/agents");
+  assert.equal(calls[0]?.url, "http://localhost:3100/api/agents");
   assert.equal(
     calls[0]?.headers.get("cookie"),
     `authjs.session-token=${SESSION_COOKIE}`

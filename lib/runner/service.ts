@@ -25,12 +25,19 @@ import {
   type RunnerAdmissionLimits,
   type RunnerDispatchResult,
 } from "./admission";
-import { RunnerServiceError } from "./errors";
-import { hashRunRequest, isTerminalRun } from "./evidence";
 import type {
   CancelRunnerRunResult,
   RunnerReconciliationExecutionResult,
-} from "./reconcile";
+} from "./attempt-reconcile";
+import { RunnerServiceError } from "./errors";
+import { hashRunRequest, isTerminalRun } from "./evidence";
+import type {
+  RunnerPersistentResourceLifecycle,
+  RunnerResourceDecommissionResult,
+  RunnerResourceInventoryResult,
+  RunnerResourcePrewarmOptions,
+  RunnerResourcePrewarmResult,
+} from "./resource-lifecycle";
 import type { RunnerStore } from "./store";
 import type {
   RunnerAgentRecord,
@@ -50,27 +57,10 @@ type RunnerServiceStore = Pick<
   | "updateAgent"
 >;
 
-export type RunnerDeleteAgentResult =
-  | Readonly<{ kind: "deleted" }>
-  | Readonly<{ kind: "busy" }>
-  | Readonly<{ kind: "not_found" }>
-  | Readonly<{ kind: "stale_version" }>
-  | Readonly<{
-      kind: "unavailable";
-      source: "database" | "provider";
-    }>
-  | Readonly<{ kind: "provider_rejected" }>;
-
-export type RunnerWarmSandboxResult =
-  | Readonly<{ agent: RunnerAgentRecord; kind: "ready" }>
-  | Readonly<{ agent: RunnerAgentRecord; kind: "in_progress" }>
-  | Readonly<{ kind: "not_found" }>
-  | Readonly<{ kind: "stale_version" }>
-  | Readonly<{
-      kind: "unavailable";
-      source: "database" | "provider";
-    }>
-  | Readonly<{ kind: "provider_rejected" }>;
+export type RunnerDeleteAgentResult = RunnerResourceDecommissionResult;
+export type RunnerInventoryResourcesResult = RunnerResourceInventoryResult;
+export type RunnerWarmSandboxResult = RunnerResourcePrewarmResult;
+export type RunnerPrewarmOptions = RunnerResourcePrewarmOptions;
 
 export type RunnerDiagnosticResult = Readonly<{
   exitCode: number;
@@ -91,27 +81,18 @@ export type RunnerServiceDependencies = Readonly<{
   cancelRun?: (runId: string) => Promise<CancelRunnerRunResult>;
   clock?: () => Date;
   createId?: () => string;
-  deleteSandbox?: (
-    principal: RunnerPrincipal,
-    agentId: string
-  ) => Promise<RunnerDeleteAgentResult>;
   diagnoseSandbox?: () => Promise<RunnerDiagnosticResult>;
   dispatchClaim?: (
     claimed: RunnerClaimedDispatch
   ) => Promise<RunnerDispatchResult>;
   listHarnesses?: () => Promise<readonly HarnessStatus[]>;
   reconcileAndDispatch?: () => Promise<RunnerReconciliationExecutionResult>;
+  resourceLifecycle?: Pick<
+    RunnerPersistentResourceLifecycle,
+    "decommission" | "prewarm"
+  > &
+    Partial<Pick<RunnerPersistentResourceLifecycle, "inventory">>;
   store: RunnerServiceStore;
-  warmSandbox?: (
-    principal: RunnerPrincipal,
-    agent: RunnerAgentRecord,
-    options?: RunnerPrewarmOptions
-  ) => Promise<RunnerWarmSandboxResult>;
-}>;
-
-export type RunnerPrewarmOptions = Readonly<{
-  deadline?: number;
-  signal?: AbortSignal;
 }>;
 
 export type RunnerCreateAgentResult =
@@ -256,6 +237,7 @@ export type RunnerService = Readonly<{
     principal: RunnerPrincipal,
     runId: string
   ) => Promise<RunnerReadRunResult>;
+  inventoryResources: () => Promise<RunnerInventoryResourcesResult>;
   listAgentRuns: (
     principal: RunnerPrincipal,
     agentId: string
@@ -432,12 +414,12 @@ export function createRunnerService(
     if (!isRunnableHarness(agent.runtime)) {
       return { kind: "unsupported_harness" };
     }
-    if (!dependencies.warmSandbox) {
+    if (!dependencies.resourceLifecycle) {
       throw configuredError("sandbox warming");
     }
     let result: RunnerWarmSandboxResult;
     try {
-      result = await dependencies.warmSandbox(principal, agent);
+      result = await dependencies.resourceLifecycle.prewarm(principal, agent);
     } catch {
       return { kind: "unavailable", source: "provider" };
     }
@@ -490,12 +472,15 @@ export function createRunnerService(
       if (!validId(agentId)) {
         return { kind: "not_found" };
       }
-      if (!dependencies.deleteSandbox) {
+      if (!dependencies.resourceLifecycle) {
         throw configuredError("agent deletion");
       }
       let deleted: RunnerDeleteAgentResult;
       try {
-        deleted = await dependencies.deleteSandbox(principal, agentId);
+        deleted = await dependencies.resourceLifecycle.decommission(
+          principal,
+          agentId
+        );
       } catch {
         return { kind: "unavailable", source: "provider" };
       }
@@ -538,6 +523,13 @@ export function createRunnerService(
         : { kind: "not_found" };
     },
 
+    inventoryResources: () => {
+      if (!dependencies.resourceLifecycle?.inventory) {
+        throw configuredError("resource inventory");
+      }
+      return dependencies.resourceLifecycle.inventory();
+    },
+
     listAgentRuns: async (principal, agentId) => {
       if (!validId(agentId)) {
         return { kind: "not_found" };
@@ -575,12 +567,16 @@ export function createRunnerService(
       if (!isRunnableHarness(target.runtime)) {
         return { kind: "unsupported_harness" };
       }
-      if (!dependencies.warmSandbox) {
+      if (!dependencies.resourceLifecycle) {
         throw configuredError("sandbox warming");
       }
       let result: RunnerWarmSandboxResult;
       try {
-        result = await dependencies.warmSandbox(principal, target, options);
+        result = await dependencies.resourceLifecycle.prewarm(
+          principal,
+          target,
+          options
+        );
       } catch {
         return { kind: "unavailable", source: "provider" };
       }
