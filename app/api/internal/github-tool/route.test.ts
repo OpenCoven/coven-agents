@@ -32,14 +32,8 @@ test("production GitHub tool composition uses app installation authority and the
   assert.match(source, /createGitHubToolHttpHandler/u);
   assert.match(source, /enforceAbusePolicy/u);
   assert.match(source, /refreshGitHubConnectionAuthority/u);
-  assert.match(
-    source,
-    /retainsProjectAuthorityProof\(context\.capability\.allowedCapabilities\)/u
-  );
-  assert.match(
-    source,
-    /if \(\s+retainsProjectAuthorityProof\(context\.capability\.allowedCapabilities\)\s+\) \{\s+return;\s+\}/u
-  );
+  assert.match(source, /authVersion: context\.capability\.authVersion/u);
+  assert.doesNotMatch(source, /retainsProjectAuthorityProof/u);
   assert.doesNotMatch(
     source,
     /COPILOT_GITHUB_TOKEN|AUTH_GITHUB_SECRET|authorizeSubscriber|authenticate:|@\/app\/\(auth\)/u

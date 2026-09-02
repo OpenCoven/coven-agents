@@ -341,8 +341,13 @@ test("admission preserves exact team step and GitHub broker authority despite ca
         repositoryName: "coven-agents",
         repositoryNodeId: "R_kgDOExample",
         repositoryOwner: "OpenCoven",
+        tenant: current.tenant,
         userPermissionCeiling: "write" as const,
         userPermissionCurrent: "write" as const,
+        userProjectAuthorityAuthVersion: null,
+        userProjectAuthorityConnectionGeneration: null,
+        userProjectAuthorityExpiresAt: null,
+        userProjectAuthorityIssuedAt: null,
         userProjectIds: [],
         userProjectManagementCeiling: false,
         userProjectManagementCurrent: false,
@@ -350,6 +355,7 @@ test("admission preserves exact team step and GitHub broker authority despite ca
     ],
     teamRunId: "10000000-0000-4000-8000-000000000003",
     teamStepId,
+    tenant: current.tenant,
     version: 1 as const,
   };
   const storedInputs: StartRunnerRunInput[] = [];
@@ -704,8 +710,13 @@ test("GitHub broker callbacks reach only the claimed child process and issue raw
         repositoryName: "coven-agents",
         repositoryNodeId: "R_kgDOExample",
         repositoryOwner: "OpenCoven",
+        tenant: "tenant_a",
         userPermissionCeiling: "write" as const,
         userPermissionCurrent: "write" as const,
+        userProjectAuthorityAuthVersion: null,
+        userProjectAuthorityConnectionGeneration: null,
+        userProjectAuthorityExpiresAt: null,
+        userProjectAuthorityIssuedAt: null,
         userProjectIds: [],
         userProjectManagementCeiling: false,
         userProjectManagementCurrent: false,
@@ -713,6 +724,7 @@ test("GitHub broker callbacks reach only the claimed child process and issue raw
     ],
     teamRunId: "10000000-0000-4000-8000-000000000003",
     teamStepId: "10000000-0000-4000-8000-000000000001",
+    tenant: "tenant_a",
     version: 1 as const,
   };
   const claimedRun = run({

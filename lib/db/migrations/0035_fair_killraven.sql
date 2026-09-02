@@ -1,4 +1,27 @@
 ALTER TABLE "RunnerGitHubConnection" DROP CONSTRAINT "RGHConn_authority_valid";--> statement-breakpoint
 ALTER TABLE "RunnerGitHubConnection" ADD COLUMN "userProjectIds" jsonb DEFAULT '[]'::jsonb NOT NULL;--> statement-breakpoint
+UPDATE "RunnerGitHubConnection"
+SET "userProjectManagementCurrent" = false,
+    "updatedAt" = clock_timestamp(),
+    "version" = "version" + 1
+WHERE "userProjectManagementCurrent" = true;--> statement-breakpoint
+UPDATE "RunnerGitHubConnectionFence" AS "fence"
+SET "generation" = "generation" + 1,
+    "updatedAt" = clock_timestamp()
+WHERE EXISTS (
+  SELECT 1
+  FROM "RunnerGitHubConnection" AS "connection"
+  WHERE "connection"."tenant" = "fence"."tenant"
+);--> statement-breakpoint
+UPDATE "RunnerGitHubCapability"
+SET "revokedAt" = COALESCE("revokedAt", clock_timestamp()),
+    "updatedAt" = clock_timestamp(),
+    "version" = "version" + 1
+WHERE "revokedAt" IS NULL
+  AND EXISTS (
+    SELECT 1
+    FROM "RunnerGitHubConnection" AS "connection"
+    WHERE "connection"."tenant" = "RunnerGitHubCapability"."tenant"
+  );--> statement-breakpoint
 ALTER TABLE "RunnerGitHubConnection" ALTER COLUMN "userProjectIds" DROP DEFAULT;--> statement-breakpoint
 ALTER TABLE "RunnerGitHubConnection" ADD CONSTRAINT "RGHConn_authority_valid" CHECK ("RunnerGitHubConnection"."appContentsPermission" in ('none','read','write') and "RunnerGitHubConnection"."appIssuesPermission" in ('none','read','write') and "RunnerGitHubConnection"."appPullRequestsPermission" in ('none','read','write') and "RunnerGitHubConnection"."appOrganizationProjectsPermission" in ('none','read','write') and "RunnerGitHubConnection"."userPermissionCeiling" in ('read','triage','write','maintain','admin') and "RunnerGitHubConnection"."userPermissionCurrent" in ('read','triage','write','maintain','admin') and CASE "RunnerGitHubConnection"."userPermissionCurrent" WHEN 'read' THEN 1 WHEN 'triage' THEN 2 WHEN 'write' THEN 3 WHEN 'maintain' THEN 4 WHEN 'admin' THEN 5 ELSE 0 END <= CASE "RunnerGitHubConnection"."userPermissionCeiling" WHEN 'read' THEN 1 WHEN 'triage' THEN 2 WHEN 'write' THEN 3 WHEN 'maintain' THEN 4 WHEN 'admin' THEN 5 ELSE 0 END and jsonb_typeof("RunnerGitHubConnection"."userProjectIds") = 'array' and jsonb_array_length("RunnerGitHubConnection"."userProjectIds") <= 100 and not jsonb_path_exists("RunnerGitHubConnection"."userProjectIds", '$[*] ? (!(@ like_regex "^[A-Za-z0-9_=-]{1,256}$"))') and (not "RunnerGitHubConnection"."userProjectManagementCurrent" or ("RunnerGitHubConnection"."userProjectManagementCeiling" and jsonb_array_length("RunnerGitHubConnection"."userProjectIds") > 0)) and char_length("RunnerGitHubConnection"."githubUserLogin") between 1 and 100 and "RunnerGitHubConnection"."githubUserLogin" ~ '^[A-Za-z0-9_.-]+$');

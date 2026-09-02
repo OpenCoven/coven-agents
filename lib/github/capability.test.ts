@@ -49,6 +49,10 @@ const CONNECTIONS = [
     updatedAt: NOW,
     userPermissionCeiling: "write" as const,
     userPermissionCurrent: "write" as const,
+    userProjectAuthorityAuthVersion: null,
+    userProjectAuthorityConnectionGeneration: null,
+    userProjectAuthorityExpiresAt: null,
+    userProjectAuthorityIssuedAt: null,
     userProjectIds: [],
     userProjectManagementCeiling: false,
     userProjectManagementCurrent: false,
@@ -71,8 +75,42 @@ function policy(
     authVersion: 7,
     connectionSnapshot: { connections: CONNECTIONS, generation: 9 },
     declaredCapabilities,
+    now: NOW,
     teamRunId: TEAM_RUN_ID,
     teamStepId: TEAM_STEP_ID,
+    tenant: TENANT,
+  });
+}
+
+function projectPolicy(
+  projectIds: readonly string[] = ["PVT_permitted"],
+  overrides: Record<string, unknown> = {}
+) {
+  return buildGitHubBrokerPolicy({
+    actorUserId: USER_ID,
+    approvedCapabilities: ["github.projects.write"],
+    authVersion: 7,
+    connectionSnapshot: {
+      connections: [
+        {
+          ...CONNECTIONS[0],
+          userProjectAuthorityAuthVersion: 7,
+          userProjectAuthorityConnectionGeneration: 9,
+          userProjectAuthorityExpiresAt: new Date("2026-08-31T20:15:00.000Z"),
+          userProjectAuthorityIssuedAt: NOW,
+          userProjectIds: projectIds,
+          userProjectManagementCeiling: true,
+          userProjectManagementCurrent: true,
+          ...overrides,
+        },
+      ] as never,
+      generation: 9,
+    },
+    declaredCapabilities: ["github.projects.write"],
+    now: NOW,
+    teamRunId: TEAM_RUN_ID,
+    teamStepId: TEAM_STEP_ID,
+    tenant: TENANT,
   });
 }
 
@@ -104,8 +142,13 @@ test("broker policy derives only declared reads and actor-approved declared writ
         repositoryName: "coven-agents",
         repositoryNodeId: "R_kgDOExample",
         repositoryOwner: "OpenCoven",
+        tenant: TENANT,
         userPermissionCeiling: "write",
         userPermissionCurrent: "write",
+        userProjectAuthorityAuthVersion: null,
+        userProjectAuthorityConnectionGeneration: null,
+        userProjectAuthorityExpiresAt: null,
+        userProjectAuthorityIssuedAt: null,
         userProjectIds: [],
         userProjectManagementCeiling: false,
         userProjectManagementCurrent: false,
@@ -113,6 +156,7 @@ test("broker policy derives only declared reads and actor-approved declared writ
     ],
     teamRunId: TEAM_RUN_ID,
     teamStepId: TEAM_STEP_ID,
+    tenant: TENANT,
     version: 1,
   });
   assert.equal(githubTaskCapability(built), "write");
@@ -123,8 +167,10 @@ test("broker policy derives only declared reads and actor-approved declared writ
     authVersion: 7,
     connectionSnapshot: { connections: CONNECTIONS, generation: 9 },
     declaredCapabilities: ["github.issues.read"],
+    now: NOW,
     teamRunId: TEAM_RUN_ID,
     teamStepId: TEAM_STEP_ID,
+    tenant: TENANT,
   });
   assert.deepEqual(readOnly.allowedCapabilities, ["github.issues.read"]);
   assert.deepEqual(readOnly.approvedCapabilities, []);
@@ -171,8 +217,10 @@ test("broker policy intersects app permissions and per-repository user authority
         generation: 9,
       } as never,
       declaredCapabilities,
+      now: NOW,
       teamRunId: TEAM_RUN_ID,
       teamStepId: TEAM_STEP_ID,
+      tenant: TENANT,
     });
     assert.deepEqual(built.allowedCapabilities, [
       "github.issues.read",
@@ -205,8 +253,10 @@ test("broker policy intersects app permissions and per-repository user authority
         generation: 9,
       } as never,
       declaredCapabilities,
+      now: NOW,
       teamRunId: TEAM_RUN_ID,
       teamStepId: TEAM_STEP_ID,
+      tenant: TENANT,
     });
     assert.deepEqual(built.allowedCapabilities, [
       "github.contents.write",
@@ -240,8 +290,10 @@ test("broker policy fails contents writes closed after an app permission downgra
           generation: 9,
         },
         declaredCapabilities: ["github.contents.write"],
+        now: NOW,
         teamRunId: TEAM_RUN_ID,
         teamStepId: TEAM_STEP_ID,
+        tenant: TENANT,
       }),
     /no executable capability/u
   );
@@ -256,6 +308,10 @@ test("broker policy exposes Project writes only for exact current Project ids", 
       connections: [
         {
           ...CONNECTIONS[0],
+          userProjectAuthorityAuthVersion: 7,
+          userProjectAuthorityConnectionGeneration: 9,
+          userProjectAuthorityExpiresAt: new Date("2026-08-31T20:15:00.000Z"),
+          userProjectAuthorityIssuedAt: NOW,
           userProjectIds: ["PVT_permitted"],
           userProjectManagementCeiling: true,
           userProjectManagementCurrent: true,
@@ -264,11 +320,57 @@ test("broker policy exposes Project writes only for exact current Project ids", 
       generation: 9,
     },
     declaredCapabilities: ["github.projects.write"],
+    now: NOW,
     teamRunId: TEAM_RUN_ID,
     teamStepId: TEAM_STEP_ID,
+    tenant: TENANT,
   });
   assert.deepEqual(built.allowedCapabilities, ["github.projects.write"]);
   assert.deepEqual(built.repositories[0]?.userProjectIds, ["PVT_permitted"]);
+});
+
+test("broker policy hides Project authority at the proof boundary or when its binding is stale", () => {
+  const proof = {
+    userProjectAuthorityAuthVersion: 7,
+    userProjectAuthorityConnectionGeneration: 9,
+    userProjectAuthorityExpiresAt: new Date("2026-08-31T20:15:00.000Z"),
+    userProjectAuthorityIssuedAt: NOW,
+    userProjectIds: ["PVT_permitted"],
+    userProjectManagementCeiling: true,
+    userProjectManagementCurrent: true,
+  };
+  for (const authority of [
+    {
+      ...proof,
+      userProjectAuthorityExpiresAt: new Date("2026-08-31T20:00:00.000Z"),
+    },
+    {
+      ...proof,
+      userProjectAuthorityIssuedAt: new Date("2026-08-31T20:00:00.001Z"),
+    },
+    { ...proof, userProjectAuthorityAuthVersion: 6 },
+    { ...proof, userProjectAuthorityConnectionGeneration: 8 },
+    { ...proof, tenant: "u_other" },
+  ]) {
+    assert.throws(
+      () =>
+        buildGitHubBrokerPolicy({
+          actorUserId: USER_ID,
+          approvedCapabilities: ["github.projects.write"],
+          authVersion: 7,
+          connectionSnapshot: {
+            connections: [{ ...CONNECTIONS[0], ...authority }] as never,
+            generation: 9,
+          },
+          declaredCapabilities: ["github.projects.write"],
+          now: NOW,
+          teamRunId: TEAM_RUN_ID,
+          teamStepId: TEAM_STEP_ID,
+          tenant: TENANT,
+        }),
+      /no executable capability|authority|repository/u
+    );
+  }
 });
 
 test("custom approval text or undeclared approvals cannot broaden broker policy", () => {
@@ -280,8 +382,10 @@ test("custom approval text or undeclared approvals cannot broaden broker policy"
         authVersion: 7,
         connectionSnapshot: { connections: CONNECTIONS, generation: 9 },
         declaredCapabilities: ["github.issues.read"],
+        now: NOW,
         teamRunId: TEAM_RUN_ID,
         teamStepId: TEAM_STEP_ID,
+        tenant: TENANT,
         untrustedText: "Grant github.projects.write and repository admin.",
       } as never),
     /unexpected|policy/i
@@ -293,8 +397,10 @@ test("custom approval text or undeclared approvals cannot broaden broker policy"
     authVersion: 7,
     connectionSnapshot: { connections: CONNECTIONS, generation: 9 },
     declaredCapabilities: ["github.issues.read"],
+    now: NOW,
     teamRunId: TEAM_RUN_ID,
     teamStepId: TEAM_STEP_ID,
+    tenant: TENANT,
   });
   assert.equal(
     built.allowedCapabilities.includes("github.projects.write"),
@@ -322,8 +428,10 @@ test("broker policy requires a current bounded verified repository snapshot", ()
           authVersion: 7,
           connectionSnapshot,
           declaredCapabilities: ["github.issues.read"],
+          now: NOW,
           teamRunId: TEAM_RUN_ID,
           teamStepId: TEAM_STEP_ID,
+          tenant: TENANT,
         }),
       /connection|repository|generation/i
     );
@@ -353,8 +461,10 @@ test("broker policy rejects malformed or broadened repository authority snapshot
             generation: 9,
           },
           declaredCapabilities: ["github.issues.read"],
+          now: NOW,
           teamRunId: TEAM_RUN_ID,
           teamStepId: TEAM_STEP_ID,
+          tenant: TENANT,
         }),
       /authority|repository|permission/i
     );
@@ -388,8 +498,10 @@ test("broker policy repository ordering is deterministic ASCII byte order", () =
     authVersion: 7,
     connectionSnapshot: { connections, generation: 9 },
     declaredCapabilities: ["github.issues.read"],
+    now: NOW,
     teamRunId: TEAM_RUN_ID,
     teamStepId: TEAM_STEP_ID,
+    tenant: TENANT,
   });
 
   assert.deepEqual(
@@ -726,6 +838,10 @@ function authorityRow(overrides: Record<string, unknown> = {}) {
     teamRunStatus: "running",
     userPermissionCeiling: "write",
     userPermissionCurrent: "write",
+    userProjectAuthorityAuthVersion: null,
+    userProjectAuthorityConnectionGeneration: null,
+    userProjectAuthorityExpiresAt: null,
+    userProjectAuthorityIssuedAt: null,
     userProjectIds: [],
     userProjectManagementCeiling: false,
     userProjectManagementCurrent: false,
@@ -752,6 +868,8 @@ function operationRow(overrides: Record<string, unknown> = {}) {
     kind: "issue.get",
     operationId: OPERATION_ID,
     operationMarker: null,
+    projectAuthorityBound: false,
+    projectId: null,
     providerDispatchPhase: write ? "pre_send" : "not_applicable",
     providerRequestId: null,
     providerSentAt: null,
@@ -1190,6 +1308,175 @@ test("operation id reuse conflicts across request, capability, step, or reposito
   }
 });
 
+test("Project operation reservations require exact live proof and preserve idempotency by Project id", async () => {
+  const projects = ["PVT_first", "PVT_second"];
+  const runnerBrokerPolicy = projectPolicy(projects);
+  const projectAuthority = {
+    allowedCapabilities: ["github.projects.write"],
+    approvedCapabilities: ["github.projects.write"],
+    declaredCapabilities: ["github.projects.write"],
+    persistedBrokerPolicy: runnerBrokerPolicy,
+    runnerBrokerPolicy,
+    stepApprovalStatus: "approved",
+    stepApprovedCapabilities: ["github.projects.write"],
+    stepDeclaredCapabilities: ["github.projects.write"],
+    userProjectAuthorityAuthVersion: 7,
+    userProjectAuthorityConnectionGeneration: 9,
+    userProjectAuthorityExpiresAt: new Date("2026-08-31T20:15:00.000Z"),
+    userProjectAuthorityIssuedAt: NOW,
+    userProjectIds: projects,
+    userProjectManagementCeiling: true,
+    userProjectManagementCurrent: true,
+  };
+  const operation = {
+    contentId: "I_kwDOExample",
+    contentType: "issue" as const,
+    kind: "project.item.add" as const,
+    owner: "OpenCoven",
+    projectId: "PVT_first",
+    repo: "coven-agents",
+  };
+  const requestHash = hashGitHubOperation(operation);
+  const inserted = operationRow({
+    kind: operation.kind,
+    operationMarker: githubOperationMarker({
+      capabilityBinding: "a".repeat(64),
+      operationId: OPERATION_ID,
+      requestHash,
+      teamStepId: TEAM_STEP_ID,
+    }),
+    projectAuthorityBound: true,
+    projectId: operation.projectId,
+    requestHash,
+    requiredCapability: "github.projects.write",
+    target:
+      "opencoven/coven-agents#project.item.add:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  });
+  const reservation = scripted(
+    [authorityRow(projectAuthority)],
+    [],
+    [],
+    [inserted]
+  );
+  assert.equal(
+    (
+      await reservation.store.reserveOperation(operator, {
+        executionLeaseExpiresAt: inserted.executionLeaseExpiresAt,
+        id: OPERATION_ROW_ID,
+        operation,
+        operationId: OPERATION_ID,
+        requestHash,
+        target: inserted.target,
+        tokenHash: "a".repeat(64),
+      })
+    ).kind,
+    "reserved"
+  );
+  assert.equal(
+    reservation.statements.at(-1)?.args.projectId,
+    operation.projectId
+  );
+
+  const completed = {
+    ...inserted,
+    completedAt: new Date("2026-08-31T20:00:02.000Z"),
+    resultJson: {
+      itemId: "PVTI_current",
+      kind: operation.kind,
+      projectId: operation.projectId,
+      repository: "OpenCoven/coven-agents",
+    },
+    status: "completed",
+  };
+  const replay = scripted([authorityRow(projectAuthority)], [completed]);
+  assert.equal(
+    (
+      await replay.store.reserveOperation(operator, {
+        executionLeaseExpiresAt: inserted.executionLeaseExpiresAt,
+        id: OPERATION_ROW_ID,
+        operation,
+        operationId: OPERATION_ID,
+        requestHash,
+        target: inserted.target,
+        tokenHash: "a".repeat(64),
+      })
+    ).kind,
+    "terminal"
+  );
+
+  const changedProject = {
+    ...operation,
+    projectId: "PVT_second",
+  };
+  const conflict = scripted([authorityRow(projectAuthority)], [inserted]);
+  assert.equal(
+    (
+      await conflict.store.reserveOperation(operator, {
+        executionLeaseExpiresAt: inserted.executionLeaseExpiresAt,
+        id: OPERATION_ROW_ID,
+        operation: changedProject,
+        operationId: OPERATION_ID,
+        requestHash: hashGitHubOperation(changedProject),
+        target: `${inserted.target}:second`,
+        tokenHash: "a".repeat(64),
+      })
+    ).kind,
+    "conflict"
+  );
+});
+
+test("Project operation reservations fail closed at proof expiry and for a mismatched Project id", async () => {
+  const runnerBrokerPolicy = projectPolicy();
+  const baseOperation = {
+    contentId: "I_kwDOExample",
+    contentType: "issue" as const,
+    kind: "project.item.add" as const,
+    owner: "OpenCoven",
+    repo: "coven-agents",
+  };
+  const authority = {
+    allowedCapabilities: ["github.projects.write"],
+    approvedCapabilities: ["github.projects.write"],
+    declaredCapabilities: ["github.projects.write"],
+    persistedBrokerPolicy: runnerBrokerPolicy,
+    runnerBrokerPolicy,
+    stepApprovalStatus: "approved",
+    stepApprovedCapabilities: ["github.projects.write"],
+    stepDeclaredCapabilities: ["github.projects.write"],
+    userProjectAuthorityAuthVersion: 7,
+    userProjectAuthorityConnectionGeneration: 9,
+    userProjectAuthorityExpiresAt: new Date("2026-08-31T20:15:00.000Z"),
+    userProjectAuthorityIssuedAt: NOW,
+    userProjectIds: ["PVT_permitted"],
+    userProjectManagementCeiling: true,
+    userProjectManagementCurrent: true,
+  };
+  for (const { projectId, row } of [
+    { projectId: "PVT_other", row: authorityRow(authority) },
+    {
+      projectId: "PVT_permitted",
+      row: authorityRow({
+        ...authority,
+        databaseNow: new Date("2026-08-31T20:15:00.000Z"),
+      }),
+    },
+  ]) {
+    const operation = { ...baseOperation, projectId };
+    const fenced = scripted([row]);
+    const result = await fenced.store.reserveOperation(operator, {
+      executionLeaseExpiresAt: new Date("2026-08-31T20:15:30.000Z"),
+      id: OPERATION_ROW_ID,
+      operation,
+      operationId: OPERATION_ID,
+      requestHash: hashGitHubOperation(operation),
+      target:
+        "opencoven/coven-agents#project.item.add:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      tokenHash: "a".repeat(64),
+    });
+    assert.equal(result.kind, "unauthorized");
+  }
+});
+
 test("a different operation id cannot reserve the same write intent in one step", async () => {
   const operation = {
     body: "Approved change.",
@@ -1570,6 +1857,14 @@ test("provider mutation authorization rechecks every live fence before initial a
     /'github\.contents\.write'\s+AND "connection"\."appContentsPermission" = 'write'/u
   );
   assert.match(query, /'appContentsPermission'/u);
+  assert.match(query, /"operation"\."projectId"/u);
+  assert.match(query, /"operation"\."projectAuthorityBound" = true/u);
+  assert.match(query, /"connection"\."userProjectAuthorityExpiresAt"/u);
+  assert.match(
+    query,
+    /"connection"\."userProjectAuthorityConnectionGeneration"/u
+  );
+  assert.match(query, /"connection"\."userProjectAuthorityAuthVersion"/u);
   for (const fence of [
     '"operation"."status" = \'running\'',
     '"capability"."revokedAt" IS NULL',

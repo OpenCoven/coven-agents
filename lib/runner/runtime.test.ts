@@ -175,8 +175,9 @@ test("production dispatch issues hash-only GitHub step capabilities from persist
   assert.match(composition, /issueGitHubStepCapability/u);
   assert.match(composition, /createGitHubGatewayStore/u);
   assert.match(composition, /githubBrokerPolicy/u);
-  assert.match(composition, /retainsProjectAuthorityProof/u);
-  assert.match(composition, /readGitHubConnectionSnapshot/u);
+  assert.match(composition, /refreshGitHubConnectionAuthority/u);
+  assert.match(composition, /authVersion: policy\.authVersion/u);
+  assert.doesNotMatch(composition, /retainsProjectAuthorityProof/u);
   assert.match(composition, /revokeCapability/u);
   assert.match(composition, /api\/internal\/github-tool/u);
   assert.doesNotMatch(

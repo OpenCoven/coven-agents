@@ -18,16 +18,6 @@ import {
 
 const GITHUB_TOOL_OPERATOR: RunnerOperator = { kind: "runner-operator" };
 
-function retainsProjectAuthorityProof(
-  capabilities: readonly string[]
-): boolean {
-  return capabilities.some(
-    (capability) =>
-      capability === "github.projects.read" ||
-      capability === "github.projects.write"
-  );
-}
-
 export function productionGitHubToolHandler() {
   return createGitHubToolHttpHandler({
     enforceAbuse: enforceAbusePolicy,
@@ -58,15 +48,12 @@ export function productionGitHubToolHandler() {
             app.withInstallationAuthorization.bind(app),
         }),
         refreshAuthority: async ({ abortSignal, context, deadlineAt }) => {
-          if (
-            retainsProjectAuthorityProof(context.capability.allowedCapabilities)
-          ) {
-            return;
-          }
           const refreshed = await refreshGitHubConnectionAuthority({
             abortSignal,
+            authVersion: context.capability.authVersion,
             config,
             deadlineAt,
+            now: new Date(),
             principal: {
               kind: "subscriber",
               tenant: context.capability.tenant,

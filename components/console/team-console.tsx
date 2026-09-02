@@ -27,12 +27,13 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { TEMPLATES } from "@/lib/agents/formations";
+import { visibleGitHubProjectCapabilityExpiry } from "@/lib/github/project-authority";
 import { BUILT_IN_SKILLS, GITHUB_DELIVERY_TEAM } from "@/lib/teams/catalog";
 import { TeamApiError, TeamClient } from "@/lib/teams/client";
 import { Btn, Eyebrow, Spinner, StatusDot } from "./primitives";
 import { pill, truncate } from "./styles";
 
-const ALL_CAPABILITIES: readonly TeamCapability[] = [
+const BASE_CAPABILITIES: readonly TeamCapability[] = [
   "workspace.read",
   "workspace.write",
   "github.contents.write",
@@ -41,6 +42,11 @@ const ALL_CAPABILITIES: readonly TeamCapability[] = [
   "github.pull_requests.read",
   "github.pull_requests.write",
 ];
+const PROJECT_CAPABILITIES: readonly TeamCapability[] = [
+  "github.projects.read",
+  "github.projects.write",
+];
+const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 
 const TERMINAL_TEAM_STATUSES = new Set([
   "cancelled",
@@ -220,6 +226,9 @@ export function TeamConsole({
   const [loadingOlderRuns, setLoadingOlderRuns] = useState(false);
   const [busy, setBusy] = useState(false);
   const [mode, setMode] = useState<"browse" | "skill" | "team">("browse");
+  const [projectAuthorityExpiresAt, setProjectAuthorityExpiresAt] = useState<
+    number | null
+  >(null);
   const [mission, setMission] = useState("");
   const [skillName, setSkillName] = useState("");
   const [skillDescription, setSkillDescription] = useState("");
@@ -240,6 +249,64 @@ export function TeamConsole({
   const teamSubmissionRef = useRef<SubmissionIdentity | null>(null);
   selectedRunIdRef.current = selectedRun?.id ?? null;
   selectedTeamIdRef.current = selectedTeamId;
+  const availableCapabilities = useMemo(
+    () =>
+      projectAuthorityExpiresAt === null
+        ? BASE_CAPABILITIES
+        : [...BASE_CAPABILITIES, ...PROJECT_CAPABILITIES],
+    [projectAuthorityExpiresAt]
+  );
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let expiryTimer: ReturnType<typeof setTimeout> | undefined;
+    fetch(`${BASE_PATH}/api/github/connection`, {
+      cache: "no-store",
+      credentials: "same-origin",
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        if (!response.ok) {
+          return null;
+        }
+        const body = (await response.json()) as {
+          projectAuthorityExpiresAt?: unknown;
+        };
+        return visibleGitHubProjectCapabilityExpiry(
+          body.projectAuthorityExpiresAt,
+          new Date()
+        );
+      })
+      .then((expiresAt) => {
+        if (controller.signal.aborted || expiresAt === null) {
+          setProjectAuthorityExpiresAt(null);
+          return;
+        }
+        setProjectAuthorityExpiresAt(expiresAt.getTime());
+        expiryTimer = globalThis.setTimeout(
+          () => {
+            setProjectAuthorityExpiresAt(null);
+            setSkillCapabilities((current) =>
+              current.filter(
+                (capability) => !PROJECT_CAPABILITIES.includes(capability)
+              )
+            );
+          },
+          Math.max(0, expiresAt.getTime() - Date.now())
+        );
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          setProjectAuthorityExpiresAt(null);
+        }
+      });
+    return () => {
+      controller.abort();
+      if (expiryTimer !== undefined) {
+        globalThis.clearTimeout(expiryTimer);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     onBusyChange(busy);
@@ -962,7 +1029,7 @@ export function TeamConsole({
             </Field>
             <fieldset className="oc-team-capabilities">
               <legend>Required capabilities</legend>
-              {ALL_CAPABILITIES.map((capability) => (
+              {availableCapabilities.map((capability) => (
                 <label key={capability}>
                   <input
                     checked={skillCapabilities.includes(capability)}
@@ -980,8 +1047,8 @@ export function TeamConsole({
               ))}
             </fieldset>
             <p className="oc-team-capability-note">
-              GitHub Project capabilities remain unavailable until current user
-              Project-management authority can be verified exactly.
+              GitHub Project capabilities appear only while exact user
+              Project-management authority remains current.
             </p>
             <div className="oc-team-form__actions">
               <Btn onClick={() => setMode("browse")} variant="ghost">
