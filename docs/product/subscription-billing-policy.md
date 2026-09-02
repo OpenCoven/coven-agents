@@ -20,8 +20,14 @@ Stripe before promotion.
 
 There is no application-granted free trial. A failed initial invoice grants no
 authority. Guest replay is the non-paying evaluation path. Metered overage,
-seats, plan changes, add-ons, tax policy beyond Stripe Checkout, and proration
-are not implemented here.
+seats, plan changes, add-ons, automatic tax collection, and proration are not
+implemented here.
+
+Customer Portal and self-service cancellation are also deferred. An active
+subscriber can see current status and the paid-through boundary, but this
+release does not expose plan changes, payment-method management, invoice
+history, or cancellation controls. Operators must not imply that those
+features are available.
 
 The included monthly allowance is `MONTHLY_RUN_CAP = 750`, defined in
 `lib/billing/limits.ts`. That constant is the current source read by admission,
@@ -124,11 +130,14 @@ existing product-access policy; `finish_current` grants no such access.
 
 A successful payment does not make a browser redirect authoritative. The
 verified webhook must first update the database. A token minted before payment
-still carries its earlier date because ordinary callbacks do not poll the user
-row; a later authenticated session carries the updated type. Cancellation does
-not revoke an already paid
-period; authority ends when `subscribedUntil` passes. An explicit
-administrative revoke clears the period immediately.
+can still carry its earlier date, but the account and console pages derive
+current subscription authority from PostgreSQL at request time. The successful
+Checkout return polls `GET /api/subscription`, then uses `router.refresh()` to
+obtain that server authority without rewriting the Auth.js cookie or requiring
+another sign-in. The browser removes `checkout=success` only after the refreshed
+authority belongs to the same user and is active. Cancellation does not revoke
+an already paid period; authority ends when `subscribedUntil` passes. An
+explicit administrative revoke clears the period immediately.
 
 Copilot device authorization returns an encrypted-replay start response with an
 opaque HMAC binding over the initiating user and one-time provider code. Polls
@@ -153,6 +162,37 @@ leased until expiry. The provider exchange and PostgreSQL cannot form one
 global transaction, so a provider success followed by that outage can still
 require a fresh device authorization, but no credential can now persist without
 its completed replay record.
+
+## Launch control and rollout
+
+New subscription sales are controlled by the server-only
+`SUBSCRIPTION_CHECKOUT_ENABLED` variable:
+
+- only the exact value `on` enables Checkout;
+- unset, blank, or `off` keeps subscription calls to action hidden and makes
+  `POST /api/checkout` return `subscriptions_unavailable` before Stripe work;
+- any other configured value is invalid and fails runtime validation;
+- the flag never disables `POST /api/stripe/webhook`, subscription expiry, or
+  authority for existing subscribers.
+
+The flag is a sales switch, not a deployment substitute. Keep it `off` while
+deploying and verifying schema, webhook, Price, credentials, and account
+surfaces. Enable it only after the launch checklist in
+`docs/roadmap/release-readiness.md` has dated evidence. To stop new sales,
+return the flag to `off`; do not disable or remove the webhook, because existing
+payments and renewals still require it.
+
+Production uses the compatibility variable `STRIPE_SECRET_KEY`, but its value
+should be a least-privilege Stripe restricted key. The current integration
+requires Customer read/write, Subscription read, Checkout Session
+read/write/expire, Invoice and invoice-line read for webhook reconciliation,
+and the minimum additional access needed to construct and verify the installed
+SDK operations. Operators must first exercise those permissions with a
+test-mode restricted key, then create a separate live-mode restricted key with
+the same reviewed access. The live key and live Price must be configured
+together and verified as live objects before promotion; a live key cannot be
+tested against Stripe test-mode resources. Never copy an unrestricted account
+key into deployment configuration.
 
 ## Checkout responsibilities
 
@@ -389,6 +429,31 @@ procedure, and marks it `resolved` only after verification. Deletion, if a
 future retention policy requires it, must be an explicit audited operation
 that handles the restrictive event foreign key; generic cleanup must never
 silently remove unresolved evidence.
+
+## Stripe Tax readiness
+
+This release does not enable `automatic_tax`, `tax_id_collection`, or an
+application tax calculation. Stripe Checkout displays the configured Price,
+but no code change should claim that tax is being assessed or collected.
+
+Before a later Stripe Tax activation, an authorized operator must verify and
+retain sanitized evidence for all of the following:
+
+1. Stripe's business/head-office address and origin settings are correct.
+2. The subscription Product has the intended Stripe tax code.
+3. The recurring Price has an explicit, reviewed inclusive or exclusive tax
+   behavior suitable for every supported market.
+4. Every jurisdiction in which tax should be collected has an active Stripe
+   Tax registration.
+5. Test-mode Checkout demonstrates the intended customer-address collection,
+   tax calculation, invoice, refund, and exemption behavior.
+6. Webhook fixtures and application tests cover the new tax-bearing objects
+   before `automatic_tax` is enabled in production.
+
+Enabling Stripe Tax without active registrations can produce a successful
+Checkout that collects no tax. Registrations, Product tax code, Price tax
+behavior, and customer-location behavior are therefore launch authorities, not
+optional follow-up settings.
 
 ## Usage cap and run accounting
 

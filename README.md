@@ -58,6 +58,11 @@ before database, credential, or Daytona work.
 Review the living
 [Subscription and billing policy](docs/product/subscription-billing-policy.md)
 before changing entitlement, checkout, webhook, grace, or run-cap behavior.
+New subscription sales are default-off through
+`SUBSCRIPTION_CHECKOUT_ENABLED`; use the
+[release-readiness Stripe checklist](docs/roadmap/release-readiness.md#stripe-webhook-delivery)
+before enabling it. Customer Portal and automatic Stripe Tax collection are
+not part of the current release.
 
 ## Install
 
