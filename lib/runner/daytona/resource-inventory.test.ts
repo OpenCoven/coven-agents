@@ -163,8 +163,18 @@ test("inventory queries only the app label and returns privacy-safe aggregate ma
 
   assert.deepEqual(query, { labels: { app: "coven-agents" }, limit: 10 });
   assert.deepEqual(result, {
+    ambiguityReasons: {
+      configurationDrift: 0,
+      databaseBounded: 0,
+      duplicateIdentity: 0,
+      duplicateProviderId: 0,
+      multipleMappings: 0,
+      pendingLifecycle: 1,
+      unresolved: 0,
+    },
     ambiguous: 1,
     appOwnedMappings: 2,
+    configurationDrift: [],
     databaseCapped: false,
     examined: 3,
     kind: "available",
@@ -207,8 +217,18 @@ test("duplicate labels, provider mappings, and resource policy drift remain ambi
   });
 
   assert.deepEqual(result, {
+    ambiguityReasons: {
+      configurationDrift: 0,
+      databaseBounded: 0,
+      duplicateIdentity: 2,
+      duplicateProviderId: 0,
+      multipleMappings: 0,
+      pendingLifecycle: 0,
+      unresolved: 0,
+    },
     ambiguous: 2,
     appOwnedMappings: 1,
+    configurationDrift: [],
     databaseCapped: false,
     examined: 2,
     kind: "available",
@@ -219,6 +239,79 @@ test("duplicate labels, provider mappings, and resource policy drift remain ambi
     unowned: 0,
     version: 1,
   });
+});
+
+test("inventory reports privacy-safe configuration drift fields", async () => {
+  const mapping = agent();
+  const drifted = sandbox(mapping, {
+    autoPauseInterval: undefined,
+    disk: 21,
+  });
+
+  const result = await inventoryDaytonaSandboxes({
+    configuration,
+    daytona: inventoryService([drifted]),
+    limit: 10,
+    operator,
+    store: inventoryStore([mapping]),
+  });
+
+  assert.deepEqual(result, {
+    ambiguityReasons: {
+      configurationDrift: 1,
+      databaseBounded: 0,
+      duplicateIdentity: 0,
+      duplicateProviderId: 0,
+      multipleMappings: 0,
+      pendingLifecycle: 0,
+      unresolved: 0,
+    },
+    ambiguous: 1,
+    appOwnedMappings: 1,
+    configurationDrift: [
+      { count: 1, field: "disk" },
+      { count: 1, field: "autoPauseInterval" },
+    ],
+    databaseCapped: false,
+    examined: 1,
+    kind: "available",
+    matched: 0,
+    providerCapped: false,
+    states: { active: 1, archived: 0, other: 0, stopped: 0 },
+    status: "complete",
+    unowned: 0,
+    version: 1,
+  });
+});
+
+test("configuration drift field order is independent of provider order", async () => {
+  const diskMapping = agent();
+  const cpuMapping = agent({
+    daytonaSandboxId: "sandbox-b",
+    id: "00000000-0000-4000-8000-000000000002",
+  });
+  const diskDrift = sandbox(diskMapping, { disk: 21 });
+  const cpuDrift = sandbox(cpuMapping, { cpu: 3 });
+  const inventory = (sandboxes: readonly DaytonaSandboxInventoryItem[]) =>
+    inventoryDaytonaSandboxes({
+      configuration,
+      daytona: inventoryService(sandboxes),
+      limit: 10,
+      operator,
+      store: inventoryStore([diskMapping, cpuMapping]),
+    });
+
+  const forward = await inventory([diskDrift, cpuDrift]);
+  const reversed = await inventory([cpuDrift, diskDrift]);
+
+  assert.deepEqual(forward, reversed);
+  assert.equal(forward.kind, "available");
+  if (forward.kind === "available") {
+    assert.deepEqual(forward.configurationDrift, [
+      { count: 1, field: "cpu" },
+      { count: 1, field: "disk" },
+    ]);
+  }
 });
 
 test("inventory marks capped observations bounded rather than treating them as unowned", async () => {
@@ -242,8 +335,18 @@ test("inventory marks capped observations bounded rather than treating them as u
   });
 
   assert.deepEqual(result, {
+    ambiguityReasons: {
+      configurationDrift: 0,
+      databaseBounded: 1,
+      duplicateIdentity: 0,
+      duplicateProviderId: 0,
+      multipleMappings: 0,
+      pendingLifecycle: 0,
+      unresolved: 0,
+    },
     ambiguous: 1,
     appOwnedMappings: 1,
+    configurationDrift: [],
     databaseCapped: true,
     examined: 1,
     kind: "available",

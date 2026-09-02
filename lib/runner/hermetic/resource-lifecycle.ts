@@ -25,8 +25,18 @@ const NO_HOSTED_RESOURCE_STATES = Object.freeze({
 });
 const NO_HOSTED_RESOURCE_INVENTORY: RunnerResourceInventoryResult =
   Object.freeze({
+    ambiguityReasons: {
+      configurationDrift: 0,
+      databaseBounded: 0,
+      duplicateIdentity: 0,
+      duplicateProviderId: 0,
+      multipleMappings: 0,
+      pendingLifecycle: 0,
+      unresolved: 0,
+    },
     ambiguous: 0,
     appOwnedMappings: 0,
+    configurationDrift: [],
     databaseCapped: false,
     examined: 0,
     kind: "available",
