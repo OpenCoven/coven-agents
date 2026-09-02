@@ -1,7 +1,7 @@
 import "server-only";
 
 import { randomBytes } from "node:crypto";
-import { SandboxState } from "@daytona/sdk";
+import { DaytonaError, SandboxState } from "@daytona/sdk";
 import type { RunnerResourceRepairResult } from "../resource-lifecycle";
 import type { RunnerStore } from "../store";
 import type { RunnerAgentRecord, RunnerOperator } from "../types";
@@ -97,6 +97,17 @@ function repairableResourceDrift(
       (entry) =>
         entry.relation === "below" && REPAIRABLE_FIELDS.has(entry.field)
     )
+  );
+}
+
+function resizeWasDefinitelyRejected(error: unknown): boolean {
+  if (!(error instanceof DaytonaError) || error.statusCode === undefined) {
+    return false;
+  }
+  return (
+    error.statusCode >= 400 &&
+    error.statusCode < 500 &&
+    ![408, 409, 425, 429].includes(error.statusCode)
   );
 }
 
@@ -359,7 +370,15 @@ async function repairOneSandbox(
       dependencies.configuration.resources,
       RESIZE_REQUEST_TIMEOUT_SECONDS
     );
-  } catch {
+  } catch (error) {
+    if (resizeWasDefinitelyRejected(error)) {
+      return {
+        eligible: true,
+        outcome: (await finishResizeFence(dependencies, fenced))
+          ? "failure"
+          : "deferred",
+      };
+    }
     // Provider timeouts can occur after accepting the resize.
   }
   const verified = await verifyConfiguredSandbox(
