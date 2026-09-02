@@ -28,6 +28,10 @@ export type RunnerResourceConfigurationDriftField =
   | "target"
   | "volumes"
   | "warmPool";
+export type RunnerResourceConfigurationDriftRelation =
+  | "above"
+  | "below"
+  | "different";
 
 export type RunnerResourceInventoryResult =
   | Readonly<{
@@ -44,6 +48,7 @@ export type RunnerResourceInventoryResult =
       configurationDrift: readonly Readonly<{
         count: number;
         field: RunnerResourceConfigurationDriftField;
+        relation: RunnerResourceConfigurationDriftRelation;
       }>[];
       databaseCapped: boolean;
       examined: number;

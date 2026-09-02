@@ -93,6 +93,7 @@ const resourceInventoryResponseSchema = z
             "volumes",
             "warmPool",
           ]),
+          relation: z.enum(["above", "below", "different"]),
         })
         .strict()
     ),

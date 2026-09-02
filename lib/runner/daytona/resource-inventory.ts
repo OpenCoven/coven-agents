@@ -3,6 +3,7 @@ import "server-only";
 import { SandboxState } from "@daytona/sdk";
 import {
   type RunnerResourceConfigurationDriftField,
+  type RunnerResourceConfigurationDriftRelation,
   type RunnerResourceInventoryResult,
   runnerResourceInventoryLimit,
 } from "../resource-lifecycle";
@@ -36,6 +37,11 @@ const CONFIGURATION_DRIFT_FIELD_ORDER = [
   "warmPool",
   "linkedSandbox",
 ] as const satisfies readonly RunnerResourceConfigurationDriftField[];
+const CONFIGURATION_DRIFT_RELATION_ORDER = [
+  "below",
+  "above",
+  "different",
+] as const satisfies readonly RunnerResourceConfigurationDriftRelation[];
 
 export type DaytonaSandboxInventoryService = Readonly<{
   get: (sandboxId: string) => Promise<DaytonaSandboxInventoryItem>;
@@ -146,37 +152,60 @@ function configurationDriftFields(
   sandbox: DaytonaSandboxInventoryItem,
   agent: InventoryMapping,
   configuration: DaytonaSandboxConfiguration
-): RunnerResourceConfigurationDriftField[] {
-  const fields: RunnerResourceConfigurationDriftField[] = [];
+): Readonly<
+  {
+    field: RunnerResourceConfigurationDriftField;
+    relation: RunnerResourceConfigurationDriftRelation;
+  }[]
+> {
+  const fields: {
+    field: RunnerResourceConfigurationDriftField;
+    relation: RunnerResourceConfigurationDriftRelation;
+  }[] = [];
   const record = (
     field: RunnerResourceConfigurationDriftField,
-    matches: boolean
+    matches: boolean,
+    relation: RunnerResourceConfigurationDriftRelation = "different"
   ) => {
     if (!matches) {
-      fields.push(field);
+      fields.push({ field, relation });
     }
+  };
+  const recordNumber = (
+    field: RunnerResourceConfigurationDriftField,
+    actual: number | undefined,
+    expected: number
+  ) => {
+    record(
+      field,
+      actual === expected,
+      actual === undefined ? "different" : actual < expected ? "below" : "above"
+    );
   };
   record("name", sandbox.name === daytonaSandboxName(agent.tenant, agent.id));
   record("labels", sameLabels(sandbox.labels, expectedLabels(agent)));
   record("snapshot", sandbox.snapshot === configuration.snapshotName);
   record("target", sandbox.target === configuration.target);
-  record("cpu", sandbox.cpu === configuration.resources.cpu);
-  record("memory", sandbox.memory === configuration.resources.memory);
-  record("disk", sandbox.disk === configuration.resources.disk);
-  record(
+  recordNumber("cpu", sandbox.cpu, configuration.resources.cpu);
+  recordNumber("memory", sandbox.memory, configuration.resources.memory);
+  recordNumber("disk", sandbox.disk, configuration.resources.disk);
+  recordNumber(
     "autoStopInterval",
-    sandbox.autoStopInterval === configuration.autoStopInterval
+    sandbox.autoStopInterval,
+    configuration.autoStopInterval
   );
-  record(
+  recordNumber(
     "autoArchiveInterval",
-    sandbox.autoArchiveInterval === configuration.autoArchiveInterval
+    sandbox.autoArchiveInterval,
+    configuration.autoArchiveInterval
   );
-  record(
+  recordNumber(
     "autoDeleteInterval",
-    sandbox.autoDeleteInterval === configuration.autoDeleteInterval
+    sandbox.autoDeleteInterval,
+    configuration.autoDeleteInterval
   );
   record("autoDestroyAt", sandbox.autoDestroyAt === undefined);
-  record("autoPauseInterval", sandbox.autoPauseInterval === 0);
+  recordNumber("autoPauseInterval", sandbox.autoPauseInterval, 0);
   record(
     "domainAllowList",
     sandbox.domainAllowList === configuration.domainAllowList
@@ -314,7 +343,7 @@ export async function inventoryDaytonaSandboxes(
   let ambiguityReasons = emptyAmbiguityReasons();
   const configurationDriftCounts = new Map<
     RunnerResourceConfigurationDriftField,
-    number
+    Map<RunnerResourceConfigurationDriftRelation, number>
   >();
   let matched = 0;
   let unowned = 0;
@@ -344,11 +373,14 @@ export async function inventoryDaytonaSandboxes(
           ...ambiguityReasons,
           configurationDrift: ambiguityReasons.configurationDrift + 1,
         };
-        for (const field of driftFields) {
-          configurationDriftCounts.set(
-            field,
-            (configurationDriftCounts.get(field) ?? 0) + 1
+        for (const drift of driftFields) {
+          const relationCounts =
+            configurationDriftCounts.get(drift.field) ?? new Map();
+          relationCounts.set(
+            drift.relation,
+            (relationCounts.get(drift.relation) ?? 0) + 1
           );
+          configurationDriftCounts.set(drift.field, relationCounts);
         }
         ambiguous += 1;
         continue;
@@ -384,10 +416,12 @@ export async function inventoryDaytonaSandboxes(
     ambiguityReasons,
     ambiguous,
     appOwnedMappings: mappings.length,
-    configurationDrift: CONFIGURATION_DRIFT_FIELD_ORDER.flatMap((field) => {
-      const count = configurationDriftCounts.get(field);
-      return count ? [{ count, field }] : [];
-    }),
+    configurationDrift: CONFIGURATION_DRIFT_FIELD_ORDER.flatMap((field) =>
+      CONFIGURATION_DRIFT_RELATION_ORDER.flatMap((relation) => {
+        const count = configurationDriftCounts.get(field)?.get(relation);
+        return count ? [{ count, field, relation }] : [];
+      })
+    ),
     databaseCapped,
     examined: sandboxes.length,
     kind: "available",
