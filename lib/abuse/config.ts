@@ -13,7 +13,7 @@ export function validateAbuseConfig(input: {
     return;
   }
 
-  if (input.globalDailyRunCap !== undefined) {
+  if (input.globalDailyRunCap?.trim()) {
     globalDailyRunCapFromEnv(input.globalDailyRunCap);
     requireNonemptyAbuseKeySecret(input.keySecret);
   } else if (input.redisUrl?.trim()) {
