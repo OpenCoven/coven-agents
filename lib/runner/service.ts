@@ -37,6 +37,8 @@ import type {
   RunnerResourceInventoryResult,
   RunnerResourcePrewarmOptions,
   RunnerResourcePrewarmResult,
+  RunnerResourceRepairOptions,
+  RunnerResourceRepairResult,
 } from "./resource-lifecycle";
 import type { RunnerStore } from "./store";
 import type {
@@ -59,6 +61,7 @@ type RunnerServiceStore = Pick<
 
 export type RunnerDeleteAgentResult = RunnerResourceDecommissionResult;
 export type RunnerInventoryResourcesResult = RunnerResourceInventoryResult;
+export type RunnerRepairResourcesResult = RunnerResourceRepairResult;
 export type RunnerWarmSandboxResult = RunnerResourcePrewarmResult;
 export type RunnerPrewarmOptions = RunnerResourcePrewarmOptions;
 
@@ -91,7 +94,7 @@ export type RunnerServiceDependencies = Readonly<{
     RunnerPersistentResourceLifecycle,
     "decommission" | "prewarm"
   > &
-    Partial<Pick<RunnerPersistentResourceLifecycle, "inventory">>;
+    Partial<Pick<RunnerPersistentResourceLifecycle, "inventory" | "repair">>;
   store: RunnerServiceStore;
 }>;
 
@@ -251,6 +254,9 @@ export type RunnerService = Readonly<{
     principal: RunnerPrincipal,
     options?: RunnerPrewarmOptions
   ) => Promise<RunnerPrewarmResult>;
+  repairResources: (
+    options?: RunnerResourceRepairOptions
+  ) => Promise<RunnerRepairResourcesResult>;
   readRunEvents: (
     principal: RunnerPrincipal,
     runId: string,
@@ -674,6 +680,13 @@ export function createRunnerService(
         throw configuredError("reconciliation");
       }
       return dependencies.reconcileAndDispatch();
+    },
+
+    repairResources: (options) => {
+      if (!dependencies.resourceLifecycle?.repair) {
+        throw configuredError("resource repair");
+      }
+      return dependencies.resourceLifecycle.repair(options);
     },
 
     startRun: async (principal, authVersion, agentId, input) => {

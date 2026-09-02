@@ -72,6 +72,33 @@ export type RunnerResourceInventoryResult =
       version: 1;
     }>;
 
+export type RunnerResourceRepairResult =
+  | Readonly<{
+      appOwnedMappings: number;
+      batchCapped: boolean;
+      databaseCapped: boolean;
+      deferred: number;
+      eligible: number;
+      examined: number;
+      failures: number;
+      kind: "available";
+      providerCapped: boolean;
+      refused: number;
+      repaired: number;
+      status: "bounded" | "complete";
+      unchanged: number;
+      version: 1;
+    }>
+  | Readonly<{
+      kind: "unavailable";
+      source: "database" | "provider";
+      version: 1;
+    }>;
+
+export type RunnerResourceRepairOptions = Readonly<{
+  deadline?: number;
+}>;
+
 export function runnerResourceInventoryLimit(limit?: number): number {
   const selected = limit ?? DEFAULT_RUNNER_RESOURCE_INVENTORY_LIMIT;
   if (
@@ -97,6 +124,9 @@ export type RunnerPersistentResourceLifecycle = Readonly<{
     agentId: string
   ) => Promise<RunnerResourceDecommissionResult>;
   inventory: () => Promise<RunnerResourceInventoryResult>;
+  repair: (
+    options?: RunnerResourceRepairOptions
+  ) => Promise<RunnerResourceRepairResult>;
   prewarm: (
     principal: RunnerPrincipal,
     agent: RunnerAgentRecord,

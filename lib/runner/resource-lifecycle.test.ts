@@ -123,6 +123,13 @@ function resourceLifecycleContract(
       assert.equal(inventory.examined, 0);
     }
 
+    const repair = await lifecycle.repair();
+    assert.equal(repair.kind, "available");
+    if (repair.kind === "available") {
+      assert.equal(repair.version, 1);
+      assert.equal(repair.examined, 0);
+    }
+
     assert.deepEqual(
       await lifecycle.recover(() => new Date("2026-09-01T00:05:00.000Z")),
       recovery
@@ -199,7 +206,25 @@ resourceLifecycleContract("Daytona-shaped fake", () => {
     }),
     operator,
     probe: () => Promise.resolve(),
+    repairDaytona: () => ({
+      get: () => Promise.reject(new Error("Repair fixture must not hydrate.")),
+      async *list() {
+        await Promise.resolve();
+        const sandboxes: DaytonaSandboxInventoryItem[] = [];
+        for (const inventorySandbox of sandboxes) {
+          yield inventorySandbox as never;
+        }
+      },
+    }),
     store: {
+      acquireReconciliationLease: async () => ({
+        kind: "acquired",
+        lease: {
+          expiresAt: new Date("2026-09-01T00:05:00.000Z"),
+          fence: 1,
+          ownerToken: "resource-lifecycle-test",
+        },
+      }),
       attachDaytonaSandbox: async () => ({ kind: "updated", value: ready }),
       beginDaytonaSandboxDecommission: async () => ({
         kind: "decommissioning",
@@ -227,6 +252,7 @@ resourceLifecycleContract("Daytona-shaped fake", () => {
         kind: "updated",
         value: warmed,
       }),
+      releaseReconciliationLease: async () => ({ kind: "released" }),
       reserveDaytonaSandbox: async () => ({
         kind: "reserved",
         value: agent({
@@ -237,6 +263,7 @@ resourceLifecycleContract("Daytona-shaped fake", () => {
       }),
       scanDaytonaSandboxInventory: async () => [],
       scanDaytonaSandboxRecoveries: async () => [],
+      scanDaytonaSandboxRepairCandidates: async () => [],
       scanDaytonaWarmRecoveries: async () => [],
     } as never,
   });

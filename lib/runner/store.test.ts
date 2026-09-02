@@ -2621,6 +2621,50 @@ test("operator inventory scans only bounded durable lifecycle mappings in stable
   }
 });
 
+test("operator repair candidates prioritize durable resize recovery and count duplicate mappings", async () => {
+  const candidate = agent({
+    daytonaSandboxId: "sandbox-repair-candidate",
+    sandboxLifecycle: "resizing",
+  });
+  const { statements, store } = scripted([
+    {
+      ...candidate,
+      appOwnedMappings: "6",
+      providerMappingCount: "1",
+    },
+  ]);
+
+  assert.deepEqual(
+    await store.scanDaytonaSandboxRepairCandidates(operator, 5),
+    [
+      {
+        appOwnedMappings: 6,
+        mapping: candidate,
+        providerMappingCount: 1,
+      },
+    ]
+  );
+  const [scan] = statements;
+  assert.ok(scan);
+  assert.equal(scan.name, "scan-daytona-sandbox-repair-candidates");
+  const query = queryText(scan);
+  assert.match(query, /count\(\*\) OVER \(\)/u);
+  assert.match(query, /PARTITION BY "daytonaSandboxId"/u);
+  assert.match(query, /"sandboxLifecycle" IN \('ready', 'resizing'\)/u);
+  assert.match(query, /"status" = 'idle'/u);
+  assert.match(query, /"warmStatus" <> 'provisioning'/u);
+  assert.match(query, /"liveRun"\."status" IN \('queued', 'running'\)/u);
+  assert.match(
+    query,
+    /CASE WHEN "providerMappingCount" = 1 THEN 0 ELSE 1 END/u
+  );
+  assert.match(
+    query,
+    /CASE WHEN "sandboxLifecycle" = 'resizing' THEN 0 ELSE 1 END/u
+  );
+  assert.match(query, /LIMIT \$\d+/u);
+});
+
 test("warm recovery has an independent bounded oldest-first scan", async () => {
   const { statements, store } = scripted([]);
   const staleBefore = new Date("2026-08-28T15:00:00.000Z");
@@ -4133,6 +4177,84 @@ test("warm and decommission transitions retain generation and version fences", a
   assert.match(deleteQuery, /"version" = \$/u);
 });
 
+test("resource resize acquires and releases an exact idle per-agent fence", async () => {
+  const current = agent({
+    daytonaSandboxId: "sandbox-resize",
+    sandboxGeneration: 3,
+    sandboxLifecycle: "ready",
+    version: 7,
+    warmStatus: "ready",
+  });
+  const resizing = agent({
+    ...current,
+    sandboxLifecycle: "resizing",
+    version: 8,
+  });
+  const deferred = agent({
+    ...resizing,
+    version: 9,
+  });
+  const ready = agent({
+    ...deferred,
+    sandboxLifecycle: "ready",
+    version: 10,
+  });
+  const { statements, store } = scripted(
+    [current],
+    [resizing],
+    [deferred],
+    [ready]
+  );
+
+  assert.deepEqual(
+    await store.beginDaytonaSandboxResize(operator, {
+      agentId: current.id,
+      expectedGeneration: current.sandboxGeneration,
+      expectedVersion: current.version,
+      sandboxId: current.daytonaSandboxId as string,
+      tenant: current.tenant,
+    }),
+    { kind: "resizing", value: resizing }
+  );
+  assert.deepEqual(
+    await store.deferDaytonaSandboxResize(operator, {
+      agentId: resizing.id,
+      expectedGeneration: resizing.sandboxGeneration,
+      expectedVersion: resizing.version,
+      sandboxId: resizing.daytonaSandboxId as string,
+      tenant: resizing.tenant,
+    }),
+    { kind: "updated", value: deferred }
+  );
+  assert.deepEqual(
+    await store.finishDaytonaSandboxResize(operator, {
+      agentId: deferred.id,
+      expectedGeneration: deferred.sandboxGeneration,
+      expectedVersion: deferred.version,
+      sandboxId: deferred.daytonaSandboxId as string,
+      tenant: deferred.tenant,
+    }),
+    { kind: "updated", value: ready }
+  );
+
+  const beginQuery = queryText(statements[1] as RunnerStoreStatement);
+  const deferQuery = queryText(statements[2] as RunnerStoreStatement);
+  const finishQuery = queryText(statements[3] as RunnerStoreStatement);
+  assert.match(beginQuery, /"sandboxLifecycle" = 'resizing'/u);
+  assert.match(beginQuery, /"daytonaSandboxId" = \$/u);
+  assert.match(beginQuery, /"status" = 'idle'/u);
+  assert.match(beginQuery, /"warmStatus" <> 'provisioning'/u);
+  assert.match(
+    beginQuery,
+    /NOT EXISTS \([\s\S]*"liveRun"\."status" IN \('queued', 'running'\)/u
+  );
+  assert.match(deferQuery, /"sandboxUpdatedAt" = clock_timestamp\(\)/u);
+  assert.match(deferQuery, /"sandboxLifecycle" = 'resizing'/u);
+  assert.match(finishQuery, /"sandboxLifecycle" = 'ready'/u);
+  assert.match(finishQuery, /"sandboxLifecycle" = 'resizing'/u);
+  assert.match(finishQuery, /"version" = \$/u);
+});
+
 test("durable decommissioning resumes with its current generation and provider ID", async () => {
   const decommissioning = agent({
     daytonaSandboxId: "sandbox-after-crash",
@@ -4376,28 +4498,33 @@ test("decommission rejects live provisioning and fences a stale provisioning tak
 
 test("a new operation is rejected only after lifecycle idempotency lookup", async () => {
   await Promise.all(
-    (["resetting", "decommissioning", "decommission_failed"] as const).map(
-      async (lifecycle) => {
-        const current = agent({ sandboxLifecycle: lifecycle });
-        const { statements, store } = scripted(
-          [{ id: current.id, sandboxLifecycle: lifecycle }],
-          []
-        );
-        const result = await store.startRun(principal, {
-          agentId: current.id,
-          authVersion: 1,
-          id: "00000000-0000-4000-8000-000000000099",
-          operationId: "00000000-0000-4000-8000-000000000098",
-          requestHash: "a".repeat(64),
-          task: "test",
-        });
-        assert.deepEqual(result, { kind: "sandbox_unavailable", lifecycle });
-        assert.deepEqual(
-          statements.map((statement) => statement.name),
-          ["lock-agent-for-run-start", "get-operation-run-before-admission"]
-        );
-      }
-    )
+    (
+      [
+        "resizing",
+        "resetting",
+        "decommissioning",
+        "decommission_failed",
+      ] as const
+    ).map(async (lifecycle) => {
+      const current = agent({ sandboxLifecycle: lifecycle });
+      const { statements, store } = scripted(
+        [{ id: current.id, sandboxLifecycle: lifecycle }],
+        []
+      );
+      const result = await store.startRun(principal, {
+        agentId: current.id,
+        authVersion: 1,
+        id: "00000000-0000-4000-8000-000000000099",
+        operationId: "00000000-0000-4000-8000-000000000098",
+        requestHash: "a".repeat(64),
+        task: "test",
+      });
+      assert.deepEqual(result, { kind: "sandbox_unavailable", lifecycle });
+      assert.deepEqual(
+        statements.map((statement) => statement.name),
+        ["lock-agent-for-run-start", "get-operation-run-before-admission"]
+      );
+    })
   );
 });
 

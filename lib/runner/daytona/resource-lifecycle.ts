@@ -6,6 +6,8 @@ import type {
   RunnerResourceDecommissionResult,
   RunnerResourcePrewarmOptions,
   RunnerResourcePrewarmResult,
+  RunnerResourceRepairOptions,
+  RunnerResourceRepairResult,
 } from "../resource-lifecycle";
 import {
   observeRunnerResourceOperation,
@@ -20,6 +22,10 @@ import {
 } from "./resource-inventory";
 import { reconcileDaytonaSandboxes } from "./resource-recovery";
 import {
+  type DaytonaSandboxRepairService,
+  repairDaytonaSandboxResourceFloors,
+} from "./resource-repair";
+import {
   type DaytonaSandboxConfiguration,
   type DaytonaSandboxLifecycleDependencies,
   type DaytonaSandboxService,
@@ -33,6 +39,9 @@ export type DaytonaPersistentResourceLifecycleDependencies = Readonly<{
   configuration: () => DaytonaSandboxConfiguration;
   daytona: (options?: RunnerResourcePrewarmOptions) => DaytonaSandboxService;
   inventoryDaytona: () => DaytonaSandboxInventoryService;
+  repairDaytona: (
+    options?: RunnerResourceRepairOptions
+  ) => DaytonaSandboxRepairService;
   lifecycle?: DaytonaSandboxLifecycleDependencies;
   observe?: RunnerResourceOperationObserver;
   operator: RunnerOperator;
@@ -164,6 +173,30 @@ export function daytonaPersistentResourceLifecycle(
               : result.deferred > 0
                 ? "deferred"
                 : "ready",
+      });
+      return result;
+    },
+    repair: async (options) => {
+      const result: RunnerResourceRepairResult =
+        await repairDaytonaSandboxResourceFloors({
+          configuration: dependencies.configuration(),
+          daytona: dependencies.repairDaytona(options),
+          deadline: options?.deadline,
+          operator: dependencies.operator,
+          store: dependencies.store,
+        });
+      observeRunnerResourceOperation(dependencies.observe, {
+        operation: "repair",
+        outcome:
+          result.kind === "unavailable"
+            ? "unavailable"
+            : result.failures > 0
+              ? "failed"
+              : result.deferred > 0
+                ? "deferred"
+                : result.repaired > 0
+                  ? "repaired"
+                  : "ready",
       });
       return result;
     },

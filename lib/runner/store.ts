@@ -28,6 +28,7 @@ import type {
   AppendRunnerEventInput,
   AuthorizeDaytonaPreparationInput,
   BeginDaytonaSandboxDecommissionInput,
+  BeginDaytonaSandboxResizeInput,
   BeginDaytonaSandboxWarmInput,
   ClaimExpiredDaytonaAttemptCleanupInput,
   ClaimTerminalDaytonaAttemptCleanupInput,
@@ -2049,6 +2050,9 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         if (agent.sandboxLifecycle === "decommissioning") {
           return { kind: "decommissioning", value: agent };
         }
+        if (agent.sandboxLifecycle === "resizing") {
+          return { kind: "busy" };
+        }
         const [liveRun] = await transaction.execute(
           statement(
             "find-live-run-for-daytona-decommission",
@@ -2106,6 +2110,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         }
         return { kind: "decommissioning", value: asAgent(updated) };
       }),
+
     beginDaytonaSandboxReset: (
       principal: RunnerPrincipal,
       input: DaytonaSandboxFence
@@ -2387,6 +2392,60 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           )
         );
         return current ? { kind: "stale_version" } : { kind: "not_found" };
+      }),
+
+    beginDaytonaSandboxResize: (
+      _operator: RunnerOperator,
+      input: BeginDaytonaSandboxResizeInput
+    ): Promise<
+      | { kind: "resizing"; value: RunnerAgentRecord }
+      | { kind: "not_found" }
+      | { kind: "stale_version" }
+    > =>
+      database.transaction(async (transaction) => {
+        const [current] = await transaction.execute(
+          statement(
+            "lock-agent-for-daytona-resize",
+            input,
+            sql`SELECT * FROM "RunnerAgent"
+              WHERE "id" = ${input.agentId}
+                AND "tenant" = ${input.tenant}
+              FOR UPDATE`
+          )
+        );
+        if (!current) {
+          return { kind: "not_found" };
+        }
+        const [updated] = await transaction.execute(
+          statement(
+            "begin-daytona-sandbox-resize",
+            input,
+            sql`UPDATE "RunnerAgent"
+              SET "sandboxLifecycle" = 'resizing',
+                  "sandboxUpdatedAt" = clock_timestamp(),
+                  "updatedAt" = clock_timestamp(),
+                  "version" = "version" + 1
+              WHERE "id" = ${input.agentId}
+                AND "tenant" = ${input.tenant}
+                AND "version" = ${input.expectedVersion}
+                AND "sandboxGeneration" = ${input.expectedGeneration}
+                AND "daytonaSandboxId" = ${input.sandboxId}
+                AND "sandboxLifecycle" = 'ready'
+                AND "status" = 'idle'
+                AND "warmStatus" <> 'provisioning'
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM "RunnerRun" AS "liveRun"
+                  WHERE "liveRun"."agentId" = ${input.agentId}
+                    AND "liveRun"."tenant" = ${input.tenant}
+                    AND "liveRun"."status" IN ('queued', 'running')
+                )
+              RETURNING *`
+          )
+        );
+        return updated
+          ? { kind: "resizing", value: asAgent(updated) }
+          : { kind: "stale_version" };
       }),
 
     beginDaytonaSandboxWarm: (
@@ -2750,6 +2809,48 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         return agent
           ? { agent: asAgent(agent), kind: "created" as const }
           : { kind: "conflict" as const };
+      }),
+
+    deferDaytonaSandboxResize: (
+      _operator: RunnerOperator,
+      input: BeginDaytonaSandboxResizeInput
+    ): Promise<
+      | { kind: "updated"; value: RunnerAgentRecord }
+      | { kind: "not_found" }
+      | { kind: "stale_version" }
+    > =>
+      database.transaction(async (transaction) => {
+        const [updated] = await transaction.execute(
+          statement(
+            "defer-daytona-sandbox-resize",
+            input,
+            sql`UPDATE "RunnerAgent"
+              SET "sandboxUpdatedAt" = clock_timestamp(),
+                  "updatedAt" = clock_timestamp(),
+                  "version" = "version" + 1
+              WHERE "id" = ${input.agentId}
+                AND "tenant" = ${input.tenant}
+                AND "version" = ${input.expectedVersion}
+                AND "sandboxGeneration" = ${input.expectedGeneration}
+                AND "daytonaSandboxId" = ${input.sandboxId}
+                AND "sandboxLifecycle" = 'resizing'
+              RETURNING *`
+          )
+        );
+        if (updated) {
+          return { kind: "updated", value: asAgent(updated) };
+        }
+        const [current] = await transaction.execute(
+          statement(
+            "find-agent-after-deferred-daytona-resize",
+            { agentId: input.agentId, tenant: input.tenant },
+            sql`SELECT "id" FROM "RunnerAgent"
+              WHERE "id" = ${input.agentId}
+                AND "tenant" = ${input.tenant}
+              LIMIT 1`
+          )
+        );
+        return current ? { kind: "stale_version" } : { kind: "not_found" };
       }),
 
     deleteAgent: (
@@ -3313,6 +3414,49 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             { agentId: input.agentId },
             sql`SELECT "id" FROM "RunnerAgent"
               WHERE "id" = ${input.agentId}
+              LIMIT 1`
+          )
+        );
+        return current ? { kind: "stale_version" } : { kind: "not_found" };
+      }),
+
+    finishDaytonaSandboxResize: (
+      _operator: RunnerOperator,
+      input: BeginDaytonaSandboxResizeInput
+    ): Promise<
+      | { kind: "updated"; value: RunnerAgentRecord }
+      | { kind: "not_found" }
+      | { kind: "stale_version" }
+    > =>
+      database.transaction(async (transaction) => {
+        const [updated] = await transaction.execute(
+          statement(
+            "finish-daytona-sandbox-resize",
+            input,
+            sql`UPDATE "RunnerAgent"
+              SET "sandboxLifecycle" = 'ready',
+                  "sandboxUpdatedAt" = clock_timestamp(),
+                  "updatedAt" = clock_timestamp(),
+                  "version" = "version" + 1
+              WHERE "id" = ${input.agentId}
+                AND "tenant" = ${input.tenant}
+                AND "version" = ${input.expectedVersion}
+                AND "sandboxGeneration" = ${input.expectedGeneration}
+                AND "daytonaSandboxId" = ${input.sandboxId}
+                AND "sandboxLifecycle" = 'resizing'
+              RETURNING *`
+          )
+        );
+        if (updated) {
+          return { kind: "updated", value: asAgent(updated) };
+        }
+        const [current] = await transaction.execute(
+          statement(
+            "find-agent-after-daytona-resize",
+            { agentId: input.agentId, tenant: input.tenant },
+            sql`SELECT "id" FROM "RunnerAgent"
+              WHERE "id" = ${input.agentId}
+                AND "tenant" = ${input.tenant}
               LIMIT 1`
           )
         );
@@ -4569,6 +4713,69 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         );
         return rows.map(asAgent);
       }),
+
+    scanDaytonaSandboxRepairCandidates: (
+      _operator: RunnerOperator,
+      requestedLimit: number
+    ) => {
+      const limit = runnerResourceInventoryLimit(requestedLimit);
+      return database.transaction(async (transaction) => {
+        const rows = await transaction.execute(
+          statement(
+            "scan-daytona-sandbox-repair-candidates",
+            { limit },
+            sql`WITH "mapped" AS (
+                SELECT *,
+                  count(*) OVER () AS "appOwnedMappings",
+                  count(*) OVER (
+                    PARTITION BY "daytonaSandboxId"
+                  ) AS "providerMappingCount"
+                FROM "RunnerAgent"
+                WHERE "daytonaSandboxId" IS NOT NULL
+              )
+              SELECT *
+              FROM "mapped"
+              WHERE "sandboxLifecycle" IN ('ready', 'resizing')
+                AND "status" = 'idle'
+                AND "warmStatus" <> 'provisioning'
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM "RunnerRun" AS "liveRun"
+                  WHERE "liveRun"."agentId" = "mapped"."id"
+                    AND "liveRun"."tenant" = "mapped"."tenant"
+                    AND "liveRun"."status" IN ('queued', 'running')
+                )
+              ORDER BY
+                CASE WHEN "providerMappingCount" = 1 THEN 0 ELSE 1 END,
+                CASE WHEN "sandboxLifecycle" = 'resizing' THEN 0 ELSE 1 END,
+                "sandboxUpdatedAt" ASC,
+                "id" ASC
+              LIMIT ${limit}`
+          )
+        );
+        return rows.map((row) => {
+          const appOwnedMappings = Number(column(row, "appOwnedMappings"));
+          const providerMappingCount = Number(
+            column(row, "providerMappingCount")
+          );
+          if (
+            !Number.isSafeInteger(appOwnedMappings) ||
+            appOwnedMappings < 1 ||
+            !Number.isSafeInteger(providerMappingCount) ||
+            providerMappingCount < 1
+          ) {
+            throw new Error(
+              "Runner repair candidate query returned invalid counts."
+            );
+          }
+          return {
+            appOwnedMappings,
+            mapping: asAgent(row),
+            providerMappingCount,
+          };
+        });
+      });
+    },
 
     scanDaytonaWarmRecoveries: (
       _operator: RunnerOperator,

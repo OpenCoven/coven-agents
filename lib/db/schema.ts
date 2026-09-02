@@ -627,6 +627,7 @@ export const runnerAgent = pgTable(
         "provisioning",
         "provisioning_ambiguous",
         "ready",
+        "resizing",
         "resetting",
         "decommissioning",
         "decommission_failed",
@@ -669,7 +670,7 @@ export const runnerAgent = pgTable(
     index("RunnerAgent_sandbox_recovery_idx")
       .on(table.sandboxLifecycle, table.sandboxUpdatedAt)
       .where(
-        sql`${table.sandboxLifecycle} in ('provisioning', 'provisioning_ambiguous', 'resetting', 'decommissioning')`
+        sql`${table.sandboxLifecycle} in ('provisioning', 'provisioning_ambiguous', 'resizing', 'resetting', 'decommissioning')`
       ),
     index("RunnerAgent_warm_recovery_idx")
       .on(table.warmUpdatedAt, table.id)
@@ -690,7 +691,7 @@ export const runnerAgent = pgTable(
     ),
     check(
       "RunnerAgent_sandboxLifecycle_valid",
-      sql`${table.sandboxLifecycle} in ('unprovisioned', 'provisioning', 'provisioning_ambiguous', 'ready', 'resetting', 'decommissioning', 'decommission_failed')`
+      sql`${table.sandboxLifecycle} in ('unprovisioned', 'provisioning', 'provisioning_ambiguous', 'ready', 'resizing', 'resetting', 'decommissioning', 'decommission_failed')`
     ),
     check(
       "RunnerAgent_sandboxTrust_valid",

@@ -41,6 +41,7 @@ import { RunnerServiceError } from "./errors";
 import type {
   RunnerDiagnosticResult,
   RunnerInventoryResourcesResult,
+  RunnerRepairResourcesResult,
   RunnerService,
 } from "./service";
 import { createRunEventStream } from "./sse";
@@ -122,6 +123,23 @@ const resourceInventoryResponseSchema = z
   })
   .strict();
 const AGENT_CREATE_RETENTION_MS = 24 * 60 * 60_000;
+const resourceRepairResponseSchema = z
+  .object({
+    appOwnedMappings: z.number().int().nonnegative(),
+    batchCapped: z.boolean(),
+    databaseCapped: z.boolean(),
+    deferred: z.number().int().nonnegative(),
+    eligible: z.number().int().nonnegative(),
+    examined: z.number().int().nonnegative(),
+    failures: z.number().int().nonnegative(),
+    providerCapped: z.boolean(),
+    refused: z.number().int().nonnegative(),
+    repaired: z.number().int().nonnegative(),
+    status: z.enum(["bounded", "complete"]),
+    unchanged: z.number().int().nonnegative(),
+    version: z.literal(1),
+  })
+  .strict();
 
 type RunnerHttpLogger = Readonly<{
   error: (
@@ -166,6 +184,7 @@ export type RunnerHttpHandlers = Readonly<{
   inventoryResources: (request: Request) => Promise<Response>;
   prewarmTenant: (request: Request) => Promise<Response>;
   reconcile: (request: Request) => Promise<Response>;
+  repairResources: (request: Request) => Promise<Response>;
   startAgentRun: (request: Request, agentId: string) => Promise<Response>;
   stopRun: (request: Request, runId: string) => Promise<Response>;
   updateAgent: (request: Request, agentId: string) => Promise<Response>;
@@ -497,6 +516,13 @@ function resourceInventoryCounts(
 ) {
   const { kind: _kind, ...counts } = result;
   return resourceInventoryResponseSchema.parse(counts);
+}
+
+function resourceRepairCounts(
+  result: Exclude<RunnerRepairResourcesResult, { kind: "unavailable" }>
+) {
+  const { kind: _kind, ...counts } = result;
+  return resourceRepairResponseSchema.parse(counts);
 }
 
 function serviceFailure(
@@ -967,6 +993,34 @@ export function createRunnerHttpHandlers(
         return Response.json(
           reconciliationCounts(await service.reconcileAndDispatch())
         );
+      }),
+
+    repairResources: (request) =>
+      safely(dependencies, async () => {
+        const rejected = await authorizeSecret(
+          request,
+          "runner_reconcile",
+          dependencies
+        );
+        if (rejected) {
+          return rejected;
+        }
+        const body = await emptyBody(request, "runner_reconcile", dependencies);
+        if (body.kind !== "ok") {
+          return body.response;
+        }
+        const service = await dependencies.createOperatorService();
+        const result = await service.repairResources({
+          deadline: Date.now() + 240_000,
+        });
+        if (result.kind === "unavailable") {
+          return result.source === "provider"
+            ? providerUnavailable(dependencies)
+            : runnerUnavailable(dependencies);
+        }
+        return Response.json(resourceRepairCounts(result), {
+          headers: { "cache-control": "no-store" },
+        });
       }),
 
     startAgentRun: (request, agentId) =>
