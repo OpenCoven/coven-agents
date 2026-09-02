@@ -11,10 +11,10 @@ function read(path: string): string {
 test("the current-state snapshot covers merged product and planning surfaces", () => {
   const currentState = read("docs/roadmap/current-state.md");
 
-  assert.match(currentState, /Snapshot date: 2026-09-01/u);
+  assert.match(currentState, /Snapshot date: 2026-09-02/u);
   assert.match(
     currentState,
-    /Application baseline: `a2c11ff408caf8f97af8dbbe37903a13e928f255`/u
+    /Application baseline: `dbe5ebbf70c5b943561612512fc03e5ae4542b3b`/u
   );
 
   for (const evidence of [
@@ -34,6 +34,8 @@ test("the current-state snapshot covers merged product and planning surfaces", (
     "lib/teams/",
     "Deployment posture",
     "docs/operations/vercel-git-deployment-disablement.md",
+    "Manual resource repair",
+    "lib/runner/daytona/resource-repair.ts",
     "Planning documents",
     "scripts/planning-docs-policy.ts",
   ]) {
@@ -52,10 +54,10 @@ test("the current-state snapshot covers merged product and planning surfaces", (
 test("the verification matrix records the newly verified repository boundaries", () => {
   const matrix = read("docs/roadmap/verification-matrix.md");
 
-  assert.match(matrix, /as of 2026-09-01/u);
+  assert.match(matrix, /as of 2026-09-02/u);
   assert.match(
     matrix,
-    /application baseline `a2c11ff408caf8f97af8dbbe37903a13e928f255`/u
+    /application baseline `dbe5ebbf70c5b943561612512fc03e5ae4542b3b`/u
   );
   assert.match(
     matrix,
@@ -75,6 +77,128 @@ test("the verification matrix records the newly verified repository boundaries",
   ]) {
     assert.match(matrix, new RegExp(`\\| ${capability} \\| \`Verified\``, "u"));
   }
+  assert.match(matrix, /\| Daytona resource disposition \| `Blocked` \|/u);
+});
+
+test("the resource repair receipt records the provider blocker without identifiers", () => {
+  const currentState = read("docs/roadmap/current-state.md");
+  const matrix = read("docs/roadmap/verification-matrix.md");
+  const attestation = read("docs/operations/daytona-cutover-attestation.md");
+  const receipt = JSON.parse(
+    read("docs/operations/p0-daytona-resource-repair-receipt-2026-09-02.json")
+  );
+
+  assert.equal(receipt.schemaVersion, 1);
+  assert.equal(receipt.capturedAt, "2026-09-02");
+  assert.deepEqual(receipt.repairImplementation, {
+    deploymentId: "dpl_EgN8t3QvMk4JEcGrprRXponHLPQe",
+    mergeCommit: "80d787e2d2288141cd5fbcd5b9417edda74888f9",
+    pullRequest: 198,
+    requiredRoute: "/api/internal/runner-resource-repair",
+    sourceTree: "aafe5ceda5156fed8fa57d33175a57d372eca5fb",
+  });
+  assert.deepEqual(receipt.rejectionHandling, {
+    deploymentId: "dpl_EERKkjtfpkT5SPRD7uxRKPutRLoy",
+    mergeCommit: "dbe5ebbf70c5b943561612512fc03e5ae4542b3b",
+    pullRequest: 200,
+    sourceTree: "8c35b9f03410cbbff8370e99ab19ba07b544ce47",
+  });
+  assert.deepEqual(
+    receipt.repairResults.map(
+      ({
+        deferred,
+        eligible,
+        examined,
+        failures,
+        phase,
+        repaired,
+      }: {
+        deferred: number;
+        eligible: number;
+        examined: number;
+        failures: number;
+        phase: string;
+        repaired: number;
+      }) => ({
+        deferred,
+        eligible,
+        examined,
+        failures,
+        phase,
+        repaired,
+      })
+    ),
+    [
+      {
+        deferred: 3,
+        eligible: 3,
+        examined: 3,
+        failures: 0,
+        phase: "initial",
+        repaired: 0,
+      },
+      {
+        deferred: 0,
+        eligible: 3,
+        examined: 3,
+        failures: 3,
+        phase: "definite-rejection-recovery",
+        repaired: 0,
+      },
+    ]
+  );
+  assert.equal(receipt.providerDiagnostic.exactSandboxHydrationSucceeded, true);
+  assert.equal(receipt.providerDiagnostic.resizeHttpStatus, 404);
+  assert.equal(receipt.providerDiagnostic.includedProviderMessage, false);
+  assert.equal(receipt.postRepairInventory.length, 2);
+  assert.deepEqual(
+    {
+      ...receipt.postRepairInventory[0],
+      sequence: 2,
+    },
+    receipt.postRepairInventory[1]
+  );
+  for (const inventory of receipt.postRepairInventory) {
+    assert.equal(inventory.appOwnedMappings, 4);
+    assert.equal(inventory.examined, 4);
+    assert.equal(inventory.ambiguous, 4);
+    assert.equal(inventory.unowned, 0);
+    assert.equal(inventory.states.stopped, 4);
+    assert.deepEqual(inventory.configurationDrift, [
+      { count: 4, field: "cpu", relation: "below" },
+      { count: 4, field: "memory", relation: "below" },
+      { count: 4, field: "disk", relation: "below" },
+    ]);
+  }
+  assert.deepEqual(receipt.disposition, {
+    durableResizeFencesRemaining: 0,
+    providerBlocker: "resize_endpoint_not_found",
+    providerResizeSupportedForObservedResources: false,
+    resourceDispositionCertified: false,
+    resourcesAdopted: 0,
+    resourcesDeleted: 0,
+    resourcesRecreated: 0,
+  });
+  assert.equal(
+    receipt.productionAlias.deploymentId,
+    "dpl_EERKkjtfpkT5SPRD7uxRKPutRLoy"
+  );
+  assert.equal(receipt.containsCredentialMaterial, false);
+  assert.equal(receipt.containsProviderIdentifiers, false);
+  assert.equal(receipt.containsTenantIdentifiers, false);
+
+  for (const document of [currentState, matrix, attestation]) {
+    assert.match(
+      document,
+      /p0-daytona-resource-repair-receipt-2026-09-02\.json/u
+    );
+    assert.match(
+      document,
+      /HTTP 404|resize_endpoint_not_found|resize operation/u
+    );
+  }
+  assert.match(attestation, /no resource was deleted, recreated, or adopted/iu);
+  assert.match(attestation, /Resource disposition certified:\s+`no`/u);
 });
 
 test("the cutover attestation matches the exact preview receipt", () => {

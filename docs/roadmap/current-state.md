@@ -1,7 +1,7 @@
 # Current Repository State
 
-- Snapshot date: 2026-09-01
-- Application baseline: `a2c11ff408caf8f97af8dbbe37903a13e928f255`
+- Snapshot date: 2026-09-02
+- Application baseline: `dbe5ebbf70c5b943561612512fc03e5ae4542b3b`
 - Evidence class: verified repository and local contract evidence, retained
   infrastructure cutover and Production-config operator evidence, and a public
   exact-build guest replay
@@ -9,7 +9,9 @@
 This snapshot includes merged P0 repository certification through PR #183, the
 replay-timeline correction in PR #184, the public exact-build guest replay
 recorded by PR #185, unreachable UI removal in PR #186, retained exact-preview
-and hermetic receipts in PR #187, and the subscriber launch runbook in PR #188.
+and hermetic receipts in PR #187, the subscriber launch runbook in PR #188,
+the fenced Daytona resource-repair path in PR #198, and definitive provider
+rejection handling in PR #200.
 It distinguishes those completed boundaries and the successful
 Production-config operator checks from pending persistent Daytona lifecycle,
 subscriber certification, observation-window, and full product release
@@ -33,7 +35,7 @@ from repository or Project evidence.
 | Credential custody | Tenant harness credentials are encrypted, AAD-bound, acquired as immutable one-use snapshots, staged through one fixed per-call environment value into a mode-`0600` attempt path, removed before harness execution, and compensated or retained for fenced recovery on failed launch. Daytona Secrets and operator credentials are not used for tenant runs. | `lib/credentials/`, `lib/runner/daytona/process.ts`, `lib/runner/runtime.ts` |
 | Run reliability | Starts are operation-idempotent, SSE resumes from numeric cursors, and reconciliation uses database-time leases and exact fences. | `lib/runner/admission.ts`, `lib/runner/sse.ts`, `lib/runner/attempt-reconcile.ts`, `lib/runner/daytona/resource-recovery.ts` |
 | Guest replay | A committed bounded, provenance-marked replay renders without API, external-network, database-write, credential, billing, or provider effects. Anonymous route manipulation and tampered session material cannot promote fixture identifiers into product authority. | `lib/demo/`, `components/demo/`, `tests/e2e/demo.test.ts`, `tests/e2e/demo-adversarial.test.ts` |
-| Security operations | Separate credentials protect diagnostics, scheduled reconciliation, and manual reconciliation. A read-only internal resource inventory uses reconciliation authorization, scans only the app label and bounded durable mappings, returns versioned aggregate categories with exclusive ambiguity reasons and fixed configuration-drift field/direction counts, and never deletes or adopts provider-only observations. | `lib/runner/auth.ts`, `lib/runner/http.ts`, `lib/runner/daytona/resource-inventory.ts`, `docs/security/incident-response.md` |
+| Security operations | Separate credentials protect diagnostics, scheduled reconciliation, and manual reconciliation. A read-only internal resource inventory uses reconciliation authorization, scans only the app label and bounded durable mappings, returns versioned aggregate categories with exclusive ambiguity reasons and fixed configuration-drift field/direction counts, and never deletes or adopts provider-only observations. Manual resource repair uses exact stored provider IDs, durable lifecycle fences, stopped-only and below-only eligibility, bounded concurrency, post-mutation verification, and aggregate-only responses. | `lib/runner/auth.ts`, `lib/runner/http.ts`, `lib/runner/daytona/resource-inventory.ts`, `lib/runner/daytona/resource-repair.ts`, `docs/security/incident-response.md` |
 | Deployment posture | Git-triggered Vercel deployments are denied by repository configuration; reintroduction requires a separately reviewed runbook. | `vercel.json`, `docs/operations/vercel-git-deployment-disablement.md`, `scripts/deployment-documentation-policy.ts` |
 | Planning documents | A canonical registry classifies current, proposed, historical, and superseded planning artifacts, with a local coverage and supersession check. | `docs/roadmap/README.md`, `scripts/planning-docs-policy.ts` |
 
@@ -75,7 +77,12 @@ from repository or Project evidence.
 - [PR #187](https://github.com/OpenCoven/coven-agents/pull/187) retained the
   exact-preview and 11-case hermetic PostgreSQL receipts.
 - [PR #188](https://github.com/OpenCoven/coven-agents/pull/188) added the
-  subscriber launch runbook and is the current repository baseline.
+  subscriber launch runbook.
+- [PR #198](https://github.com/OpenCoven/coven-agents/pull/198) added exact,
+  durably fenced, stopped-only Daytona resource repair.
+- [PR #200](https://github.com/OpenCoven/coven-agents/pull/200) made
+  definitive provider resize rejections release their exact fences while
+  preserving fail-closed handling for ambiguous outcomes.
 
 The application baseline also includes the merged console, billing,
 deployment-policy, branding, runner-reliability, coordinated-team, dependency,
@@ -85,6 +92,8 @@ the P0 repository certification through
 [cutover attestation](../operations/daytona-cutover-attestation.md) records
 infrastructure production evidence, exact application-preview results, and the
 [Production-config operator receipt](../operations/p0-production-config-receipt-2026-09-01.json)
+and the
+[resource-repair receipt](../operations/p0-daytona-resource-repair-receipt-2026-09-02.json)
 while preserving the remaining product certification and approval gates.
 
 ## Known gaps
@@ -93,8 +102,12 @@ while preserving the remaining product certification and approval gates.
   stop, delete, and cross-tenant production-equivalent artifact exists.
 - Production-config diagnostics, Stripe reconciliation, runner reconciliation,
   closed-beta refusal, and operator credential separation succeeded. Four
-  stopped Daytona resources remain ambiguous and cannot be adopted or deleted
-  without exact durable mapping or control-plane disposition evidence.
+  resources have unique durable mappings and remain stopped with only
+  below-policy CPU, memory, and disk drift. Daytona returned HTTP 404 from the
+  documented resize operation after exact hydration succeeded; all repair
+  fences were released, and no resource was deleted, recreated, or adopted.
+  Non-destructive provider repair or an explicitly approved workspace-
+  preservation migration remains required.
 - Complete outbound policy evidence remains open.
 - Deployed evidence redaction, provider restart recovery, retention, export,
   and deletion require release-equivalent certification; local cross-surface
