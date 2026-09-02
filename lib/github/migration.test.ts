@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import test from "node:test";
 
 const migrations = new URL("../db/migrations/", import.meta.url);
@@ -10,10 +10,11 @@ const GATEWAY_SNAPSHOT = "meta/0032_snapshot.json";
 const PROJECT_AUTHORITY_MIGRATION = "0035_spicy_hammerhead.sql";
 const PROJECT_AUTHORITY_TRIGGER_MIGRATION =
   "0036_project_authority_trigger.sql";
+// PostgreSQL rejects regex repetition counts above 255 (DUPMAX in regguts.h).
+const POSTGRES_REGEX_REPETITION_LIMIT = 255;
 
 test("current main and the GitHub gateway form one migration lineage", async () => {
-  const migrationNames = (await import("node:fs/promises")).readdir(migrations);
-  const names = await migrationNames;
+  const names = await readdir(migrations);
   for (let index = 25; index <= 36; index += 1) {
     const prefix = `${String(index).padStart(4, "0")}_`;
     assert.equal(
@@ -160,6 +161,51 @@ test("0035 persists bounded Project proof bindings and exact operation Project i
     /NEW\."projectAuthorityBound" = false[\s\S]*RAISE EXCEPTION/u
   );
   assert.match(migration, /project\.item\.field\.update/u);
+});
+
+test("0035 bounds Project ids without exceeding the Postgres regex repetition limit", async () => {
+  const migration = await readFile(
+    new URL(PROJECT_AUTHORITY_MIGRATION, migrations),
+    "utf8"
+  );
+
+  assert.match(
+    migration,
+    /like_regex "\^\[A-Za-z0-9_=-\]\{1,255\}\[A-Za-z0-9_=-\]\?\$"/u
+  );
+  assert.match(
+    migration,
+    /char_length\("RunnerGitHubOperation"\."projectId"\) between 1 and 256 and "RunnerGitHubOperation"\."projectId" ~ '\^\[A-Za-z0-9_=-\]\+\$'/u
+  );
+  assert.doesNotMatch(migration, /\{1,256\}/u);
+});
+
+test("no migration or schema regex uses a repetition bound Postgres rejects", async () => {
+  const names = await readdir(migrations);
+  const sources = await Promise.all([
+    ...names
+      .filter((name) => name.endsWith(".sql"))
+      .map(async (name) => ({
+        name,
+        text: await readFile(new URL(name, migrations), "utf8"),
+      })),
+    {
+      name: "schema.ts",
+      text: await readFile(new URL("../db/schema.ts", import.meta.url), "utf8"),
+    },
+  ]);
+  for (const { name, text } of sources) {
+    for (const match of text.matchAll(/\{(\d+)(?:,(\d+))?\}/gu)) {
+      for (const bound of match.slice(1)) {
+        if (bound !== undefined) {
+          assert.ok(
+            Number(bound) <= POSTGRES_REGEX_REPETITION_LIMIT,
+            `${name} uses regex bound ${match[0]} above Postgres limit ${POSTGRES_REGEX_REPETITION_LIMIT}`
+          );
+        }
+      }
+    }
+  }
 });
 
 test("0036 reconstructs exact runner policy authority from the applied 0035 shape", async () => {
