@@ -1,6 +1,7 @@
 import "server-only";
 
 import {
+  type EvidenceRedactionInput,
   sanitizeEvidencePath,
   sanitizeEvidenceText,
 } from "@opencoven/agent-contracts";
@@ -26,7 +27,6 @@ import {
   toShellCommand,
 } from "@opencoven/harness";
 import { ZodError } from "zod";
-import { decodeRunnerAttemptRedactionSecrets } from "./redaction-secrets";
 
 export type {
   HarnessId,
@@ -125,16 +125,13 @@ export function harnessesFromProbe(
   );
 }
 
-function redact(value: string, credential: string | null): string {
-  return sanitizeEvidenceText(
-    value,
-    credential ? decodeRunnerAttemptRedactionSecrets(credential) : []
-  );
+function redact(value: string, credential: EvidenceRedactionInput): string {
+  return sanitizeEvidenceText(value, credential);
 }
 
 function canonicalTimestamp(
   value: string,
-  credential: string | null,
+  credential: EvidenceRedactionInput,
   fallbackAt: string
 ): string {
   const canonical = (candidate: string): string | null => {
@@ -166,7 +163,7 @@ function canonicalTimestamp(
 export function sanitizeHarnessEvent(
   fallbackHarness: HarnessId,
   event: RunEvent,
-  credential: string | null,
+  credential: EvidenceRedactionInput,
   fallbackAt: string
 ): RunEvent {
   const at = canonicalTimestamp(event.at, credential, fallbackAt);
@@ -262,7 +259,7 @@ export function parseHarnessLog(
   stdout: string,
   cursor: number,
   terminal: boolean,
-  credential: string | null,
+  credential: EvidenceRedactionInput,
   fallbackAt: string
 ): HarnessLogParse {
   const safeCursor =

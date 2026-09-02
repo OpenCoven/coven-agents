@@ -2,16 +2,11 @@ import type {
   UIMessage,
   UIMessagePart,
 } from 'ai';
-import { type ClassValue, clsx } from 'clsx';
 import { formatISO } from 'date-fns';
-import { twMerge } from 'tailwind-merge';
 import type { DBMessage, Document } from '@/lib/db/schema';
+export { cn } from '@/lib/cn';
 import { ChatbotError, type ErrorCode } from './errors';
 import type { ChatMessage, ChatTools, CustomUIDataTypes } from './types';
-
-export function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs));
-}
 
 export const fetcher = async (url: string) => {
   const response = await fetch(url);

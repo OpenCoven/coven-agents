@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { sanitizeEvidencePath, sanitizeEvidenceText } from "./index";
+import {
+  exactEvidenceRedactions,
+  MAX_EXACT_EVIDENCE_REDACTION_LENGTH,
+  MAX_EXACT_EVIDENCE_REDACTION_VALUES,
+  sanitizeEvidencePath,
+  sanitizeEvidenceText,
+} from "./index";
 
 test("redacts authorization, credential assignments, and provider keys while preserving useful evidence", () => {
   const input = [
@@ -265,4 +271,40 @@ test("preserves safe URLs containing email addresses", () => {
   const url = "https://example.invalid?email=user@example.com";
 
   assert.equal(sanitizeEvidenceText(url), url);
+});
+
+test("bounds exact evidence redactions while preserving existing string call sites", () => {
+  const first = "tenant-credential-exact-redaction";
+  const retained = Array.from(
+    { length: MAX_EXACT_EVIDENCE_REDACTION_VALUES - 1 },
+    (_, index) => `provider-private-correlation-${index}`
+  );
+  const excludedByCount = "excluded-after-redaction-limit";
+  const excludedByLength = "x".repeat(MAX_EXACT_EVIDENCE_REDACTION_LENGTH + 1);
+  const redactions = exactEvidenceRedactions(
+    first,
+    first,
+    "",
+    " \t",
+    excludedByLength,
+    ...retained,
+    excludedByCount
+  );
+
+  assert.deepEqual(redactions.values, [first, ...retained]);
+  assert.equal(redactions.values.length, MAX_EXACT_EVIDENCE_REDACTION_VALUES);
+  const input = [first, ...retained, excludedByCount, excludedByLength].join(
+    "|"
+  );
+  const sanitized = sanitizeEvidenceText(input, redactions);
+
+  for (const value of [first, ...retained]) {
+    assert.equal(sanitized.includes(value), false);
+  }
+  assert.equal(sanitized.includes(excludedByCount), true);
+  assert.equal(sanitized.includes(excludedByLength), true);
+  assert.equal(
+    sanitizeEvidenceText(`credential=${first}`, first),
+    "credential=[REDACTED]"
+  );
 });

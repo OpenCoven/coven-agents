@@ -1,13 +1,17 @@
 # Current Repository State
 
-- Snapshot date: 2026-08-31
-- Application baseline: `f0ffb3124ab6a39d776bd9f7b5e77fd652b4c27e`
-- Evidence class: verified repository and local contract evidence plus retained
-  infrastructure cutover evidence
+- Snapshot date: 2026-09-01
+- Application baseline: `4bf89dc98667efa1c46b5131e10d4b14bf5f86c3`
+- Evidence class: verified repository and local contract evidence, retained
+  infrastructure cutover evidence, and a public exact-build guest replay
 
-This snapshot distinguishes the completed infrastructure cutover from pending
-full product release certification. Private planning reconciliation remains
-pending and is not inferred from repository or Project evidence.
+This snapshot includes merged P0 repository certification through PR #183, the
+replay-timeline correction in PR #184, the public exact-build guest replay
+recorded by PR #185, and unreachable UI removal in PR #186. It distinguishes
+those completed boundaries from pending deployed Daytona lifecycle,
+observation-window, and full product release approval. Private planning
+reconciliation remains pending and is not inferred from repository or Project
+evidence.
 
 ## Implemented surfaces
 
@@ -21,12 +25,12 @@ pending and is not inferred from repository or Project evidence.
 | Subscription surfaces | Account and console settings render the authoritative run allowance, preserve checkout confirmation ownership across reloads and identity transitions, refresh delayed server authority within bounded incidents, and fail closed at the paid-through boundary. | `components/billing/subscription-card.tsx`, `hooks/use-subscription-authority-refresh.ts`, `components/account/account-settings.tsx`, `components/console/settings.tsx` |
 | Credential authorization | Copilot device authorization is bound to its initiating subscriber and canonical application path. Polling claims owner-scoped idempotency before provider exchange, then atomically verifies current authority, stores the encrypted credential, and completes only bounded replay evidence. | `lib/credentials/device-flow-binding.ts`, `lib/credentials/device-poll.ts`, `lib/credentials/device-poll-commit.ts`, `lib/application-path.ts` |
 | Coordinated teams | Authenticated tenants can manage bounded skill and team definitions and start durable team runs. Immutable authority, agent, skill, and child-run snapshots fence execution; handoffs are UTF-8 byte-bounded and sanitized; workspace-only Copilot steps are orchestrated durably while GitHub-capable steps fail closed until brokered. | `packages/agent-contracts/src/index.ts`, `lib/teams/`, `app/api/teams/`, `app/api/team-runs/` |
-| Daytona execution | Daytona is the sole execution provider. Each agent owns a persistent tenant-scoped sandbox; attempts use short-lived process sessions. | `lib/runner/daytona/`, `lib/runner/service.ts` |
+| Hosted execution boundary | Daytona is the sole production execution provider. Each agent owns a persistent tenant-scoped sandbox with explicit bounded CPU, memory, disk, auto-stop, and auto-archive policy; TTL and auto-delete are disabled so fenced recovery and decommission remain deletion authority. Attempts use short-lived process sessions. Dispatch, per-attempt reconciliation, and persistent-resource lifecycle pass through server-only provider-neutral contracts; hermetic certification uses the same resource lifecycle contract without a hosted provider resource. | `lib/runner/executor.ts`, `lib/runner/attempt-reconcile.ts`, `lib/runner/resource-lifecycle.ts`, `lib/runner/daytona/` |
 | Durable ownership | PostgreSQL stores agent, run, event, admission, dispatch, attempt, cancellation, and reconciliation state. | `lib/runner/store.ts`, `lib/db/schema.ts` |
-| Credential custody | Tenant harness credentials are encrypted, AAD-bound, acquired server-side, and compensated on failed launch. | `lib/credentials/`, `lib/runner/runtime.ts` |
-| Run reliability | Starts are operation-idempotent, SSE resumes from numeric cursors, and reconciliation uses database-time leases and exact fences. | `lib/runner/admission.ts`, `lib/runner/sse.ts`, `lib/runner/reconcile.ts` |
-| Guest replay | A committed sanitized replay can render without starting an agent, creating a sandbox, or using subscriber resources. | `lib/demo/`, `components/demo/` |
-| Security operations | Separate credentials protect diagnostics, scheduled reconciliation, and manual reconciliation. | `lib/runner/auth.ts`, `docs/security/incident-response.md` |
+| Credential custody | Tenant harness credentials are encrypted, AAD-bound, acquired as immutable one-use snapshots, staged through one fixed per-call environment value into a mode-`0600` attempt path, removed before harness execution, and compensated or retained for fenced recovery on failed launch. Daytona Secrets and operator credentials are not used for tenant runs. | `lib/credentials/`, `lib/runner/daytona/process.ts`, `lib/runner/runtime.ts` |
+| Run reliability | Starts are operation-idempotent, SSE resumes from numeric cursors, and reconciliation uses database-time leases and exact fences. | `lib/runner/admission.ts`, `lib/runner/sse.ts`, `lib/runner/attempt-reconcile.ts`, `lib/runner/daytona/resource-recovery.ts` |
+| Guest replay | A committed bounded, provenance-marked replay renders without API, external-network, database-write, credential, billing, or provider effects. Anonymous route manipulation and tampered session material cannot promote fixture identifiers into product authority. | `lib/demo/`, `components/demo/`, `tests/e2e/demo.test.ts`, `tests/e2e/demo-adversarial.test.ts` |
+| Security operations | Separate credentials protect diagnostics, scheduled reconciliation, and manual reconciliation. A read-only internal resource inventory uses reconciliation authorization, scans only the app label and bounded durable mappings, returns versioned aggregate categories, and never deletes or adopts provider-only observations. | `lib/runner/auth.ts`, `lib/runner/http.ts`, `lib/runner/daytona/resource-inventory.ts`, `docs/security/incident-response.md` |
 | Deployment posture | Git-triggered Vercel deployments are denied by repository configuration; reintroduction requires a separately reviewed runbook. | `vercel.json`, `docs/operations/vercel-git-deployment-disablement.md`, `scripts/deployment-documentation-policy.ts` |
 | Planning documents | A canonical registry classifies current, proposed, historical, and superseded planning artifacts, with a local coverage and supersession check. | `docs/roadmap/README.md`, `scripts/planning-docs-policy.ts` |
 
@@ -56,22 +60,34 @@ pending and is not inferred from repository or Project evidence.
   [PR #180](https://github.com/OpenCoven/coven-agents/pull/180) added and
   integrated shared subscription-authority invalidation, strict expiry, and
   authority-scoped credential lifecycle controls.
+- [PR #183](https://github.com/OpenCoven/coven-agents/pull/183) merged the P0
+  provider-neutral execution, billing, entitlement, credential, replay, and
+  hermetic certification gates as `52fe9f8`.
+- [PR #184](https://github.com/OpenCoven/coven-agents/pull/184) stabilized
+  replay event timelines.
+- [PR #185](https://github.com/OpenCoven/coven-agents/pull/185) recorded the
+  credential-free public exact-build guest replay.
+- [PR #186](https://github.com/OpenCoven/coven-agents/pull/186) removed
+  unreachable UI and orphaned dependency residue and is the current repository
+  baseline.
 
 The application baseline also includes the merged console, billing,
 deployment-policy, branding, runner-reliability, coordinated-team, dependency,
-subscriber-surface, credential-lifecycle, and session-path corrections through
-`f0ffb3124ab6a39d776bd9f7b5e77fd652b4c27e`. The
+subscriber-surface, credential-lifecycle, and session-path corrections plus
+the P0 repository certification through
+`4bf89dc98667efa1c46b5131e10d4b14bf5f86c3`. The
 [cutover attestation](../operations/daytona-cutover-attestation.md) records
-infrastructure production evidence while preserving the remaining product
-certification and approval gates.
+infrastructure production evidence and exact application-preview results while
+preserving the remaining product certification and approval gates.
 
 ## Known gaps
 
 - No retained full subscriber create, standalone and coordinated run, stream,
   stop, delete, and cross-tenant production-equivalent artifact exists.
 - Complete outbound policy evidence remains open.
-- End-to-end evidence redaction, restart recovery, retention, export, and
-  deletion require broader certification.
+- Deployed evidence redaction, provider restart recovery, retention, export,
+  and deletion require release-equivalent certification; local cross-surface
+  redaction and hermetic recovery are verified.
 - Checkout, authority refresh, expiry, and owner-bound device authorization
   have deterministic local and browser coverage but still require retained
   release-equivalent provider evidence.

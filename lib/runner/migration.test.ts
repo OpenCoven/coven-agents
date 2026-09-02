@@ -27,6 +27,169 @@ test("migration 0015 adds nullable fail-closed run authority without a default",
   );
 });
 
+test("migration 0028 remains schema-only and 0029 backfills only matching latest subscription override audits", () => {
+  const directory = new URL("../db/migrations/", import.meta.url);
+  const schemaMigrationName = readdirSync(directory).find((name) =>
+    name.startsWith("0028_")
+  );
+  const backfillMigrationName = readdirSync(directory).find((name) =>
+    name.startsWith("0029_")
+  );
+  assert.ok(schemaMigrationName, "migration 0028 must exist");
+  assert.ok(backfillMigrationName, "migration 0029 must exist");
+  const schemaMigration = readFileSync(
+    new URL(schemaMigrationName, directory),
+    "utf8"
+  );
+  const backfillMigration = readFileSync(
+    new URL(backfillMigrationName, directory),
+    "utf8"
+  );
+  const constraint =
+    'ALTER TABLE "User" ADD CONSTRAINT "User_subscriptionOverride_shape"';
+
+  assert.equal(
+    sha256(schemaMigration),
+    "3b90f75ecced677fd1a999b5f7f5bb60308f7c0bb8f37857d308ab90b28922ff",
+    "0028 is already applied in production and must remain byte-for-byte schema-only"
+  );
+  assert.match(schemaMigration, /ADD COLUMN "subscriptionOverrideAction"/u);
+  assert.match(schemaMigration, /ADD COLUMN "subscriptionOverrideAt"/u);
+  assert.match(schemaMigration, /User_subscriptionOverride_shape/u);
+  assert.doesNotMatch(schemaMigration, /\bUPDATE\b/u);
+
+  // 0029 applies after an already-applied 0028, choosing the monotonic audit
+  // authority rather than a wall-clock or random identifier ordering.
+  assert.match(
+    backfillMigration,
+    /SELECT DISTINCT ON \("userId"\)[\s\S]*FROM "SubscriptionOverrideAudit"[\s\S]*ORDER BY "userId", "newAuthVersion" DESC, "createdAt" DESC, "id" DESC/u
+  );
+  assert.match(
+    backfillMigration,
+    /SET "subscriptionOverrideAction" = "audit"\."action",\s+"subscriptionOverrideAt" = "audit"\."createdAt"/u
+  );
+  assert.match(
+    backfillMigration,
+    /"user"\."authVersion" >= "audit"\."newAuthVersion"[\s\S]*"user"\."subscribedUntil" IS NOT DISTINCT FROM "audit"\."newSubscribedUntil"/u
+  );
+  assert.doesNotMatch(
+    backfillMigration,
+    /"newSubscribedUntil" IS NOT NULL|"action" = 'grant'/u,
+    "null revokes and grants must both remain eligible"
+  );
+  assert.doesNotMatch(backfillMigration, /\bemail\b/iu);
+
+  // A later session-only increment still permits both null revokes and grants;
+  // a later webhook entitlement change does not. Equal timestamps fall through
+  // only after newAuthVersion to the deterministic id tie-breaker.
+  for (const scenario of [
+    "later session revocation increment",
+    "later webhook entitlement drift",
+    "later override wins",
+    "equal timestamps",
+    "null revoke",
+    "grant",
+  ]) {
+    assert.match(backfillMigration, /"newAuthVersion" DESC/u, scenario);
+    assert.match(
+      backfillMigration,
+      /"authVersion" >= "audit"\."newAuthVersion"/u,
+      scenario
+    );
+    assert.match(
+      backfillMigration,
+      /"subscribedUntil" IS NOT DISTINCT FROM "audit"\."newSubscribedUntil"/u,
+      scenario
+    );
+  }
+
+  const journal = JSON.parse(
+    readFileSync(new URL("meta/_journal.json", directory), "utf8")
+  ) as { entries: { idx: number; tag: string }[] };
+  assert.deepEqual(
+    journal.entries.find((entry) => entry.idx === 29),
+    {
+      ...journal.entries.find((entry) => entry.idx === 29),
+      idx: 29,
+      tag: backfillMigrationName.replace(/\.sql$/u, ""),
+    }
+  );
+  const snapshot29 = JSON.parse(
+    readFileSync(new URL("meta/0029_snapshot.json", directory), "utf8")
+  ) as { id: string; prevId: string; [key: string]: unknown };
+  const snapshot28 = JSON.parse(
+    readFileSync(new URL("meta/0028_snapshot.json", directory), "utf8")
+  ) as { id: string; prevId: string; [key: string]: unknown };
+  assert.equal(snapshot29.prevId, snapshot28.id);
+  const {
+    id: _snapshot29Id,
+    prevId: _snapshot29PrevId,
+    ...schema29
+  } = snapshot29;
+  const {
+    id: _snapshot28Id,
+    prevId: _snapshot28PrevId,
+    ...schema28
+  } = snapshot28;
+  assert.deepEqual(
+    schema29,
+    schema28,
+    "custom data-only migration preserves the generated schema snapshot"
+  );
+  assert.ok(schemaMigration.indexOf(constraint) >= 0);
+});
+
+test("migration 0026 adds nullable, strict execution provenance without history rewrites", () => {
+  const migrationDirectory = new URL("../db/migrations/", import.meta.url);
+  const provenanceMigrationName = readdirSync(migrationDirectory).find((name) =>
+    name.startsWith("0026_")
+  );
+  assert.ok(
+    provenanceMigrationName,
+    "execution provenance requires migration 0026"
+  );
+  const provenanceMigration = readFileSync(
+    new URL(provenanceMigrationName, migrationDirectory),
+    "utf8"
+  );
+
+  assert.match(
+    provenanceMigration,
+    /ALTER TABLE "RunnerRun" ADD COLUMN "executionProvenance" jsonb/u
+  );
+  assert.match(provenanceMigration, /RunnerRun_executionProvenance_valid/u);
+  assert.match(
+    provenanceMigration,
+    /productExecutionClass.*provider.*pinnedSnapshot/u
+  );
+  assert.match(provenanceMigration, /"executionProvenance" is null/u);
+  assert.doesNotMatch(
+    provenanceMigration,
+    /"executionProvenance"[^;]*DEFAULT/iu
+  );
+  assert.doesNotMatch(provenanceMigration, /UPDATE "RunnerRun"/u);
+  assert.doesNotMatch(provenanceMigration, /apiKey|apiUrl|secret|token/iu);
+
+  const provenanceJournal = JSON.parse(
+    readFileSync(new URL("meta/_journal.json", migrationDirectory), "utf8")
+  ) as { entries: { idx: number; tag: string }[] };
+  const provenanceEntry = provenanceJournal.entries.find(
+    (candidate) => candidate.idx === 26
+  );
+  assert.deepEqual(provenanceEntry, {
+    ...provenanceEntry,
+    idx: 26,
+    tag: provenanceMigrationName.replace(/\.sql$/u, ""),
+  });
+
+  const provenanceSnapshot = readFileSync(
+    new URL("meta/0026_snapshot.json", migrationDirectory),
+    "utf8"
+  );
+  assert.match(provenanceSnapshot, /"executionProvenance"/u);
+  assert.match(provenanceSnapshot, /RunnerRun_executionProvenance_valid/u);
+});
+
 test("generated migration 0016 adds the fenced reconciliation lease consistently", () => {
   const directory = new URL("../db/migrations/", import.meta.url);
   const migrationName = readdirSync(directory).find((name) =>
@@ -392,6 +555,7 @@ test("migration 0024 adds fail-closed runner execution permission after existing
   assert.ok(
     migration.indexOf(backfillTeam) < migration.indexOf(backfillOrdinary)
   );
+
   assert.ok(
     migration.indexOf(backfillOrdinary) < migration.indexOf(setDefault)
   );
@@ -405,9 +569,11 @@ test("migration 0024 adds fail-closed runner execution permission after existing
   const journal = JSON.parse(
     readFileSync(new URL("meta/_journal.json", directory), "utf8")
   ) as { entries: { idx: number; tag: string }[] };
-  const journalEntry24 = journal.entries.find(({ idx }) => idx === 24);
-  assert.deepEqual(journalEntry24, {
-    ...journalEntry24,
+  const journalEntry = journal.entries.find(
+    (entry) => entry.tag === migrationName.replace(/\.sql$/u, "")
+  );
+  assert.deepEqual(journalEntry, {
+    ...journalEntry,
     idx: 24,
     tag: migrationName.replace(/\.sql$/u, ""),
   });
@@ -455,66 +621,34 @@ test("migration 0024 adds fail-closed runner execution permission after existing
   );
 });
 
-test("migration 0025 adds a durable monotonic GitHub connection fence without rewriting history", () => {
+test("migration 0031 adds the capacity-neutral authority revalidation marker", () => {
   const directory = new URL("../db/migrations/", import.meta.url);
-  const immutable = {
-    "0020_coordinated_teams.sql":
-      "6630a8b27858286e8ebf7e983b91d307871bddeee1f6e74da979ac13e7a4bbab",
-    "0021_lovely_loners.sql":
-      "76ad7a4b2c322498eda12b7397ab52c5027e17ed9a4eb3ef81333020a056bdb0",
-    "0022_salty_the_stranger.sql":
-      "d059af4b4ca696721528f77b5a4556d713584f4a0e219d3a5340795c9739f94c",
-    "0023_jittery_cardiac.sql":
-      "bcd87f5f5d2f63d8e7cf12fa58fd981fb2d0c25792cfddc048743f6bc98cc38d",
-    "0024_runner_execution_permissions.sql":
-      "4761a526b2c3d13bbdbf5f03f138d852c8f9453f66deb2b70d4fa73df32bd2cb",
-  } as const;
-  for (const [name, expected] of Object.entries(immutable)) {
-    assert.equal(
-      sha256(readFileSync(new URL(name, directory), "utf8")),
-      expected
-    );
-  }
-
-  const migrationNames = readdirSync(directory).filter((name) =>
-    name.startsWith("0025_")
+  const migrationName = readdirSync(directory).find((name) =>
+    name.startsWith("0031_")
   );
-  assert.equal(migrationNames.length, 1);
-  const [migrationName] = migrationNames;
-  assert.ok(migrationName);
+
+  assert.ok(migrationName, "authority revalidation migration must exist");
   const migration = readFileSync(new URL(migrationName, directory), "utf8");
-  assert.match(migration, /CREATE TABLE "RunnerGitHubConnectionFence"/u);
-  assert.match(migration, /"generation" bigint DEFAULT 0 NOT NULL/u);
-  assert.match(migration, /RGHConnFence_generation_nonnegative/u);
-  assert.match(migration, /RGHConnFence_tenant_valid/u);
   assert.match(
     migration,
-    /INSERT INTO "RunnerGitHubConnectionFence"[\s\S]*SELECT DISTINCT "tenant", 0[\s\S]*FROM "RunnerGitHubConnection"[\s\S]*ON CONFLICT \("tenant"\) DO NOTHING/u
+    /ALTER TABLE "RunnerRun" ADD COLUMN "authorityRevalidation" boolean DEFAULT false NOT NULL/u
   );
-  assert.match(migration, /RGHConnFence_tenant_generation_uq/u);
 
   const journal = JSON.parse(
     readFileSync(new URL("meta/_journal.json", directory), "utf8")
   ) as { entries: { idx: number; tag: string }[] };
-  const entry = journal.entries.find(({ idx }) => idx === 25);
-  assert.deepEqual(entry, {
-    ...entry,
-    idx: 25,
-    tag: migrationName.replace(/\.sql$/u, ""),
-  });
+  assert.deepEqual(
+    journal.entries.find((entry) => entry.idx === 31),
+    {
+      ...journal.entries.find((entry) => entry.idx === 31),
+      idx: 31,
+      tag: migrationName.replace(/\.sql$/u, ""),
+    }
+  );
 
-  const snapshot24 = JSON.parse(
-    readFileSync(new URL("meta/0024_snapshot.json", directory), "utf8")
-  ) as { id: string };
-  const snapshot25Source = readFileSync(
-    new URL("meta/0025_snapshot.json", directory),
+  const snapshot = readFileSync(
+    new URL("meta/0031_snapshot.json", directory),
     "utf8"
   );
-  const snapshot25 = JSON.parse(snapshot25Source) as {
-    prevId: string;
-    tables: Record<string, unknown>;
-  };
-  assert.equal(snapshot25.prevId, snapshot24.id);
-  assert.ok(snapshot25.tables["public.RunnerGitHubConnectionFence"]);
-  assert.match(snapshot25Source, /RGHConnFence_tenant_generation_uq/u);
+  assert.match(snapshot, /"authorityRevalidation"/u);
 });

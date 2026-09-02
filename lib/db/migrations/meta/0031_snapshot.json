@@ -1,6 +1,6 @@
 {
-  "id": "aacfb460-5f57-4101-9b05-d6214dfd60cb",
-  "prevId": "f32a22a1-e3ac-4b7d-97e1-1a0fc6e3c144",
+  "id": "22a74338-bcf3-43f1-9afa-c7847ab72ead",
+  "prevId": "7d3bce79-ce03-40a0-be06-7575bfeb57b1",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -46,11 +46,11 @@
         "Chat_userId_User_id_fk": {
           "name": "Chat_userId_User_id_fk",
           "tableFrom": "Chat",
-          "columnsFrom": ["userId"],
           "tableTo": "User",
+          "columnsFrom": ["userId"],
           "columnsTo": ["id"],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -125,9 +125,9 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "CredentialLease_expiry_idx": {
           "name": "CredentialLease_expiry_idx",
@@ -140,9 +140,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {},
@@ -150,8 +150,8 @@
       "uniqueConstraints": {
         "CredentialLease_operationIdHash_unique": {
           "name": "CredentialLease_operationIdHash_unique",
-          "columns": ["operationIdHash"],
-          "nullsNotDistinct": false
+          "nullsNotDistinct": false,
+          "columns": ["operationIdHash"]
         }
       },
       "policies": {},
@@ -215,11 +215,11 @@
         "Document_userId_User_id_fk": {
           "name": "Document_userId_User_id_fk",
           "tableFrom": "Document",
-          "columnsFrom": ["userId"],
           "tableTo": "User",
+          "columnsFrom": ["userId"],
           "columnsTo": ["id"],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
@@ -332,9 +332,9 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "IdempotencyRecord_expiresAt_idx": {
           "name": "IdempotencyRecord_expiresAt_idx",
@@ -347,20 +347,20 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "IdempotencyRecord_ownerId_User_id_fk": {
           "name": "IdempotencyRecord_ownerId_User_id_fk",
           "tableFrom": "IdempotencyRecord",
-          "columnsFrom": ["ownerId"],
           "tableTo": "User",
+          "columnsFrom": ["ownerId"],
           "columnsTo": ["id"],
-          "onUpdate": "no action",
-          "onDelete": "cascade"
+          "onDelete": "cascade",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -425,11 +425,11 @@
         "Message_v2_chatId_Chat_id_fk": {
           "name": "Message_v2_chatId_Chat_id_fk",
           "tableFrom": "Message_v2",
-          "columnsFrom": ["chatId"],
           "tableTo": "Chat",
+          "columnsFrom": ["chatId"],
           "columnsTo": ["id"],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -529,9 +529,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "RunReservation_day_state_idx": {
           "name": "RunReservation_day_state_idx",
@@ -550,9 +550,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "RunReservation_tenant_period_state_idx": {
           "name": "RunReservation_tenant_period_state_idx",
@@ -577,9 +577,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "RunReservation_reserved_expiry_idx": {
           "name": "RunReservation_reserved_expiry_idx",
@@ -592,10 +592,10 @@
             }
           ],
           "isUnique": false,
-          "with": {},
-          "method": "btree",
           "where": "\"RunReservation\".\"state\" = 'reserved'",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {},
@@ -671,9 +671,9 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "RunUsage_countedAt_idx": {
           "name": "RunUsage_countedAt_idx",
@@ -686,9 +686,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "RunUsage_tenant_countedAt_idx": {
           "name": "RunUsage_tenant_countedAt_idx",
@@ -707,9 +707,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {},
@@ -881,9 +881,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "RunnerAgent_sandbox_recovery_idx": {
           "name": "RunnerAgent_sandbox_recovery_idx",
@@ -902,10 +902,10 @@
             }
           ],
           "isUnique": false,
-          "with": {},
-          "method": "btree",
           "where": "\"RunnerAgent\".\"sandboxLifecycle\" in ('provisioning', 'provisioning_ambiguous', 'resetting', 'decommissioning')",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         },
         "RunnerAgent_warm_recovery_idx": {
           "name": "RunnerAgent_warm_recovery_idx",
@@ -924,10 +924,10 @@
             }
           ],
           "isUnique": false,
-          "with": {},
-          "method": "btree",
           "where": "\"RunnerAgent\".\"sandboxLifecycle\" = 'ready' and \"RunnerAgent\".\"warmStatus\" = 'provisioning'",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {},
@@ -935,8 +935,8 @@
       "uniqueConstraints": {
         "RunnerAgent_id_tenant_key": {
           "name": "RunnerAgent_id_tenant_key",
-          "columns": ["id", "tenant"],
-          "nullsNotDistinct": false
+          "nullsNotDistinct": false,
+          "columns": ["id", "tenant"]
         }
       },
       "policies": {},
@@ -1039,19 +1039,19 @@
         "RunnerAttemptRedaction_runId_RunnerRun_id_fk": {
           "name": "RunnerAttemptRedaction_runId_RunnerRun_id_fk",
           "tableFrom": "RunnerAttemptRedaction",
-          "columnsFrom": ["runId"],
           "tableTo": "RunnerRun",
+          "columnsFrom": ["runId"],
           "columnsTo": ["id"],
-          "onUpdate": "no action",
-          "onDelete": "cascade"
+          "onDelete": "cascade",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "RunnerAttemptRedaction_attemptId_unique": {
           "name": "RunnerAttemptRedaction_attemptId_unique",
-          "columns": ["attemptId"],
-          "nullsNotDistinct": false
+          "nullsNotDistinct": false,
+          "columns": ["attemptId"]
         }
       },
       "policies": {},
@@ -1075,33 +1075,9 @@
       "name": "RunnerGitHubCapability",
       "schema": "",
       "columns": {
-        "allowedCapabilities": {
-          "name": "allowedCapabilities",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true
-        },
         "approvedCapabilities": {
           "name": "approvedCapabilities",
           "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "attemptId": {
-          "name": "attemptId",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "authVersion": {
-          "name": "authVersion",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "connectionGeneration": {
-          "name": "connectionGeneration",
-          "type": "bigint",
           "primaryKey": false,
           "notNull": true
         },
@@ -1111,12 +1087,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
-        },
-        "declaredCapabilities": {
-          "name": "declaredCapabilities",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true
         },
         "expiresAt": {
           "name": "expiresAt",
@@ -1149,18 +1119,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "runnerRunId": {
-          "name": "runnerRunId",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "teamRunId": {
-          "name": "teamRunId",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
         "teamStepId": {
           "name": "teamStepId",
           "type": "uuid",
@@ -1179,13 +1137,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "updatedAt": {
-          "name": "updatedAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
         "usedCallCount": {
           "name": "usedCallCount",
           "type": "integer",
@@ -1202,22 +1153,6 @@
         }
       },
       "indexes": {
-        "RGHCap_active_runnerRun_uq": {
-          "name": "RGHCap_active_runnerRun_uq",
-          "columns": [
-            {
-              "expression": "runnerRunId",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "with": {},
-          "method": "btree",
-          "where": "\"RunnerGitHubCapability\".\"revokedAt\" is null",
-          "concurrently": false
-        },
         "RGHCap_expiry_idx": {
           "name": "RGHCap_expiry_idx",
           "columns": [
@@ -1229,56 +1164,38 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "RGHCap_step_fk": {
           "name": "RGHCap_step_fk",
           "tableFrom": "RunnerGitHubCapability",
-          "columnsFrom": ["teamStepId", "tenant"],
           "tableTo": "RunnerTeamStep",
+          "columnsFrom": ["teamStepId", "tenant"],
           "columnsTo": ["id", "tenant"],
-          "onUpdate": "no action",
-          "onDelete": "cascade"
-        },
-        "RunnerGitHubCapability_runnerRun_fk": {
-          "name": "RunnerGitHubCapability_runnerRun_fk",
-          "tableFrom": "RunnerGitHubCapability",
-          "columnsFrom": ["runnerRunId", "tenant"],
-          "tableTo": "RunnerRun",
-          "columnsTo": ["id", "tenant"],
-          "onUpdate": "no action",
-          "onDelete": "cascade"
-        },
-        "RunnerGitHubCapability_teamRun_fk": {
-          "name": "RunnerGitHubCapability_teamRun_fk",
-          "tableFrom": "RunnerGitHubCapability",
-          "columnsFrom": ["teamRunId", "tenant"],
-          "tableTo": "RunnerTeamRun",
-          "columnsTo": ["id", "tenant"],
-          "onUpdate": "no action",
-          "onDelete": "cascade"
+          "onDelete": "cascade",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "RGHCap_id_tenant_uq": {
           "name": "RGHCap_id_tenant_uq",
-          "columns": ["id", "tenant"],
-          "nullsNotDistinct": false
+          "nullsNotDistinct": false,
+          "columns": ["id", "tenant"]
         },
         "RGHCap_step_owner_uq": {
           "name": "RGHCap_step_owner_uq",
-          "columns": ["id", "tenant", "teamStepId"],
-          "nullsNotDistinct": false
+          "nullsNotDistinct": false,
+          "columns": ["id", "tenant", "teamStepId"]
         },
         "RGHCap_tokenHash_uq": {
           "name": "RGHCap_tokenHash_uq",
-          "columns": ["tokenHash"],
-          "nullsNotDistinct": false
+          "nullsNotDistinct": false,
+          "columns": ["tokenHash"]
         }
       },
       "policies": {},
@@ -1293,7 +1210,7 @@
         },
         "RGHCap_caps_valid": {
           "name": "RGHCap_caps_valid",
-          "value": "jsonb_typeof(\"RunnerGitHubCapability\".\"declaredCapabilities\") = 'array' and jsonb_array_length(\"RunnerGitHubCapability\".\"declaredCapabilities\") between 1 and 8 and \"RunnerGitHubCapability\".\"declaredCapabilities\" <@ '[\"github.issues.read\",\"github.issues.write\",\"github.pull_requests.read\",\"github.pull_requests.write\",\"github.projects.read\",\"github.projects.write\"]'::jsonb and jsonb_typeof(\"RunnerGitHubCapability\".\"approvedCapabilities\") = 'array' and jsonb_array_length(\"RunnerGitHubCapability\".\"approvedCapabilities\") <= 8 and \"RunnerGitHubCapability\".\"approvedCapabilities\" <@ \"RunnerGitHubCapability\".\"declaredCapabilities\" and jsonb_typeof(\"RunnerGitHubCapability\".\"allowedCapabilities\") = 'array' and jsonb_array_length(\"RunnerGitHubCapability\".\"allowedCapabilities\") between 1 and 8 and \"RunnerGitHubCapability\".\"allowedCapabilities\" <@ \"RunnerGitHubCapability\".\"declaredCapabilities\" and \"RunnerGitHubCapability\".\"allowedCapabilities\" <@ (jsonb_path_query_array(\"RunnerGitHubCapability\".\"declaredCapabilities\", '$[*] ? (@ like_regex \"read$\")') || \"RunnerGitHubCapability\".\"approvedCapabilities\")"
+          "value": "jsonb_typeof(\"RunnerGitHubCapability\".\"approvedCapabilities\") = 'array' and jsonb_array_length(\"RunnerGitHubCapability\".\"approvedCapabilities\") between 1 and 8 and \"RunnerGitHubCapability\".\"approvedCapabilities\" <@ '[\"github.issues.read\",\"github.issues.write\",\"github.pull_requests.read\",\"github.pull_requests.write\",\"github.projects.read\",\"github.projects.write\"]'::jsonb"
         },
         "RGHCap_repos_valid": {
           "name": "RGHCap_repos_valid",
@@ -1303,13 +1220,9 @@
           "name": "RGHCap_calls_valid",
           "value": "\"RunnerGitHubCapability\".\"maxCallCount\" between 1 and 32 and \"RunnerGitHubCapability\".\"usedCallCount\" between 0 and \"RunnerGitHubCapability\".\"maxCallCount\""
         },
-        "RGHCap_binding_valid": {
-          "name": "RGHCap_binding_valid",
-          "value": "\"RunnerGitHubCapability\".\"authVersion\" >= 0 and \"RunnerGitHubCapability\".\"connectionGeneration\" >= 0"
-        },
         "RGHCap_timestamps_valid": {
           "name": "RGHCap_timestamps_valid",
-          "value": "\"RunnerGitHubCapability\".\"expiresAt\" > \"RunnerGitHubCapability\".\"createdAt\" and \"RunnerGitHubCapability\".\"expiresAt\" <= \"RunnerGitHubCapability\".\"createdAt\" + interval '15 minutes' and (\"RunnerGitHubCapability\".\"revokedAt\" is null or \"RunnerGitHubCapability\".\"revokedAt\" >= \"RunnerGitHubCapability\".\"createdAt\")"
+          "value": "\"RunnerGitHubCapability\".\"expiresAt\" > \"RunnerGitHubCapability\".\"createdAt\" and (\"RunnerGitHubCapability\".\"revokedAt\" is null or \"RunnerGitHubCapability\".\"revokedAt\" >= \"RunnerGitHubCapability\".\"createdAt\")"
         },
         "RGHCap_version_valid": {
           "name": "RGHCap_version_valid",
@@ -1417,9 +1330,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {},
@@ -1427,13 +1340,13 @@
       "uniqueConstraints": {
         "RGHConn_id_tenant_uq": {
           "name": "RGHConn_id_tenant_uq",
-          "columns": ["id", "tenant"],
-          "nullsNotDistinct": false
+          "nullsNotDistinct": false,
+          "columns": ["id", "tenant"]
         },
         "RGHConn_tenant_repo_uq": {
           "name": "RGHConn_tenant_repo_uq",
-          "columns": ["tenant", "repositoryId"],
-          "nullsNotDistinct": false
+          "nullsNotDistinct": false,
+          "columns": ["tenant", "repositoryId"]
         }
       },
       "policies": {},
@@ -1457,92 +1370,10 @@
       },
       "isRLSEnabled": false
     },
-    "public.RunnerGitHubConnectionFence": {
-      "name": "RunnerGitHubConnectionFence",
-      "schema": "",
-      "columns": {
-        "generation": {
-          "name": "generation",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "tenant": {
-          "name": "tenant",
-          "type": "varchar(64)",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "updatedAt": {
-          "name": "updatedAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "RGHConnFence_tenant_generation_uq": {
-          "name": "RGHConnFence_tenant_generation_uq",
-          "columns": [
-            {
-              "expression": "tenant",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "generation",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "with": {},
-          "method": "btree",
-          "concurrently": false
-        }
-      },
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "RGHConnFence_tenant_valid": {
-          "name": "RGHConnFence_tenant_valid",
-          "value": "\"RunnerGitHubConnectionFence\".\"tenant\" ~ '^[A-Za-z0-9_]{1,64}$'"
-        },
-        "RGHConnFence_generation_nonnegative": {
-          "name": "RGHConnFence_generation_nonnegative",
-          "value": "\"RunnerGitHubConnectionFence\".\"generation\" >= 0"
-        }
-      },
-      "isRLSEnabled": false
-    },
     "public.RunnerGitHubOperation": {
       "name": "RunnerGitHubOperation",
       "schema": "",
       "columns": {
-        "accountId": {
-          "name": "accountId",
-          "type": "varchar(20)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "accountLogin": {
-          "name": "accountLogin",
-          "type": "varchar(100)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "accountType": {
-          "name": "accountType",
-          "type": "varchar(16)",
-          "primaryKey": false,
-          "notNull": true
-        },
         "capabilityId": {
           "name": "capabilityId",
           "type": "uuid",
@@ -1552,18 +1383,6 @@
         "completedAt": {
           "name": "completedAt",
           "type": "timestamp",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "connectionGeneration": {
-          "name": "connectionGeneration",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "connectionId": {
-          "name": "connectionId",
-          "type": "uuid",
           "primaryKey": false,
           "notNull": false
         },
@@ -1580,24 +1399,12 @@
           "primaryKey": false,
           "notNull": false
         },
-        "executionLeaseExpiresAt": {
-          "name": "executionLeaseExpiresAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true
-        },
         "id": {
           "name": "id",
           "type": "uuid",
           "primaryKey": true,
           "notNull": true,
           "default": "gen_random_uuid()"
-        },
-        "installationId": {
-          "name": "installationId",
-          "type": "varchar(20)",
-          "primaryKey": false,
-          "notNull": true
         },
         "kind": {
           "name": "kind",
@@ -1611,78 +1418,17 @@
           "primaryKey": false,
           "notNull": true
         },
-        "operationMarker": {
-          "name": "operationMarker",
-          "type": "varchar(80)",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "providerDispatchPhase": {
-          "name": "providerDispatchPhase",
-          "type": "varchar(16)",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'not_applicable'"
-        },
         "providerRequestId": {
           "name": "providerRequestId",
           "type": "varchar(256)",
           "primaryKey": false,
           "notNull": false
         },
-        "providerSentAt": {
-          "name": "providerSentAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "repository": {
-          "name": "repository",
-          "type": "varchar(201)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "repositoryId": {
-          "name": "repositoryId",
-          "type": "varchar(20)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "repositoryName": {
-          "name": "repositoryName",
-          "type": "varchar(100)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "repositoryNodeId": {
-          "name": "repositoryNodeId",
-          "type": "varchar(256)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "repositoryOwner": {
-          "name": "repositoryOwner",
-          "type": "varchar(100)",
-          "primaryKey": false,
-          "notNull": true
-        },
         "requestHash": {
           "name": "requestHash",
           "type": "varchar(64)",
           "primaryKey": false,
           "notNull": true
-        },
-        "requiredCapability": {
-          "name": "requiredCapability",
-          "type": "varchar(40)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "resultJson": {
-          "name": "resultJson",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
         },
         "resultNodeId": {
           "name": "resultNodeId",
@@ -1740,50 +1486,9 @@
           "primaryKey": false,
           "notNull": true,
           "default": 0
-        },
-        "writeIntentActive": {
-          "name": "writeIntentActive",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
         }
       },
       "indexes": {
-        "RGHOp_step_write_intent_uq": {
-          "name": "RGHOp_step_write_intent_uq",
-          "columns": [
-            {
-              "expression": "tenant",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "teamStepId",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "kind",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "requestHash",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "with": {},
-          "method": "btree",
-          "where": "\"RunnerGitHubOperation\".\"writeIntentActive\" = true",
-          "concurrently": false
-        },
         "RGHOp_status_updated_idx": {
           "name": "RGHOp_status_updated_idx",
           "columns": [
@@ -1801,56 +1506,42 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "RGHOp_step_fk": {
           "name": "RGHOp_step_fk",
           "tableFrom": "RunnerGitHubOperation",
-          "columnsFrom": ["teamStepId", "tenant"],
           "tableTo": "RunnerTeamStep",
+          "columnsFrom": ["teamStepId", "tenant"],
           "columnsTo": ["id", "tenant"],
-          "onUpdate": "no action",
-          "onDelete": "cascade"
+          "onDelete": "cascade",
+          "onUpdate": "no action"
         },
         "RGHOp_capability_fk": {
           "name": "RGHOp_capability_fk",
           "tableFrom": "RunnerGitHubOperation",
-          "columnsFrom": ["capabilityId", "tenant", "teamStepId"],
           "tableTo": "RunnerGitHubCapability",
+          "columnsFrom": ["capabilityId", "tenant", "teamStepId"],
           "columnsTo": ["id", "tenant", "teamStepId"],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
-        },
-        "RunnerGitHubOperation_connection_fk": {
-          "name": "RunnerGitHubOperation_connection_fk",
-          "tableFrom": "RunnerGitHubOperation",
-          "columnsFrom": ["connectionId"],
-          "tableTo": "RunnerGitHubConnection",
-          "columnsTo": ["id"],
-          "onUpdate": "no action",
-          "onDelete": "set null"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "RGHOp_id_tenant_uq": {
           "name": "RGHOp_id_tenant_uq",
-          "columns": ["id", "tenant"],
-          "nullsNotDistinct": false
+          "nullsNotDistinct": false,
+          "columns": ["id", "tenant"]
         },
         "RGHOp_step_operation_uq": {
           "name": "RGHOp_step_operation_uq",
-          "columns": ["teamStepId", "tenant", "operationId"],
-          "nullsNotDistinct": false
-        },
-        "RGHOp_tenant_operation_uq": {
-          "name": "RGHOp_tenant_operation_uq",
-          "columns": ["tenant", "operationId"],
-          "nullsNotDistinct": false
+          "nullsNotDistinct": false,
+          "columns": ["teamStepId", "tenant", "operationId"]
         }
       },
       "policies": {},
@@ -1871,30 +1562,6 @@
           "name": "RGHOp_requestHash_valid",
           "value": "\"RunnerGitHubOperation\".\"requestHash\" ~ '^[a-f0-9]{64}$'"
         },
-        "RGHOp_binding_valid": {
-          "name": "RGHOp_binding_valid",
-          "value": "\"RunnerGitHubOperation\".\"connectionGeneration\" >= 0 and \"RunnerGitHubOperation\".\"repository\" ~ '^[a-z0-9_.-]{1,100}/[a-z0-9_.-]{1,100}$' and \"RunnerGitHubOperation\".\"requiredCapability\" in ('github.issues.read','github.issues.write','github.pull_requests.read','github.pull_requests.write','github.projects.read','github.projects.write')"
-        },
-        "RGHOp_connectionSnapshot_valid": {
-          "name": "RGHOp_connectionSnapshot_valid",
-          "value": "\"RunnerGitHubOperation\".\"installationId\" ~ '^[1-9][0-9]{0,19}$' and \"RunnerGitHubOperation\".\"accountId\" ~ '^[1-9][0-9]{0,19}$' and \"RunnerGitHubOperation\".\"repositoryId\" ~ '^[1-9][0-9]{0,19}$' and \"RunnerGitHubOperation\".\"accountType\" in ('Organization','User') and char_length(\"RunnerGitHubOperation\".\"repositoryNodeId\") between 1 and 256 and \"RunnerGitHubOperation\".\"repositoryNodeId\" ~ '^[A-Za-z0-9_=-]+$'"
-        },
-        "RGHOp_capability_mapping_valid": {
-          "name": "RGHOp_capability_mapping_valid",
-          "value": "\"RunnerGitHubOperation\".\"requiredCapability\" = CASE WHEN \"RunnerGitHubOperation\".\"kind\" in ('issue.get','issue.search') THEN 'github.issues.read' WHEN \"RunnerGitHubOperation\".\"kind\" in ('issue.create','issue.comment') THEN 'github.issues.write' WHEN \"RunnerGitHubOperation\".\"kind\" = 'pull.get' THEN 'github.pull_requests.read' WHEN \"RunnerGitHubOperation\".\"kind\" in ('pull.create','pull.comment','pull.review') THEN 'github.pull_requests.write' WHEN \"RunnerGitHubOperation\".\"kind\" in ('project.item.add','project.item.field.update') THEN 'github.projects.write' ELSE '' END"
-        },
-        "RGHOp_marker_valid": {
-          "name": "RGHOp_marker_valid",
-          "value": "(\"RunnerGitHubOperation\".\"kind\" in ('issue.get','issue.search','pull.get') and \"RunnerGitHubOperation\".\"operationMarker\" is null) or (\"RunnerGitHubOperation\".\"kind\" not in ('issue.get','issue.search','pull.get') and \"RunnerGitHubOperation\".\"operationMarker\" ~ '^<!-- coven-github:v1:[a-f0-9]{40} -->$')"
-        },
-        "RGHOp_dispatch_phase_valid": {
-          "name": "RGHOp_dispatch_phase_valid",
-          "value": "(\"RunnerGitHubOperation\".\"kind\" in ('issue.get','issue.search','pull.get') and \"RunnerGitHubOperation\".\"providerDispatchPhase\" = 'not_applicable' and \"RunnerGitHubOperation\".\"providerSentAt\" is null and \"RunnerGitHubOperation\".\"writeIntentActive\" = false) or (\"RunnerGitHubOperation\".\"kind\" not in ('issue.get','issue.search','pull.get') and ((\"RunnerGitHubOperation\".\"providerDispatchPhase\" = 'pre_send' and \"RunnerGitHubOperation\".\"providerSentAt\" is null) or (\"RunnerGitHubOperation\".\"providerDispatchPhase\" = 'sent' and \"RunnerGitHubOperation\".\"providerSentAt\" is not null)) and (\"RunnerGitHubOperation\".\"writeIntentActive\" = true or (\"RunnerGitHubOperation\".\"providerDispatchPhase\" = 'pre_send' and \"RunnerGitHubOperation\".\"status\" = 'pending' and (\"RunnerGitHubOperation\".\"error\"->>'retryable')::boolean = true)))"
-        },
-        "RGHOp_result_valid": {
-          "name": "RGHOp_result_valid",
-          "value": "(\"RunnerGitHubOperation\".\"status\" = 'completed' and \"RunnerGitHubOperation\".\"resultJson\" is not null and jsonb_typeof(\"RunnerGitHubOperation\".\"resultJson\") = 'object') or (\"RunnerGitHubOperation\".\"status\" <> 'completed' and \"RunnerGitHubOperation\".\"resultJson\" is null)"
-        },
         "RGHOp_version_valid": {
           "name": "RGHOp_version_valid",
           "value": "\"RunnerGitHubOperation\".\"version\" >= 0"
@@ -1905,7 +1572,7 @@
         },
         "RGHOp_timestamps_valid": {
           "name": "RGHOp_timestamps_valid",
-          "value": "(\"RunnerGitHubOperation\".\"startedAt\" is null or \"RunnerGitHubOperation\".\"startedAt\" >= \"RunnerGitHubOperation\".\"createdAt\") and (\"RunnerGitHubOperation\".\"providerSentAt\" is null or (\"RunnerGitHubOperation\".\"providerSentAt\" >= \"RunnerGitHubOperation\".\"createdAt\" and (\"RunnerGitHubOperation\".\"startedAt\" is null or \"RunnerGitHubOperation\".\"providerSentAt\" >= \"RunnerGitHubOperation\".\"startedAt\"))) and (\"RunnerGitHubOperation\".\"completedAt\" is null or (\"RunnerGitHubOperation\".\"completedAt\" >= \"RunnerGitHubOperation\".\"createdAt\" and (\"RunnerGitHubOperation\".\"startedAt\" is null or \"RunnerGitHubOperation\".\"completedAt\" >= \"RunnerGitHubOperation\".\"startedAt\")))"
+          "value": "(\"RunnerGitHubOperation\".\"startedAt\" is null or \"RunnerGitHubOperation\".\"startedAt\" >= \"RunnerGitHubOperation\".\"createdAt\") and (\"RunnerGitHubOperation\".\"completedAt\" is null or (\"RunnerGitHubOperation\".\"completedAt\" >= \"RunnerGitHubOperation\".\"createdAt\" and (\"RunnerGitHubOperation\".\"startedAt\" is null or \"RunnerGitHubOperation\".\"completedAt\" >= \"RunnerGitHubOperation\".\"startedAt\")))"
         },
         "RGHOp_error_bounded": {
           "name": "RGHOp_error_bounded",
@@ -1953,6 +1620,13 @@
           "type": "integer",
           "primaryKey": false,
           "notNull": false
+        },
+        "authorityRevalidation": {
+          "name": "authorityRevalidation",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
         },
         "cancellationRequestedAt": {
           "name": "cancellationRequestedAt",
@@ -2037,18 +1711,18 @@
           "notNull": true,
           "default": "'unrestricted'"
         },
+        "executionProvenance": {
+          "name": "executionProvenance",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
         "fileEvidence": {
           "name": "fileEvidence",
           "type": "jsonb",
           "primaryKey": false,
           "notNull": true,
           "default": "'[]'::jsonb"
-        },
-        "githubBrokerPolicy": {
-          "name": "githubBrokerPolicy",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
         },
         "id": {
           "name": "id",
@@ -2083,15 +1757,15 @@
           "primaryKey": false,
           "notNull": true,
           "identity": {
+            "type": "always",
             "name": "RunnerRun_queueSequence_seq",
+            "schema": "public",
             "increment": "1",
+            "startWith": "1",
             "minValue": "1",
             "maxValue": "2147483647",
-            "startWith": "1",
             "cache": "1",
-            "cycle": false,
-            "schema": "public",
-            "type": "always"
+            "cycle": false
           }
         },
         "requestHash": {
@@ -2118,12 +1792,6 @@
           "type": "varchar(40000)",
           "primaryKey": false,
           "notNull": true
-        },
-        "teamStepId": {
-          "name": "teamStepId",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
         },
         "tenant": {
           "name": "tenant",
@@ -2164,9 +1832,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "RunnerRun_queued_sequence_idx": {
           "name": "RunnerRun_queued_sequence_idx",
@@ -2179,10 +1847,10 @@
             }
           ],
           "isUnique": false,
-          "with": {},
-          "method": "btree",
           "where": "\"RunnerRun\".\"dispatchState\" = 'queued'",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         },
         "RunnerRun_queueSequence_unique_idx": {
           "name": "RunnerRun_queueSequence_unique_idx",
@@ -2195,9 +1863,9 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "RunnerRun_active_tenant_idx": {
           "name": "RunnerRun_active_tenant_idx",
@@ -2216,10 +1884,10 @@
             }
           ],
           "isUnique": false,
-          "with": {},
-          "method": "btree",
           "where": "\"RunnerRun\".\"status\" in ('queued', 'running')",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         },
         "RunnerRun_expired_dispatch_lease_idx": {
           "name": "RunnerRun_expired_dispatch_lease_idx",
@@ -2232,10 +1900,10 @@
             }
           ],
           "isUnique": false,
-          "with": {},
-          "method": "btree",
           "where": "\"RunnerRun\".\"dispatchLeaseToken\" is not null and \"RunnerRun\".\"dispatchState\" in ('dispatching', 'running')",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         },
         "RunnerRun_terminal_retention_idx": {
           "name": "RunnerRun_terminal_retention_idx",
@@ -2254,10 +1922,10 @@
             }
           ],
           "isUnique": false,
-          "with": {},
-          "method": "btree",
           "where": "\"RunnerRun\".\"status\" in ('completed', 'failed', 'cancelled')",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         },
         "RunnerRun_terminal_attempt_cleanup_idx": {
           "name": "RunnerRun_terminal_attempt_cleanup_idx",
@@ -2270,10 +1938,10 @@
             }
           ],
           "isUnique": false,
-          "with": {},
-          "method": "btree",
           "where": "\"RunnerRun\".\"dispatchState\" = 'terminal' and \"RunnerRun\".\"daytonaAttemptId\" is not null and \"RunnerRun\".\"dispatchLeaseToken\" is not null",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         },
         "RunnerRun_agent_operation_idx": {
           "name": "RunnerRun_agent_operation_idx",
@@ -2292,9 +1960,9 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "RunnerRun_daytonaSessionId_live_idx": {
           "name": "RunnerRun_daytonaSessionId_live_idx",
@@ -2307,10 +1975,10 @@
             }
           ],
           "isUnique": true,
-          "with": {},
-          "method": "btree",
           "where": "\"RunnerRun\".\"daytonaSessionId\" is not null and \"RunnerRun\".\"status\" in ('queued', 'running')",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         },
         "RunnerRun_daytonaCommandId_live_idx": {
           "name": "RunnerRun_daytonaCommandId_live_idx",
@@ -2323,29 +1991,29 @@
             }
           ],
           "isUnique": true,
-          "with": {},
-          "method": "btree",
           "where": "\"RunnerRun\".\"daytonaCommandId\" is not null and \"RunnerRun\".\"status\" in ('queued', 'running')",
-          "concurrently": false
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
         "RunnerRun_agentId_tenant_RunnerAgent_id_tenant_fk": {
           "name": "RunnerRun_agentId_tenant_RunnerAgent_id_tenant_fk",
           "tableFrom": "RunnerRun",
-          "columnsFrom": ["agentId", "tenant"],
           "tableTo": "RunnerAgent",
+          "columnsFrom": ["agentId", "tenant"],
           "columnsTo": ["id", "tenant"],
-          "onUpdate": "no action",
-          "onDelete": "cascade"
+          "onDelete": "cascade",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "RunnerRun_id_tenant_key": {
           "name": "RunnerRun_id_tenant_key",
-          "columns": ["id", "tenant"],
-          "nullsNotDistinct": false
+          "nullsNotDistinct": false,
+          "columns": ["id", "tenant"]
         }
       },
       "policies": {},
@@ -2364,11 +2032,11 @@
         },
         "RunnerRun_executionPermission_valid": {
           "name": "RunnerRun_executionPermission_valid",
-          "value": "\"RunnerRun\".\"executionPermission\" in ('unrestricted', 'workspace_read', 'workspace_write', 'github_only')"
+          "value": "\"RunnerRun\".\"executionPermission\" in ('unrestricted', 'workspace_read', 'workspace_write')"
         },
-        "RunnerRun_githubBrokerPolicy_valid": {
-          "name": "RunnerRun_githubBrokerPolicy_valid",
-          "value": "\"RunnerRun\".\"githubBrokerPolicy\" is null or (\"RunnerRun\".\"teamStepId\" is not null and jsonb_typeof(\"RunnerRun\".\"githubBrokerPolicy\") = 'object' and \"RunnerRun\".\"githubBrokerPolicy\"->>'version' = '1' and \"RunnerRun\".\"githubBrokerPolicy\"->>'teamStepId' = \"RunnerRun\".\"teamStepId\"::text and \"RunnerRun\".\"githubBrokerPolicy\"->>'authVersion' = \"RunnerRun\".\"authVersion\"::text and (\"RunnerRun\".\"githubBrokerPolicy\"->>'actorUserId') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' and jsonb_typeof(\"RunnerRun\".\"githubBrokerPolicy\"->'allowedCapabilities') = 'array' and jsonb_array_length(\"RunnerRun\".\"githubBrokerPolicy\"->'allowedCapabilities') between 1 and 8 and jsonb_typeof(\"RunnerRun\".\"githubBrokerPolicy\"->'repositories') = 'array' and jsonb_array_length(\"RunnerRun\".\"githubBrokerPolicy\"->'repositories') between 1 and 16)"
+        "RunnerRun_executionProvenance_valid": {
+          "name": "RunnerRun_executionProvenance_valid",
+          "value": "\"RunnerRun\".\"executionProvenance\" is null or (\n        jsonb_typeof(\"RunnerRun\".\"executionProvenance\") = 'object'\n        and \"RunnerRun\".\"executionProvenance\" ?& array['productExecutionClass', 'provider', 'capabilityContractVersion', 'adapterVersion', 'pinnedSnapshot', 'target', 'lifecycle']\n        and (\"RunnerRun\".\"executionProvenance\" - 'productExecutionClass' - 'provider' - 'capabilityContractVersion' - 'adapterVersion' - 'pinnedSnapshot' - 'target' - 'lifecycle') = '{}'::jsonb\n        and \"RunnerRun\".\"executionProvenance\"->>'productExecutionClass' = 'hosted'\n        and \"RunnerRun\".\"executionProvenance\"->>'provider' in ('daytona', 'hermetic')\n        and jsonb_typeof(\"RunnerRun\".\"executionProvenance\"->'capabilityContractVersion') = 'string'\n        and \"RunnerRun\".\"executionProvenance\"->>'capabilityContractVersion' ~ '^hosted-v[1-9][0-9]{0,2}$'\n        and jsonb_typeof(\"RunnerRun\".\"executionProvenance\"->'adapterVersion') = 'string'\n        and (\n          (\"RunnerRun\".\"executionProvenance\"->>'provider' = 'daytona'\n            and \"RunnerRun\".\"executionProvenance\"->>'adapterVersion' ~ '^daytona-adapter-v[1-9][0-9]{0,2}$'\n            and \"RunnerRun\".\"executionProvenance\"->>'pinnedSnapshot' ~ '^coven-agents-copilot-[0-9]{1,10}$'\n            and \"RunnerRun\".\"executionProvenance\"->>'target' in ('eu', 'us')\n            and \"RunnerRun\".\"executionProvenance\"->>'lifecycle' = 'persistent')\n          or (\"RunnerRun\".\"executionProvenance\"->>'provider' = 'hermetic'\n            and \"RunnerRun\".\"executionProvenance\"->>'adapterVersion' ~ '^hermetic-adapter-v[1-9][0-9]{0,2}$'\n            and \"RunnerRun\".\"executionProvenance\"->>'pinnedSnapshot' = 'hermetic-e2e-v1'\n            and \"RunnerRun\".\"executionProvenance\"->>'target' = 'e2e'\n            and \"RunnerRun\".\"executionProvenance\"->>'lifecycle' = 'ephemeral')\n        )\n        and jsonb_typeof(\"RunnerRun\".\"executionProvenance\"->'pinnedSnapshot') = 'string'\n      )"
         },
         "RunnerRun_queueSequence_positive": {
           "name": "RunnerRun_queueSequence_positive",
@@ -2468,11 +2136,11 @@
         "RunnerRunEvent_runId_RunnerRun_id_fk": {
           "name": "RunnerRunEvent_runId_RunnerRun_id_fk",
           "tableFrom": "RunnerRunEvent",
-          "columnsFrom": ["runId"],
           "tableTo": "RunnerRun",
+          "columnsFrom": ["runId"],
           "columnsTo": ["id"],
-          "onUpdate": "no action",
-          "onDelete": "cascade"
+          "onDelete": "cascade",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
@@ -2654,9 +2322,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {},
@@ -2664,8 +2332,8 @@
       "uniqueConstraints": {
         "RSkill_id_tenant_uq": {
           "name": "RSkill_id_tenant_uq",
-          "columns": ["id", "tenant"],
-          "nullsNotDistinct": false
+          "nullsNotDistinct": false,
+          "columns": ["id", "tenant"]
         }
       },
       "policies": {},
@@ -2755,9 +2423,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {},
@@ -2765,8 +2433,8 @@
       "uniqueConstraints": {
         "RTeam_id_tenant_uq": {
           "name": "RTeam_id_tenant_uq",
-          "columns": ["id", "tenant"],
-          "nullsNotDistinct": false
+          "nullsNotDistinct": false,
+          "columns": ["id", "tenant"]
         }
       },
       "policies": {},
@@ -2850,38 +2518,38 @@
         "RTMember_team_fk": {
           "name": "RTMember_team_fk",
           "tableFrom": "RunnerTeamMember",
-          "columnsFrom": ["teamId", "tenant"],
           "tableTo": "RunnerTeam",
+          "columnsFrom": ["teamId", "tenant"],
           "columnsTo": ["id", "tenant"],
-          "onUpdate": "no action",
-          "onDelete": "cascade"
+          "onDelete": "cascade",
+          "onUpdate": "no action"
         },
         "RTMember_agent_fk": {
           "name": "RTMember_agent_fk",
           "tableFrom": "RunnerTeamMember",
-          "columnsFrom": ["agentId", "tenant"],
           "tableTo": "RunnerAgent",
+          "columnsFrom": ["agentId", "tenant"],
           "columnsTo": ["id", "tenant"],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "RTMember_id_tenant_uq": {
           "name": "RTMember_id_tenant_uq",
-          "columns": ["id", "tenant"],
-          "nullsNotDistinct": false
+          "nullsNotDistinct": false,
+          "columns": ["id", "tenant"]
         },
         "RTMember_team_pos_uq": {
           "name": "RTMember_team_pos_uq",
-          "columns": ["teamId", "tenant", "position"],
-          "nullsNotDistinct": false
+          "nullsNotDistinct": false,
+          "columns": ["teamId", "tenant", "position"]
         },
         "RTMember_team_agent_uq": {
           "name": "RTMember_team_agent_uq",
-          "columns": ["teamId", "tenant", "agentId"],
-          "nullsNotDistinct": false
+          "nullsNotDistinct": false,
+          "columns": ["teamId", "tenant", "agentId"]
         }
       },
       "policies": {},
@@ -2938,29 +2606,29 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "RTMemberSkill_member_fk": {
           "name": "RTMemberSkill_member_fk",
           "tableFrom": "RunnerTeamMemberSkill",
-          "columnsFrom": ["memberId", "tenant"],
           "tableTo": "RunnerTeamMember",
+          "columnsFrom": ["memberId", "tenant"],
           "columnsTo": ["id", "tenant"],
-          "onUpdate": "no action",
-          "onDelete": "cascade"
+          "onDelete": "cascade",
+          "onUpdate": "no action"
         },
         "RTMemberSkill_skill_fk": {
           "name": "RTMemberSkill_skill_fk",
           "tableFrom": "RunnerTeamMemberSkill",
-          "columnsFrom": ["skillId", "tenant"],
           "tableTo": "RunnerSkill",
+          "columnsFrom": ["skillId", "tenant"],
           "columnsTo": ["id", "tenant"],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
@@ -3104,9 +2772,9 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "RTRun_status_updated_idx": {
           "name": "RTRun_status_updated_idx",
@@ -3125,42 +2793,42 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "RTRun_team_fk": {
           "name": "RTRun_team_fk",
           "tableFrom": "RunnerTeamRun",
-          "columnsFrom": ["teamId", "tenant"],
           "tableTo": "RunnerTeam",
+          "columnsFrom": ["teamId", "tenant"],
           "columnsTo": ["id", "tenant"],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         },
         "RTRun_createdByUser_fk": {
           "name": "RTRun_createdByUser_fk",
           "tableFrom": "RunnerTeamRun",
-          "columnsFrom": ["createdByUserId"],
           "tableTo": "User",
+          "columnsFrom": ["createdByUserId"],
           "columnsTo": ["id"],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "RTRun_id_tenant_uq": {
           "name": "RTRun_id_tenant_uq",
-          "columns": ["id", "tenant"],
-          "nullsNotDistinct": false
+          "nullsNotDistinct": false,
+          "columns": ["id", "tenant"]
         },
         "RTRun_team_operation_uq": {
           "name": "RTRun_team_operation_uq",
-          "columns": ["teamId", "tenant", "operationId"],
-          "nullsNotDistinct": false
+          "nullsNotDistinct": false,
+          "columns": ["teamId", "tenant", "operationId"]
         }
       },
       "policies": {},
@@ -3400,9 +3068,9 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "RTStep_plannedOperation_uq": {
           "name": "RTStep_plannedOperation_uq",
@@ -3415,9 +3083,9 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "RTStep_plannedRunnerRun_uq": {
           "name": "RTStep_plannedRunnerRun_uq",
@@ -3430,9 +3098,9 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         },
         "RTStep_status_updated_idx": {
           "name": "RTStep_status_updated_idx",
@@ -3451,60 +3119,60 @@
             }
           ],
           "isUnique": false,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {
         "RTStep_teamRun_fk": {
           "name": "RTStep_teamRun_fk",
           "tableFrom": "RunnerTeamStep",
-          "columnsFrom": ["teamRunId", "tenant"],
           "tableTo": "RunnerTeamRun",
+          "columnsFrom": ["teamRunId", "tenant"],
           "columnsTo": ["id", "tenant"],
-          "onUpdate": "no action",
-          "onDelete": "cascade"
+          "onDelete": "cascade",
+          "onUpdate": "no action"
         },
         "RTStep_agent_fk": {
           "name": "RTStep_agent_fk",
           "tableFrom": "RunnerTeamStep",
-          "columnsFrom": ["agentId", "tenant"],
           "tableTo": "RunnerAgent",
+          "columnsFrom": ["agentId", "tenant"],
           "columnsTo": ["id", "tenant"],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         },
         "RTStep_runnerRun_fk": {
           "name": "RTStep_runnerRun_fk",
           "tableFrom": "RunnerTeamStep",
-          "columnsFrom": ["runnerRunId", "tenant"],
           "tableTo": "RunnerRun",
+          "columnsFrom": ["runnerRunId", "tenant"],
           "columnsTo": ["id", "tenant"],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         },
         "RTStep_approvalActorUser_fk": {
           "name": "RTStep_approvalActorUser_fk",
           "tableFrom": "RunnerTeamStep",
-          "columnsFrom": ["approvalActorUserId"],
           "tableTo": "User",
+          "columnsFrom": ["approvalActorUserId"],
           "columnsTo": ["id"],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "RTStep_id_tenant_uq": {
           "name": "RTStep_id_tenant_uq",
-          "columns": ["id", "tenant"],
-          "nullsNotDistinct": false
+          "nullsNotDistinct": false,
+          "columns": ["id", "tenant"]
         },
         "RTStep_run_position_uq": {
           "name": "RTStep_run_position_uq",
-          "columns": ["teamRunId", "tenant", "position"],
-          "nullsNotDistinct": false
+          "nullsNotDistinct": false,
+          "columns": ["teamRunId", "tenant", "position"]
         }
       },
       "policies": {},
@@ -3597,11 +3265,11 @@
         "Stream_chatId_Chat_id_fk": {
           "name": "Stream_chatId_Chat_id_fk",
           "tableFrom": "Stream",
-          "columnsFrom": ["chatId"],
           "tableTo": "Chat",
+          "columnsFrom": ["chatId"],
           "columnsTo": ["id"],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
@@ -3683,11 +3351,11 @@
         "StripeReconciliation_eventId_StripeEvent_id_fk": {
           "name": "StripeReconciliation_eventId_StripeEvent_id_fk",
           "tableFrom": "StripeReconciliation",
-          "columnsFrom": ["eventId"],
           "tableTo": "StripeEvent",
+          "columnsFrom": ["eventId"],
           "columnsTo": ["id"],
-          "onUpdate": "no action",
-          "onDelete": "restrict"
+          "onDelete": "restrict",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -3705,6 +3373,188 @@
         "StripeReconciliation_status_check": {
           "name": "StripeReconciliation_status_check",
           "value": "\"StripeReconciliation\".\"status\" in ('pending', 'acknowledged', 'resolved')"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.StripeReconciliationRun": {
+      "name": "StripeReconciliationRun",
+      "schema": "",
+      "columns": {
+        "cursor": {
+          "name": "cursor",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "leaseExpiresAt": {
+          "name": "leaseExpiresAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "leaseFence": {
+          "name": "leaseFence",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "leaseOwner": {
+          "name": "leaseOwner",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "updatedAt": {
+          "name": "updatedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "StripeReconciliationRun_singleton": {
+          "name": "StripeReconciliationRun_singleton",
+          "value": "\"StripeReconciliationRun\".\"id\" = 1"
+        },
+        "StripeReconciliationRun_fence_nonnegative": {
+          "name": "StripeReconciliationRun_fence_nonnegative",
+          "value": "\"StripeReconciliationRun\".\"leaseFence\" >= 0"
+        },
+        "StripeReconciliationRun_lease_shape": {
+          "name": "StripeReconciliationRun_lease_shape",
+          "value": "(\"StripeReconciliationRun\".\"leaseOwner\" is null and \"StripeReconciliationRun\".\"leaseExpiresAt\" is null) or (\"StripeReconciliationRun\".\"leaseOwner\" is not null and \"StripeReconciliationRun\".\"leaseExpiresAt\" is not null)"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.SubscriptionOverrideAudit": {
+      "name": "SubscriptionOverrideAudit",
+      "schema": "",
+      "columns": {
+        "action": {
+          "name": "action",
+          "type": "varchar(6)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "newAuthVersion": {
+          "name": "newAuthVersion",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "newSubscribedUntil": {
+          "name": "newSubscribedUntil",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "previousAuthVersion": {
+          "name": "previousAuthVersion",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "previousSubscribedUntil": {
+          "name": "previousSubscribedUntil",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "referenceDigest": {
+          "name": "referenceDigest",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "userId": {
+          "name": "userId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "SubscriptionOverrideAudit_user_createdAt_idx": {
+          "name": "SubscriptionOverrideAudit_user_createdAt_idx",
+          "columns": [
+            {
+              "expression": "userId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "createdAt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "SubscriptionOverrideAudit_userId_User_id_fk": {
+          "name": "SubscriptionOverrideAudit_userId_User_id_fk",
+          "tableFrom": "SubscriptionOverrideAudit",
+          "tableTo": "User",
+          "columnsFrom": ["userId"],
+          "columnsTo": ["id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "SubscriptionOverrideAudit_action_check": {
+          "name": "SubscriptionOverrideAudit_action_check",
+          "value": "\"SubscriptionOverrideAudit\".\"action\" in ('grant', 'revoke')"
+        },
+        "SubscriptionOverrideAudit_referenceDigest_check": {
+          "name": "SubscriptionOverrideAudit_referenceDigest_check",
+          "value": "\"SubscriptionOverrideAudit\".\"referenceDigest\" ~ '^[0-9a-f]{64}$'"
+        },
+        "SubscriptionOverrideAudit_authVersion_check": {
+          "name": "SubscriptionOverrideAudit_authVersion_check",
+          "value": "\"SubscriptionOverrideAudit\".\"previousAuthVersion\" >= 0 and \"SubscriptionOverrideAudit\".\"newAuthVersion\" = \"SubscriptionOverrideAudit\".\"previousAuthVersion\" + 1"
+        },
+        "SubscriptionOverrideAudit_paidThrough_check": {
+          "name": "SubscriptionOverrideAudit_paidThrough_check",
+          "value": "(\"SubscriptionOverrideAudit\".\"action\" = 'grant' and \"SubscriptionOverrideAudit\".\"newSubscribedUntil\" is not null) or (\"SubscriptionOverrideAudit\".\"action\" = 'revoke' and \"SubscriptionOverrideAudit\".\"newSubscribedUntil\" is null)"
         }
       },
       "isRLSEnabled": false
@@ -3775,20 +3625,20 @@
         "Suggestion_userId_User_id_fk": {
           "name": "Suggestion_userId_User_id_fk",
           "tableFrom": "Suggestion",
-          "columnsFrom": ["userId"],
           "tableTo": "User",
+          "columnsFrom": ["userId"],
           "columnsTo": ["id"],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "Suggestion_documentId_documentCreatedAt_Document_id_createdAt_fk": {
           "name": "Suggestion_documentId_documentCreatedAt_Document_id_createdAt_fk",
           "tableFrom": "Suggestion",
-          "columnsFrom": ["documentId", "documentCreatedAt"],
           "tableTo": "Document",
+          "columnsFrom": ["documentId", "documentCreatedAt"],
           "columnsTo": ["id", "createdAt"],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
@@ -3904,9 +3754,9 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {},
@@ -4012,6 +3862,18 @@
           "primaryKey": false,
           "notNull": false
         },
+        "subscriptionOverrideAction": {
+          "name": "subscriptionOverrideAction",
+          "type": "varchar(6)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "subscriptionOverrideAt": {
+          "name": "subscriptionOverrideAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
         "updatedAt": {
           "name": "updatedAt",
           "type": "timestamp",
@@ -4032,16 +3894,21 @@
             }
           ],
           "isUnique": true,
-          "with": {},
+          "concurrently": false,
           "method": "btree",
-          "concurrently": false
+          "with": {}
         }
       },
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "User_subscriptionOverride_shape": {
+          "name": "User_subscriptionOverride_shape",
+          "value": "(\"User\".\"subscriptionOverrideAction\" is null and \"User\".\"subscriptionOverrideAt\" is null) or (\"User\".\"subscriptionOverrideAction\" in ('grant', 'revoke') and \"User\".\"subscriptionOverrideAt\" is not null and isfinite(\"User\".\"subscriptionOverrideAt\"))"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.Vote_v2": {
@@ -4072,20 +3939,20 @@
         "Vote_v2_chatId_Chat_id_fk": {
           "name": "Vote_v2_chatId_Chat_id_fk",
           "tableFrom": "Vote_v2",
-          "columnsFrom": ["chatId"],
           "tableTo": "Chat",
+          "columnsFrom": ["chatId"],
           "columnsTo": ["id"],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         },
         "Vote_v2_messageId_Message_v2_id_fk": {
           "name": "Vote_v2_messageId_Message_v2_id_fk",
           "tableFrom": "Vote_v2",
-          "columnsFrom": ["messageId"],
           "tableTo": "Message_v2",
+          "columnsFrom": ["messageId"],
           "columnsTo": ["id"],
-          "onUpdate": "no action",
-          "onDelete": "no action"
+          "onDelete": "no action",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
@@ -4102,10 +3969,10 @@
   },
   "enums": {},
   "schemas": {},
-  "views": {},
   "sequences": {},
   "roles": {},
   "policies": {},
+  "views": {},
   "_meta": {
     "columns": {},
     "schemas": {},

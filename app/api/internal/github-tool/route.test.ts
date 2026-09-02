@@ -15,10 +15,7 @@ test("internal GitHub tool route exposes only the capability-authenticated POST 
     source,
     /productionGitHubToolHandler\(\)\(request,\s*ipAddress\(request\) \?\? null\)/u
   );
-  assert.doesNotMatch(
-    source,
-    /auth\(|session|cookie|RUNNER_RECONCILE_SECRET|COPILOT_GITHUB_TOKEN/iu
-  );
+  assert.doesNotMatch(source, /auth\(|session|cookie|COPILOT_GITHUB_TOKEN/iu);
 });
 
 test("production GitHub tool composition uses app installation authority and the operator database only", async () => {

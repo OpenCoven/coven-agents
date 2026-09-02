@@ -4,7 +4,7 @@ import {
   AGENT_RUNNER_API_VERSION,
   type RunSnapshot,
 } from "@opencoven/agent-contracts";
-import { cancelRunnerRun, reconcileAndDispatch } from "./reconcile";
+import { cancelRunnerRun, reconcileAndDispatch } from "./attempt-reconcile";
 import { createRunnerService } from "./service";
 import type {
   RunnerAgentRecord,
@@ -293,9 +293,12 @@ test("agent updates report retryable database unavailability", async () => {
 test("agent deletion delegates provider-first decommissioning", async () => {
   const calls: string[] = [];
   const service = createRunnerService({
-    deleteSandbox: (principal, agentId) => {
-      calls.push(`${principal.tenant}:${agentId}`);
-      return Promise.resolve({ kind: "deleted" as const });
+    resourceLifecycle: {
+      decommission: (principal, agentId) => {
+        calls.push(`${principal.tenant}:${agentId}`);
+        return Promise.resolve({ kind: "deleted" as const });
+      },
+      prewarm: () => Promise.reject(new Error("must not prewarm")),
     },
     store: baseStore(),
   });
@@ -324,7 +327,10 @@ test("agent deletion preserves busy, stale, and provider retryability outcomes",
   await Promise.all(
     outcomes.map(async ([providerResult, expected]) => {
       const service = createRunnerService({
-        deleteSandbox: async () => providerResult as never,
+        resourceLifecycle: {
+          decommission: async () => providerResult as never,
+          prewarm: () => Promise.reject(new Error("must not prewarm")),
+        },
         store: baseStore(),
       });
       assert.deepEqual(
@@ -337,8 +343,11 @@ test("agent deletion preserves busy, stale, and provider retryability outcomes",
 
 test("agent deletion converts thrown provider or database work into retryable unavailability", async () => {
   const service = createRunnerService({
-    deleteSandbox: () =>
-      Promise.reject(new Error("provider-or-database=private-detail")),
+    resourceLifecycle: {
+      decommission: () =>
+        Promise.reject(new Error("provider-or-database=private-detail")),
+      prewarm: () => Promise.reject(new Error("must not prewarm")),
+    },
     store: baseStore(),
   });
 
@@ -707,6 +716,7 @@ test("reconciliation recovers a cancelled terminal row after lease cleanup faile
     dispatchState: "dispatching",
     error: null,
     executionPermission: "unrestricted",
+    executionProvenance: null,
     fileEvidence: [],
     githubBrokerPolicy: null,
     id: RUN_ID,
@@ -813,7 +823,8 @@ test("reconciliation recovers a cancelled terminal row after lease cleanup faile
       clock: () => new Date("2026-08-28T15:00:00.000Z"),
       operator: OPERATOR,
       provider: {
-        resolveSandbox: () => Promise.reject(new Error("must not resolve")),
+        resolveExecutionContext: () =>
+          Promise.reject(new Error("must not resolve")),
         stop: () => Promise.reject(new Error("must not stop")),
       },
       rollbackCredentialResources: () => Promise.resolve(),
@@ -835,7 +846,8 @@ test("reconciliation recovers a cancelled terminal row after lease cleanup faile
   const reconciliation = await reconcileAndDispatch({
     operator: OPERATOR,
     provider: {
-      resolveSandbox: () => Promise.reject(new Error("must not resolve")),
+      resolveExecutionContext: () =>
+        Promise.reject(new Error("must not resolve")),
       stop: () => Promise.reject(new Error("must not stop")),
     },
     store: {
@@ -917,6 +929,21 @@ test("prewarm targets the most recently used agent without credential access", a
   let receivedOptions: unknown;
   const service = createRunnerService({
     clock: () => new Date("2026-08-28T16:00:00.000Z"),
+    resourceLifecycle: {
+      decommission: () => Promise.reject(new Error("must not decommission")),
+      prewarm: (_principal, target, options) => {
+        warmed.push(target.id);
+        receivedOptions = options;
+        return Promise.resolve({
+          agent: agent({
+            id: target.id,
+            warmStatus: "provisioning",
+            warmUpdatedAt: new Date("2026-08-28T16:00:00.000Z"),
+          }),
+          kind: "in_progress" as const,
+        });
+      },
+    },
     store: baseStore({
       listAgents: async () => [
         agent({
@@ -929,18 +956,6 @@ test("prewarm targets the most recently used agent without credential access", a
         }),
       ],
     }),
-    warmSandbox: (_principal, target, options) => {
-      warmed.push(target.id);
-      receivedOptions = options;
-      return Promise.resolve({
-        agent: agent({
-          id: target.id,
-          warmStatus: "provisioning",
-          warmUpdatedAt: new Date("2026-08-28T16:00:00.000Z"),
-        }),
-        kind: "in_progress" as const,
-      });
-    },
   });
 
   assert.deepEqual(
@@ -968,17 +983,20 @@ test("prewarm and warm reject unsupported harnesses before sandbox mutation or p
   let warmCalls = 0;
   const unsupported = agent({ runtime: "codex" });
   const service = createRunnerService({
+    resourceLifecycle: {
+      decommission: () => Promise.reject(new Error("must not decommission")),
+      prewarm: () => {
+        warmCalls += 1;
+        return Promise.resolve({
+          agent: unsupported,
+          kind: "in_progress" as const,
+        });
+      },
+    },
     store: baseStore({
       getAgent: async () => unsupported,
       listAgents: async () => [unsupported],
     }),
-    warmSandbox: () => {
-      warmCalls += 1;
-      return Promise.resolve({
-        agent: unsupported,
-        kind: "in_progress" as const,
-      });
-    },
   });
 
   assert.deepEqual(await service.prewarmMostRecent(PRINCIPAL), {
@@ -1032,8 +1050,12 @@ test("warm reports ready, in-progress, stale, missing, unavailable, and rejected
   await Promise.all(
     outcomes.map(async ([providerResult, expected]) => {
       const service = createRunnerService({
+        resourceLifecycle: {
+          decommission: () =>
+            Promise.reject(new Error("must not decommission")),
+          prewarm: async () => providerResult as never,
+        },
         store: baseStore(),
-        warmSandbox: async () => providerResult as never,
       });
       assert.deepEqual(await service.warmAgent(PRINCIPAL, AGENT_ID), expected);
     })
@@ -1070,8 +1092,12 @@ test("prewarm exposes concurrency and typed provider/database failures", async (
   await Promise.all(
     outcomes.map(async ([providerResult, expected]) => {
       const service = createRunnerService({
+        resourceLifecycle: {
+          decommission: () =>
+            Promise.reject(new Error("must not decommission")),
+          prewarm: async () => providerResult as never,
+        },
         store: baseStore(),
-        warmSandbox: async () => providerResult as never,
       });
       assert.deepEqual(await service.prewarmMostRecent(PRINCIPAL), expected);
     })

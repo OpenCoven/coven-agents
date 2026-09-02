@@ -8,6 +8,7 @@ import type {
   RunSnapshot,
 } from "@opencoven/agent-contracts";
 import type { GitHubBrokerPolicy } from "@/lib/github/capability";
+import type { RunnerExecutionProvenance } from "./execution-provenance";
 
 /**
  * A subscriber's authority to access only their tenant's runner records.
@@ -48,6 +49,9 @@ export type RunnerDispatchAuthority = Readonly<{
 export type RunnerDaytonaAttemptId = string & {
   readonly [runnerDaytonaAttemptIdBrand]: "RunnerDaytonaAttemptId";
 };
+
+/** Provider-neutral name for an attempt fenced by runner storage. */
+export type RunnerExecutionAttemptId = RunnerDaytonaAttemptId;
 
 export type RunnerReconciliationLease = Readonly<{
   expiresAt: Date;
@@ -149,6 +153,7 @@ export type RunnerRunRecord = Omit<
   agentRuntime: RunnerRuntime;
   agentWorkspace: string | null;
   authVersion: number | null;
+  authorityRevalidation?: boolean;
   cancellationRequestedAt: Date | null;
   completedAt: Date | null;
   createdAt: Date;
@@ -162,6 +167,7 @@ export type RunnerRunRecord = Omit<
   error: RunError | null;
   executionPermission: RunnerExecutionPermission;
   githubBrokerPolicy: GitHubBrokerPolicy | null;
+  executionProvenance: RunnerExecutionProvenance | null;
   logCursor: number;
   queueSequence: number;
   requestHash: string;
@@ -323,6 +329,11 @@ export type ExpiredDispatchLeaseAdoptionInput = ExpiredDispatchRequeueInput & {
 export type ReleaseDaytonaAttemptInput = {
   attemptId: RunnerDaytonaAttemptId;
 };
+
+export type AuthorizeDaytonaPreparationInput = Readonly<{
+  attemptId?: RunnerDaytonaAttemptId;
+  executionProvenance: RunnerExecutionProvenance;
+}>;
 
 export type ReleaseExpiredDaytonaAttemptInput = ExpiredDispatchRequeueInput & {
   attemptId: RunnerDaytonaAttemptId;

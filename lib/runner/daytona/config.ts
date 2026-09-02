@@ -5,6 +5,27 @@ export const DAYTONA_DEFAULT_TARGET = "us";
 export const DAYTONA_DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 export const DAYTONA_MAX_REQUEST_TIMEOUT_MS = 120_000;
 export const DAYTONA_MIN_REQUEST_TIMEOUT_MS = 1000;
+export const DAYTONA_SANDBOX_RESOURCE_POLICY_DEFAULTS = Object.freeze({
+  autoArchiveInterval: 10_080,
+  autoStopInterval: 15,
+  cpu: 2,
+  disk: 20,
+  memory: 4,
+});
+export const DAYTONA_SANDBOX_RESOURCE_POLICY_CAPS = Object.freeze({
+  autoArchiveInterval: 43_200,
+  autoStopInterval: 60,
+  cpu: 4,
+  disk: 40,
+  memory: 8,
+});
+export const DAYTONA_SANDBOX_RESOURCE_POLICY_ENVIRONMENT_KEYS = [
+  "DAYTONA_AUTO_ARCHIVE_MINUTES",
+  "DAYTONA_AUTO_STOP_MINUTES",
+  "DAYTONA_SANDBOX_CPU_CORES",
+  "DAYTONA_SANDBOX_DISK_GIB",
+  "DAYTONA_SANDBOX_MEMORY_GIB",
+] as const;
 
 const VERSIONED_SNAPSHOT_NAME = /^coven-agents-copilot-\d+$/u;
 
@@ -13,6 +34,23 @@ export type DaytonaSnapshotConfiguration = Readonly<{
   apiUrl: string;
   snapshotName: string;
   target: "eu" | "us";
+}>;
+
+/**
+ * Server-owned limits for persistent sandboxes. TTL and automatic deletion
+ * remain disabled because durable, fenced lifecycle recovery is the deletion
+ * authority for an agent's persistent workspace.
+ */
+export type DaytonaSandboxResourcePolicy = Readonly<{
+  autoArchiveInterval: number;
+  autoDeleteInterval: -1;
+  autoStopInterval: number;
+  resources: Readonly<{
+    cpu: number;
+    disk: number;
+    memory: number;
+  }>;
+  ttlMinutes: 0;
 }>;
 
 function configuredValue(
@@ -100,6 +138,80 @@ export function daytonaRequestTimeout(
     );
   }
   return timeout;
+}
+
+function boundedPositiveInteger(
+  environment: NodeJS.ProcessEnv,
+  name: string,
+  minimum: number,
+  maximum: number,
+  defaultValue: number
+): number {
+  const raw = environment[name]?.trim() ?? String(defaultValue);
+  if (!/^\d+$/u.test(raw)) {
+    throw new Error(
+      `${name} must be an integer between ${minimum} and ${maximum}.`
+    );
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new Error(
+      `${name} must be an integer between ${minimum} and ${maximum}.`
+    );
+  }
+  return value;
+}
+
+/**
+ * Parses the complete server-owned resource policy rather than permitting
+ * Daytona's resource defaults. There are deliberately no TTL or auto-delete
+ * environment switches: a persistent agent must not be silently destroyed by
+ * elapsed wall-clock time or an automatic stopped-resource cleanup.
+ */
+export function daytonaSandboxResourcePolicy(
+  environment: NodeJS.ProcessEnv = process.env
+): DaytonaSandboxResourcePolicy {
+  return {
+    autoArchiveInterval: boundedPositiveInteger(
+      environment,
+      "DAYTONA_AUTO_ARCHIVE_MINUTES",
+      60,
+      DAYTONA_SANDBOX_RESOURCE_POLICY_CAPS.autoArchiveInterval,
+      DAYTONA_SANDBOX_RESOURCE_POLICY_DEFAULTS.autoArchiveInterval
+    ),
+    autoDeleteInterval: -1,
+    autoStopInterval: boundedPositiveInteger(
+      environment,
+      "DAYTONA_AUTO_STOP_MINUTES",
+      5,
+      DAYTONA_SANDBOX_RESOURCE_POLICY_CAPS.autoStopInterval,
+      DAYTONA_SANDBOX_RESOURCE_POLICY_DEFAULTS.autoStopInterval
+    ),
+    resources: {
+      cpu: boundedPositiveInteger(
+        environment,
+        "DAYTONA_SANDBOX_CPU_CORES",
+        1,
+        DAYTONA_SANDBOX_RESOURCE_POLICY_CAPS.cpu,
+        DAYTONA_SANDBOX_RESOURCE_POLICY_DEFAULTS.cpu
+      ),
+      disk: boundedPositiveInteger(
+        environment,
+        "DAYTONA_SANDBOX_DISK_GIB",
+        10,
+        DAYTONA_SANDBOX_RESOURCE_POLICY_CAPS.disk,
+        DAYTONA_SANDBOX_RESOURCE_POLICY_DEFAULTS.disk
+      ),
+      memory: boundedPositiveInteger(
+        environment,
+        "DAYTONA_SANDBOX_MEMORY_GIB",
+        1,
+        DAYTONA_SANDBOX_RESOURCE_POLICY_CAPS.memory,
+        DAYTONA_SANDBOX_RESOURCE_POLICY_DEFAULTS.memory
+      ),
+    },
+    ttlMinutes: 0,
+  };
 }
 
 /**

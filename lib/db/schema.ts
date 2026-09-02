@@ -41,6 +41,7 @@ import type {
   GitHubUserRepositoryPermission,
 } from "../github/authority-types";
 import type { GitHubBrokerPolicy } from "../github/capability";
+import type { RunnerExecutionProvenance } from "../runner/execution-provenance";
 
 const runnerMaxCommandResultsSql = sql.raw(
   String(AGENT_RUNNER_LIMITS.maxCommandResults)
@@ -103,10 +104,19 @@ export const user = pgTable(
      * set this; until then it is set by `pnpm subscription`.
      */
     subscribedUntil: timestamp("subscribedUntil"),
+    subscriptionOverrideAction: varchar("subscriptionOverrideAction", {
+      enum: ["grant", "revoke"],
+      length: 6,
+    }),
+    subscriptionOverrideAt: timestamp("subscriptionOverrideAt"),
     updatedAt: timestamp("updatedAt").notNull().defaultNow(),
   },
   (table) => [
     uniqueIndex("User_stripeCustomerId_idx").on(table.stripeCustomerId),
+    check(
+      "User_subscriptionOverride_shape",
+      sql`(${table.subscriptionOverrideAction} is null and ${table.subscriptionOverrideAt} is null) or (${table.subscriptionOverrideAction} in ('grant', 'revoke') and ${table.subscriptionOverrideAt} is not null and isfinite(${table.subscriptionOverrideAt}))`
+    ),
   ]
 );
 
@@ -458,6 +468,85 @@ export type StripeReconciliation = InferSelectModel<
 >;
 
 /**
+ * Singleton lease and cursor for bounded automatic Stripe reconciliation.
+ *
+ * This contains coordination metadata only. In particular, it deliberately
+ * retains no provider payloads or identifiers beyond the local User cursor.
+ */
+export const stripeReconciliationRun = pgTable(
+  "StripeReconciliationRun",
+  {
+    cursor: uuid("cursor"),
+    id: integer("id").primaryKey().notNull(),
+    leaseExpiresAt: timestamp("leaseExpiresAt"),
+    leaseFence: integer("leaseFence").notNull().default(0),
+    leaseOwner: varchar("leaseOwner", { length: 64 }),
+    updatedAt: timestamp("updatedAt").notNull().defaultNow(),
+  },
+  (table) => [
+    check("StripeReconciliationRun_singleton", sql`${table.id} = 1`),
+    check(
+      "StripeReconciliationRun_fence_nonnegative",
+      sql`${table.leaseFence} >= 0`
+    ),
+    check(
+      "StripeReconciliationRun_lease_shape",
+      sql`(${table.leaseOwner} is null and ${table.leaseExpiresAt} is null) or (${table.leaseOwner} is not null and ${table.leaseExpiresAt} is not null)`
+    ),
+  ]
+);
+
+export type StripeReconciliationRun = InferSelectModel<
+  typeof stripeReconciliationRun
+>;
+
+export const subscriptionOverrideAudit = pgTable(
+  "SubscriptionOverrideAudit",
+  {
+    action: varchar("action", {
+      enum: ["grant", "revoke"],
+      length: 6,
+    }).notNull(),
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+    id: uuid("id").primaryKey().notNull().defaultRandom(),
+    newAuthVersion: integer("newAuthVersion").notNull(),
+    newSubscribedUntil: timestamp("newSubscribedUntil"),
+    previousAuthVersion: integer("previousAuthVersion").notNull(),
+    previousSubscribedUntil: timestamp("previousSubscribedUntil"),
+    referenceDigest: varchar("referenceDigest", { length: 64 }).notNull(),
+    userId: uuid("userId")
+      .notNull()
+      .references(() => user.id, { onDelete: "restrict" }),
+  },
+  (table) => [
+    index("SubscriptionOverrideAudit_user_createdAt_idx").on(
+      table.userId,
+      table.createdAt
+    ),
+    check(
+      "SubscriptionOverrideAudit_action_check",
+      sql`${table.action} in ('grant', 'revoke')`
+    ),
+    check(
+      "SubscriptionOverrideAudit_referenceDigest_check",
+      sql`${table.referenceDigest} ~ '^[0-9a-f]{64}$'`
+    ),
+    check(
+      "SubscriptionOverrideAudit_authVersion_check",
+      sql`${table.previousAuthVersion} >= 0 and ${table.newAuthVersion} = ${table.previousAuthVersion} + 1`
+    ),
+    check(
+      "SubscriptionOverrideAudit_paidThrough_check",
+      sql`(${table.action} = 'grant' and ${table.newSubscribedUntil} is not null) or (${table.action} = 'revoke' and ${table.newSubscribedUntil} is null)`
+    ),
+  ]
+);
+
+export type SubscriptionOverrideAudit = InferSelectModel<
+  typeof subscriptionOverrideAudit
+>;
+
+/**
  * One durable claim for a costly request.
  *
  * The scoped unique index is the concurrency boundary: only one request for
@@ -642,6 +731,9 @@ export const runnerRun = pgTable(
     agentWorkspace: varchar("agentWorkspace", {
       length: AGENT_RUNNER_LIMITS.maxWorkspaceLength,
     }),
+    authorityRevalidation: boolean("authorityRevalidation")
+      .notNull()
+      .default(false),
     authVersion: integer("authVersion"),
     cancellationRequestedAt: timestamp("cancellationRequestedAt"),
     commandEvidence: jsonb("commandEvidence")
@@ -676,6 +768,9 @@ export const runnerRun = pgTable(
     })
       .notNull()
       .default("unrestricted"),
+    executionProvenance: jsonb(
+      "executionProvenance"
+    ).$type<RunnerExecutionProvenance>(),
     fileEvidence: jsonb("fileEvidence")
       .$type<FileEvidence[]>()
       .notNull()
@@ -765,6 +860,32 @@ export const runnerRun = pgTable(
     check(
       "RunnerRun_githubBrokerPolicy_valid",
       sql`${table.githubBrokerPolicy} is null or (${table.teamStepId} is not null and jsonb_typeof(${table.githubBrokerPolicy}) = 'object' and ${table.githubBrokerPolicy}->>'version' = '1' and ${table.githubBrokerPolicy}->>'teamStepId' = ${table.teamStepId}::text and ${table.githubBrokerPolicy}->>'authVersion' = ${table.authVersion}::text and (${table.githubBrokerPolicy}->>'actorUserId') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' and jsonb_typeof(${table.githubBrokerPolicy}->'allowedCapabilities') = 'array' and jsonb_array_length(${table.githubBrokerPolicy}->'allowedCapabilities') between 1 and ${teamMaxSkillsPerMemberSql} and jsonb_typeof(${table.githubBrokerPolicy}->'repositories') = 'array' and jsonb_array_length(${table.githubBrokerPolicy}->'repositories') between 1 and 16)`
+    ),
+    check(
+      "RunnerRun_executionProvenance_valid",
+      sql`${table.executionProvenance} is null or (
+        jsonb_typeof(${table.executionProvenance}) = 'object'
+        and ${table.executionProvenance} ?& array['productExecutionClass', 'provider', 'capabilityContractVersion', 'adapterVersion', 'pinnedSnapshot', 'target', 'lifecycle']
+        and (${table.executionProvenance} - 'productExecutionClass' - 'provider' - 'capabilityContractVersion' - 'adapterVersion' - 'pinnedSnapshot' - 'target' - 'lifecycle') = '{}'::jsonb
+        and ${table.executionProvenance}->>'productExecutionClass' = 'hosted'
+        and ${table.executionProvenance}->>'provider' in ('daytona', 'hermetic')
+        and jsonb_typeof(${table.executionProvenance}->'capabilityContractVersion') = 'string'
+        and ${table.executionProvenance}->>'capabilityContractVersion' ~ '^hosted-v[1-9][0-9]{0,2}$'
+        and jsonb_typeof(${table.executionProvenance}->'adapterVersion') = 'string'
+        and (
+          (${table.executionProvenance}->>'provider' = 'daytona'
+            and ${table.executionProvenance}->>'adapterVersion' ~ '^daytona-adapter-v[1-9][0-9]{0,2}$'
+            and ${table.executionProvenance}->>'pinnedSnapshot' ~ '^coven-agents-copilot-[0-9]{1,10}$'
+            and ${table.executionProvenance}->>'target' in ('eu', 'us')
+            and ${table.executionProvenance}->>'lifecycle' = 'persistent')
+          or (${table.executionProvenance}->>'provider' = 'hermetic'
+            and ${table.executionProvenance}->>'adapterVersion' ~ '^hermetic-adapter-v[1-9][0-9]{0,2}$'
+            and ${table.executionProvenance}->>'pinnedSnapshot' = 'hermetic-e2e-v1'
+            and ${table.executionProvenance}->>'target' = 'e2e'
+            and ${table.executionProvenance}->>'lifecycle' = 'ephemeral')
+        )
+        and jsonb_typeof(${table.executionProvenance}->'pinnedSnapshot') = 'string'
+      )`
     ),
     check("RunnerRun_queueSequence_positive", sql`${table.queueSequence} > 0`),
     check("RunnerRun_logCursor_nonnegative", sql`${table.logCursor} >= 0`),

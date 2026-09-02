@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   AGENT_RUNNER_LIMITS,
   commandEvidenceSchema,
+  exactEvidenceRedactions,
   fileEvidenceSchema,
   runEventSchema,
   runEventsSchema,
@@ -297,6 +298,151 @@ test("projects terminal output, evidence, and errors as bounded strict events", 
     message: "message [REDACTED]",
     retryable: false,
   });
+});
+
+test("redacts bounded provider identifiers across neutral evidence projections", () => {
+  const tenantCredential = "tenant-credential-cross-surface";
+  const daytonaApiKey = [
+    "sk",
+    "proj",
+    "syntheticdaytonaapikeyfixture000000",
+  ].join("-");
+  const reconcileBearer = "manual-reconcile-service-bearer";
+  const signedClaim = [
+    "eyJhbGciOiJIUzI1NiJ9",
+    "eyJzdWIiOiJmaXh0dXJlIn0",
+    "c2lnbmVkLWNyb3NzLXN1cmZhY2U",
+  ].join(".");
+  const sandboxId = "daytona-sandbox-private-id";
+  const sandboxName = "daytona-sandbox-private-name";
+  const sessionId = "daytona-session-private-id";
+  const commandId = "daytona-command-private-id";
+  const attemptId = "daytona-attempt-private-id";
+  const tenantBMarker = "tenant-b-evidence-marker";
+  const redactions = exactEvidenceRedactions(
+    tenantCredential,
+    daytonaApiKey,
+    reconcileBearer,
+    signedClaim,
+    sandboxId,
+    sandboxName,
+    sessionId,
+    commandId,
+    attemptId,
+    tenantBMarker
+  );
+  const planted = [
+    tenantCredential,
+    daytonaApiKey,
+    `Bearer ${reconcileBearer}`,
+    signedClaim,
+    sandboxId,
+    sandboxName,
+    sessionId,
+    commandId,
+    attemptId,
+    tenantBMarker,
+  ].join(" | ");
+  const normalizedCommands = normalizeCommandEvidence(
+    [
+      {
+        command: planted,
+        stderr: planted,
+        stdout: planted,
+      },
+    ],
+    redactions
+  );
+  const normalizedFiles = normalizeFileEvidence(
+    [
+      {
+        operation: "modify",
+        path: `/workspace/${planted}.md`,
+        status: "completed",
+      },
+    ],
+    redactions
+  );
+  const live = [
+    projectHarnessRunEvent(
+      {
+        at: createdAt,
+        kind: "message",
+        model: "test-model",
+        text: planted,
+      },
+      2,
+      redactions,
+      new Map()
+    ),
+    projectHarnessRunEvent(
+      {
+        at: createdAt,
+        kind: "file",
+        operation: "edited",
+        path: `/workspace/${planted}.md`,
+      },
+      3,
+      redactions,
+      new Map()
+    ),
+  ];
+  const terminal = projectTerminalRun(
+    queuedSnapshot(),
+    {
+      commandEvidence: [
+        {
+          command: planted,
+          stderr: planted,
+          stdout: planted,
+        },
+      ],
+      completedAt: "2026-08-20T20:02:00.000Z",
+      credential: redactions,
+      error: {
+        code: "runner_failure",
+        details: planted,
+        message: planted,
+        retryable: false,
+      },
+      fileEvidence: [
+        {
+          operation: "modify",
+          path: `/workspace/${planted}.md`,
+          status: "completed",
+        },
+      ],
+      output: planted,
+      status: "failed",
+    },
+    2
+  );
+  const persisted = JSON.stringify({
+    diagnostics: [
+      ...normalizedCommands.diagnostics,
+      ...normalizedFiles.diagnostics,
+    ],
+    events: terminal.events,
+    files: normalizedFiles.evidence,
+    live,
+    run: terminal.run,
+    terminal: terminal.run.output,
+  });
+
+  for (const value of [
+    tenantCredential,
+    daytonaApiKey,
+    reconcileBearer,
+    signedClaim,
+    sandboxId,
+    sandboxName,
+    sessionId,
+    commandId,
+    attemptId,
+    tenantBMarker,
+  ]) {
+    assert.equal(persisted.includes(value), false, `leaked ${value}`);
+  }
 });
 
 test("includes a null error in completed snapshots and completion events", () => {

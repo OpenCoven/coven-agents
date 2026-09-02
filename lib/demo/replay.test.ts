@@ -117,3 +117,34 @@ test("cleanup stops pending reveals and a restart begins from the first event", 
   assert.deepEqual(firstPass, [1]);
   assert.deepEqual(secondPass, [1, 2, 3]);
 });
+
+test("stale playback generations cannot reveal or complete", () => {
+  const timers = fakeTimers();
+  const revealed: number[] = [];
+  const completed: number[] = [];
+  let generation = 1;
+
+  schedulePlayback(
+    steps(),
+    {
+      onComplete: () => completed.push(1),
+      onReveal: (event) => revealed.push(event.id),
+    },
+    timers.api,
+    () => generation === 1
+  );
+  generation = 2;
+  schedulePlayback(
+    steps(),
+    {
+      onComplete: () => completed.push(2),
+      onReveal: (event) => revealed.push(event.id),
+    },
+    timers.api,
+    () => generation === 2
+  );
+  timers.runRemaining();
+
+  assert.deepEqual(revealed, [1, 2, 3]);
+  assert.deepEqual(completed, [2]);
+});

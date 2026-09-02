@@ -1,6 +1,6 @@
 {
-  "id": "e44bfd4a-a87c-47c8-9a98-bb1fc58a6c17",
-  "prevId": "aacfb460-5f57-4101-9b05-d6214dfd60cb",
+  "id": "57ced12b-80a2-4e56-8448-7cce3154fa77",
+  "prevId": "22a74338-bcf3-43f1-9afa-c7847ab72ead",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -2006,6 +2006,13 @@
           "primaryKey": false,
           "notNull": false
         },
+        "authorityRevalidation": {
+          "name": "authorityRevalidation",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
         "authVersion": {
           "name": "authVersion",
           "type": "integer",
@@ -2094,6 +2101,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": "'unrestricted'"
+        },
+        "executionProvenance": {
+          "name": "executionProvenance",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
         },
         "fileEvidence": {
           "name": "fileEvidence",
@@ -2427,6 +2440,10 @@
         "RunnerRun_githubBrokerPolicy_valid": {
           "name": "RunnerRun_githubBrokerPolicy_valid",
           "value": "\"RunnerRun\".\"githubBrokerPolicy\" is null or (\"RunnerRun\".\"teamStepId\" is not null and jsonb_typeof(\"RunnerRun\".\"githubBrokerPolicy\") = 'object' and \"RunnerRun\".\"githubBrokerPolicy\"->>'version' = '1' and \"RunnerRun\".\"githubBrokerPolicy\"->>'teamStepId' = \"RunnerRun\".\"teamStepId\"::text and \"RunnerRun\".\"githubBrokerPolicy\"->>'authVersion' = \"RunnerRun\".\"authVersion\"::text and (\"RunnerRun\".\"githubBrokerPolicy\"->>'actorUserId') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' and jsonb_typeof(\"RunnerRun\".\"githubBrokerPolicy\"->'allowedCapabilities') = 'array' and jsonb_array_length(\"RunnerRun\".\"githubBrokerPolicy\"->'allowedCapabilities') between 1 and 8 and jsonb_typeof(\"RunnerRun\".\"githubBrokerPolicy\"->'repositories') = 'array' and jsonb_array_length(\"RunnerRun\".\"githubBrokerPolicy\"->'repositories') between 1 and 16)"
+        },
+        "RunnerRun_executionProvenance_valid": {
+          "name": "RunnerRun_executionProvenance_valid",
+          "value": "\"RunnerRun\".\"executionProvenance\" is null or (\n        jsonb_typeof(\"RunnerRun\".\"executionProvenance\") = 'object'\n        and \"RunnerRun\".\"executionProvenance\" ?& array['productExecutionClass', 'provider', 'capabilityContractVersion', 'adapterVersion', 'pinnedSnapshot', 'target', 'lifecycle']\n        and (\"RunnerRun\".\"executionProvenance\" - 'productExecutionClass' - 'provider' - 'capabilityContractVersion' - 'adapterVersion' - 'pinnedSnapshot' - 'target' - 'lifecycle') = '{}'::jsonb\n        and \"RunnerRun\".\"executionProvenance\"->>'productExecutionClass' = 'hosted'\n        and \"RunnerRun\".\"executionProvenance\"->>'provider' in ('daytona', 'hermetic')\n        and jsonb_typeof(\"RunnerRun\".\"executionProvenance\"->'capabilityContractVersion') = 'string'\n        and \"RunnerRun\".\"executionProvenance\"->>'capabilityContractVersion' ~ '^hosted-v[1-9][0-9]{0,2}$'\n        and jsonb_typeof(\"RunnerRun\".\"executionProvenance\"->'adapterVersion') = 'string'\n        and (\n          (\"RunnerRun\".\"executionProvenance\"->>'provider' = 'daytona'\n            and \"RunnerRun\".\"executionProvenance\"->>'adapterVersion' ~ '^daytona-adapter-v[1-9][0-9]{0,2}$'\n            and \"RunnerRun\".\"executionProvenance\"->>'pinnedSnapshot' ~ '^coven-agents-copilot-[0-9]{1,10}$'\n            and \"RunnerRun\".\"executionProvenance\"->>'target' in ('eu', 'us')\n            and \"RunnerRun\".\"executionProvenance\"->>'lifecycle' = 'persistent')\n          or (\"RunnerRun\".\"executionProvenance\"->>'provider' = 'hermetic'\n            and \"RunnerRun\".\"executionProvenance\"->>'adapterVersion' ~ '^hermetic-adapter-v[1-9][0-9]{0,2}$'\n            and \"RunnerRun\".\"executionProvenance\"->>'pinnedSnapshot' = 'hermetic-e2e-v1'\n            and \"RunnerRun\".\"executionProvenance\"->>'target' = 'e2e'\n            and \"RunnerRun\".\"executionProvenance\"->>'lifecycle' = 'ephemeral')\n        )\n        and jsonb_typeof(\"RunnerRun\".\"executionProvenance\"->'pinnedSnapshot') = 'string'\n      )"
         },
         "RunnerRun_queueSequence_positive": {
           "name": "RunnerRun_queueSequence_positive",
@@ -3767,6 +3784,188 @@
       },
       "isRLSEnabled": false
     },
+    "public.StripeReconciliationRun": {
+      "name": "StripeReconciliationRun",
+      "schema": "",
+      "columns": {
+        "cursor": {
+          "name": "cursor",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "leaseExpiresAt": {
+          "name": "leaseExpiresAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "leaseFence": {
+          "name": "leaseFence",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "leaseOwner": {
+          "name": "leaseOwner",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "updatedAt": {
+          "name": "updatedAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "StripeReconciliationRun_singleton": {
+          "name": "StripeReconciliationRun_singleton",
+          "value": "\"StripeReconciliationRun\".\"id\" = 1"
+        },
+        "StripeReconciliationRun_fence_nonnegative": {
+          "name": "StripeReconciliationRun_fence_nonnegative",
+          "value": "\"StripeReconciliationRun\".\"leaseFence\" >= 0"
+        },
+        "StripeReconciliationRun_lease_shape": {
+          "name": "StripeReconciliationRun_lease_shape",
+          "value": "(\"StripeReconciliationRun\".\"leaseOwner\" is null and \"StripeReconciliationRun\".\"leaseExpiresAt\" is null) or (\"StripeReconciliationRun\".\"leaseOwner\" is not null and \"StripeReconciliationRun\".\"leaseExpiresAt\" is not null)"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.SubscriptionOverrideAudit": {
+      "name": "SubscriptionOverrideAudit",
+      "schema": "",
+      "columns": {
+        "action": {
+          "name": "action",
+          "type": "varchar(6)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "newAuthVersion": {
+          "name": "newAuthVersion",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "newSubscribedUntil": {
+          "name": "newSubscribedUntil",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "previousAuthVersion": {
+          "name": "previousAuthVersion",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "previousSubscribedUntil": {
+          "name": "previousSubscribedUntil",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "referenceDigest": {
+          "name": "referenceDigest",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "userId": {
+          "name": "userId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "SubscriptionOverrideAudit_user_createdAt_idx": {
+          "name": "SubscriptionOverrideAudit_user_createdAt_idx",
+          "columns": [
+            {
+              "expression": "userId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "createdAt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "SubscriptionOverrideAudit_userId_User_id_fk": {
+          "name": "SubscriptionOverrideAudit_userId_User_id_fk",
+          "tableFrom": "SubscriptionOverrideAudit",
+          "tableTo": "User",
+          "columnsFrom": ["userId"],
+          "columnsTo": ["id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "SubscriptionOverrideAudit_action_check": {
+          "name": "SubscriptionOverrideAudit_action_check",
+          "value": "\"SubscriptionOverrideAudit\".\"action\" in ('grant', 'revoke')"
+        },
+        "SubscriptionOverrideAudit_referenceDigest_check": {
+          "name": "SubscriptionOverrideAudit_referenceDigest_check",
+          "value": "\"SubscriptionOverrideAudit\".\"referenceDigest\" ~ '^[0-9a-f]{64}$'"
+        },
+        "SubscriptionOverrideAudit_authVersion_check": {
+          "name": "SubscriptionOverrideAudit_authVersion_check",
+          "value": "\"SubscriptionOverrideAudit\".\"previousAuthVersion\" >= 0 and \"SubscriptionOverrideAudit\".\"newAuthVersion\" = \"SubscriptionOverrideAudit\".\"previousAuthVersion\" + 1"
+        },
+        "SubscriptionOverrideAudit_paidThrough_check": {
+          "name": "SubscriptionOverrideAudit_paidThrough_check",
+          "value": "(\"SubscriptionOverrideAudit\".\"action\" = 'grant' and \"SubscriptionOverrideAudit\".\"newSubscribedUntil\" is not null) or (\"SubscriptionOverrideAudit\".\"action\" = 'revoke' and \"SubscriptionOverrideAudit\".\"newSubscribedUntil\" is null)"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.Suggestion": {
       "name": "Suggestion",
       "schema": "",
@@ -4070,6 +4269,18 @@
           "primaryKey": false,
           "notNull": false
         },
+        "subscriptionOverrideAction": {
+          "name": "subscriptionOverrideAction",
+          "type": "varchar(6)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "subscriptionOverrideAt": {
+          "name": "subscriptionOverrideAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
         "updatedAt": {
           "name": "updatedAt",
           "type": "timestamp",
@@ -4099,7 +4310,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "User_subscriptionOverride_shape": {
+          "name": "User_subscriptionOverride_shape",
+          "value": "(\"User\".\"subscriptionOverrideAction\" is null and \"User\".\"subscriptionOverrideAt\" is null) or (\"User\".\"subscriptionOverrideAction\" in ('grant', 'revoke') and \"User\".\"subscriptionOverrideAt\" is not null and isfinite(\"User\".\"subscriptionOverrideAt\"))"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.Vote_v2": {

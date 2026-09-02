@@ -1,5 +1,5 @@
 {
-  "id": "610e2001-d51a-4162-840f-853485b7c132",
+  "id": "541549a9-e334-417a-88f1-42c09f271e98",
   "prevId": "878708bd-b318-47dd-96c1-3c6d702a269f",
   "version": "7",
   "dialect": "postgresql",
@@ -1366,70 +1366,6 @@
         "RGHConn_version_valid": {
           "name": "RGHConn_version_valid",
           "value": "\"RunnerGitHubConnection\".\"version\" >= 0"
-        }
-      },
-      "isRLSEnabled": false
-    },
-    "public.RunnerGitHubConnectionFence": {
-      "name": "RunnerGitHubConnectionFence",
-      "schema": "",
-      "columns": {
-        "generation": {
-          "name": "generation",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "tenant": {
-          "name": "tenant",
-          "type": "varchar(64)",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "updatedAt": {
-          "name": "updatedAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "RGHConnFence_tenant_generation_uq": {
-          "name": "RGHConnFence_tenant_generation_uq",
-          "columns": [
-            {
-              "expression": "tenant",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "generation",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "RGHConnFence_tenant_valid": {
-          "name": "RGHConnFence_tenant_valid",
-          "value": "\"RunnerGitHubConnectionFence\".\"tenant\" ~ '^[A-Za-z0-9_]{1,64}$'"
-        },
-        "RGHConnFence_generation_nonnegative": {
-          "name": "RGHConnFence_generation_nonnegative",
-          "value": "\"RunnerGitHubConnectionFence\".\"generation\" >= 0"
         }
       },
       "isRLSEnabled": false
@@ -3420,6 +3356,124 @@
         "StripeReconciliation_status_check": {
           "name": "StripeReconciliation_status_check",
           "value": "\"StripeReconciliation\".\"status\" in ('pending', 'acknowledged', 'resolved')"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.SubscriptionOverrideAudit": {
+      "name": "SubscriptionOverrideAudit",
+      "schema": "",
+      "columns": {
+        "action": {
+          "name": "action",
+          "type": "varchar(6)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "newAuthVersion": {
+          "name": "newAuthVersion",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "newSubscribedUntil": {
+          "name": "newSubscribedUntil",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "previousAuthVersion": {
+          "name": "previousAuthVersion",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "previousSubscribedUntil": {
+          "name": "previousSubscribedUntil",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "referenceDigest": {
+          "name": "referenceDigest",
+          "type": "varchar(64)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "userId": {
+          "name": "userId",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "SubscriptionOverrideAudit_user_createdAt_idx": {
+          "name": "SubscriptionOverrideAudit_user_createdAt_idx",
+          "columns": [
+            {
+              "expression": "userId",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "createdAt",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "SubscriptionOverrideAudit_userId_User_id_fk": {
+          "name": "SubscriptionOverrideAudit_userId_User_id_fk",
+          "tableFrom": "SubscriptionOverrideAudit",
+          "tableTo": "User",
+          "columnsFrom": ["userId"],
+          "columnsTo": ["id"],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "SubscriptionOverrideAudit_action_check": {
+          "name": "SubscriptionOverrideAudit_action_check",
+          "value": "\"SubscriptionOverrideAudit\".\"action\" in ('grant', 'revoke')"
+        },
+        "SubscriptionOverrideAudit_referenceDigest_check": {
+          "name": "SubscriptionOverrideAudit_referenceDigest_check",
+          "value": "\"SubscriptionOverrideAudit\".\"referenceDigest\" ~ '^[0-9a-f]{64}$'"
+        },
+        "SubscriptionOverrideAudit_authVersion_check": {
+          "name": "SubscriptionOverrideAudit_authVersion_check",
+          "value": "\"SubscriptionOverrideAudit\".\"previousAuthVersion\" >= 0 and \"SubscriptionOverrideAudit\".\"newAuthVersion\" = \"SubscriptionOverrideAudit\".\"previousAuthVersion\" + 1"
+        },
+        "SubscriptionOverrideAudit_paidThrough_check": {
+          "name": "SubscriptionOverrideAudit_paidThrough_check",
+          "value": "(\"SubscriptionOverrideAudit\".\"action\" = 'grant' and \"SubscriptionOverrideAudit\".\"newSubscribedUntil\" is not null) or (\"SubscriptionOverrideAudit\".\"action\" = 'revoke' and \"SubscriptionOverrideAudit\".\"newSubscribedUntil\" is null)"
         }
       },
       "isRLSEnabled": false

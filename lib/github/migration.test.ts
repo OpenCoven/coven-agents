@@ -5,11 +5,25 @@ import test from "node:test";
 
 const migrations = new URL("../db/migrations/", import.meta.url);
 
+const GATEWAY_MIGRATION = "0032_github_tool_gateway.sql";
+const GATEWAY_SNAPSHOT = "meta/0032_snapshot.json";
+
+test("current main and the GitHub gateway form one migration lineage", async () => {
+  const migrationNames = (await import("node:fs/promises")).readdir(migrations);
+  const names = await migrationNames;
+  for (let index = 25; index <= 32; index += 1) {
+    const prefix = `${String(index).padStart(4, "0")}_`;
+    assert.equal(
+      names.filter((name) => name.startsWith(prefix) && name.endsWith(".sql"))
+        .length,
+      1,
+      `${prefix} must identify exactly one migration`
+    );
+  }
+});
+
 test("0032 adds durable immutable and current repository user-authority ceilings", async () => {
-  const migrationUrl = new URL(
-    "0032_github_user_authority_ceiling.sql",
-    migrations
-  );
+  const migrationUrl = new URL(GATEWAY_MIGRATION, migrations);
   assert.equal(existsSync(migrationUrl), true);
   const migration = await readFile(migrationUrl, "utf8");
   for (const column of [
@@ -42,14 +56,14 @@ test("0032 adds durable immutable and current repository user-authority ceilings
 
   const [journalText, snapshotText] = await Promise.all([
     readFile(new URL("meta/_journal.json", migrations), "utf8"),
-    readFile(new URL("meta/0032_snapshot.json", migrations), "utf8"),
+    readFile(new URL(GATEWAY_SNAPSHOT, migrations), "utf8"),
   ]);
   const journal = JSON.parse(journalText) as {
     entries: Array<{ idx: number; tag: string; version: string }>;
   };
   const latest = journal.entries.at(-1);
   assert.equal(latest?.idx, 32);
-  assert.equal(latest?.tag, "0032_github_user_authority_ceiling");
+  assert.equal(latest?.tag, "0032_github_tool_gateway");
   assert.equal(latest?.version, "7");
   const snapshot = JSON.parse(snapshotText) as {
     tables: Record<string, { columns: Record<string, unknown> }>;
@@ -60,19 +74,19 @@ test("0032 adds durable immutable and current repository user-authority ceilings
   );
 });
 
-test("0026 adds exact runner broker authority without rewriting old migrations", async () => {
+test("0032 adds exact runner broker authority without rewriting old migrations", async () => {
   const [migration, migration24, migration25] = await Promise.all([
-    readFile(new URL("0026_github_tool_gateway.sql", migrations), "utf8"),
+    readFile(new URL(GATEWAY_MIGRATION, migrations), "utf8"),
     readFile(
       new URL("0024_runner_execution_permissions.sql", migrations),
       "utf8"
     ),
-    readFile(new URL("0025_fearless_otto_octavius.sql", migrations), "utf8"),
+    readFile(new URL("0025_cynical_scourge.sql", migrations), "utf8"),
   ]);
 
   assert.doesNotMatch(migration24, /githubBrokerPolicy|github_only/u);
   assert.doesNotMatch(migration25, /githubBrokerPolicy|github_only/u);
-  assert.match(migration, /0026 cannot migrate pre-gateway GitHub authority/u);
+  assert.match(migration, /0032 cannot migrate pre-gateway GitHub authority/u);
   assert.match(
     migration,
     /ALTER TABLE "RunnerRun" ADD COLUMN "teamStepId" uuid/u
@@ -141,10 +155,10 @@ test("0026 adds exact runner broker authority without rewriting old migrations",
   }
 });
 
-test("0026 metadata is last and models gateway columns and checks", async () => {
+test("0032 metadata is last and models gateway columns and checks", async () => {
   const [journalText, snapshotText] = await Promise.all([
     readFile(new URL("meta/_journal.json", migrations), "utf8"),
-    readFile(new URL("meta/0026_snapshot.json", migrations), "utf8"),
+    readFile(new URL(GATEWAY_SNAPSHOT, migrations), "utf8"),
   ]);
   const journal = JSON.parse(journalText) as {
     entries: Array<{
@@ -155,11 +169,11 @@ test("0026 metadata is last and models gateway columns and checks", async () => 
       when: number;
     }>;
   };
-  const entry = journal.entries.find(({ idx }) => idx === 26);
+  const entry = journal.entries.find(({ idx }) => idx === 32);
   assert.deepEqual(entry, {
     breakpoints: true,
-    idx: 26,
-    tag: "0026_github_tool_gateway",
+    idx: 32,
+    tag: "0032_github_tool_gateway",
     version: "7",
     when: entry?.when,
   });
@@ -188,14 +202,11 @@ test("0026 metadata is last and models gateway columns and checks", async () => 
   assert.ok(operation.columns.executionLeaseExpiresAt);
 });
 
-test("0027 globally fences tenant operation ids and actor-bound policy metadata", async () => {
+test("0032 globally fences tenant operation ids and actor-bound policy metadata", async () => {
   const [migration, journalText, snapshotText] = await Promise.all([
-    readFile(
-      new URL("0027_gateway_operation_identity.sql", migrations),
-      "utf8"
-    ),
+    readFile(new URL(GATEWAY_MIGRATION, migrations), "utf8"),
     readFile(new URL("meta/_journal.json", migrations), "utf8"),
-    readFile(new URL("meta/0027_snapshot.json", migrations), "utf8"),
+    readFile(new URL(GATEWAY_SNAPSHOT, migrations), "utf8"),
   ]);
   assert.match(
     migration,
@@ -206,9 +217,9 @@ test("0027 globally fences tenant operation ids and actor-bound policy metadata"
   const journal = JSON.parse(journalText) as {
     entries: Array<{ idx: number; tag: string }>;
   };
-  const entry = journal.entries.find(({ idx }) => idx === 27);
-  assert.equal(entry?.idx, 27);
-  assert.equal(entry?.tag, "0027_gateway_operation_identity");
+  const entry = journal.entries.find(({ idx }) => idx === 32);
+  assert.equal(entry?.idx, 32);
+  assert.equal(entry?.tag, "0032_github_tool_gateway");
   const snapshot = JSON.parse(snapshotText) as {
     tables: Record<
       string,
@@ -230,9 +241,9 @@ test("0027 globally fences tenant operation ids and actor-bound policy metadata"
   );
 });
 
-test("0028 adds database-level capability, marker, mapping, expiry, and immutability fences", async () => {
+test("0032 adds database-level capability, marker, mapping, expiry, and immutability fences", async () => {
   const migration = await readFile(
-    new URL("0028_gateway_security_fences.sql", migrations),
+    new URL(GATEWAY_MIGRATION, migrations),
     "utf8"
   );
   for (const constraint of [
@@ -255,13 +266,10 @@ test("0028 adds database-level capability, marker, mapping, expiry, and immutabi
   }
 });
 
-test("0029 preserves immutable operation receipts while live connections can be deleted", async () => {
+test("0032 preserves immutable operation receipts while live connections can be deleted", async () => {
   const [migration, snapshotText] = await Promise.all([
-    readFile(
-      new URL("0029_preserve_github_operation_receipts.sql", migrations),
-      "utf8"
-    ),
-    readFile(new URL("meta/0029_snapshot.json", migrations), "utf8"),
+    readFile(new URL(GATEWAY_MIGRATION, migrations), "utf8"),
+    readFile(new URL(GATEWAY_SNAPSHOT, migrations), "utf8"),
   ]);
   for (const column of [
     "accountId",
@@ -331,20 +339,17 @@ test("0029 preserves immutable operation receipts while live connections can be 
   assert.equal(operation.indexes.RGHOp_step_write_intent_uq.isUnique, true);
   assert.match(
     operation.indexes.RGHOp_step_write_intent_uq.where ?? "",
-    /issue\.create|pull\.create|project\.item/u
+    /writeIntentActive/u
   );
 });
 
-test("0030 persists pre-send versus sent provider dispatch and releasable write intents", async () => {
-  const migrationUrl = new URL(
-    "0030_github_provider_dispatch_phase.sql",
-    migrations
-  );
+test("0032 persists pre-send versus sent provider dispatch and releasable write intents", async () => {
+  const migrationUrl = new URL(GATEWAY_MIGRATION, migrations);
   assert.equal(existsSync(migrationUrl), true);
   const [migration, journalText, snapshotText] = await Promise.all([
     readFile(migrationUrl, "utf8"),
     readFile(new URL("meta/_journal.json", migrations), "utf8"),
-    readFile(new URL("meta/0030_snapshot.json", migrations), "utf8"),
+    readFile(new URL(GATEWAY_SNAPSHOT, migrations), "utf8"),
   ]);
 
   for (const column of [
@@ -384,13 +389,13 @@ test("0030 persists pre-send versus sent provider dispatch and releasable write 
     }>;
   };
   assert.deepEqual(
-    journal.entries.find(({ idx }) => idx === 30),
+    journal.entries.find(({ idx }) => idx === 32),
     {
       breakpoints: true,
-      idx: 30,
-      tag: "0030_github_provider_dispatch_phase",
+      idx: 32,
+      tag: "0032_github_tool_gateway",
       version: "7",
-      when: 1_788_254_163_084,
+      when: journal.entries.find(({ idx }) => idx === 32)?.when,
     }
   );
 
@@ -414,16 +419,13 @@ test("0030 persists pre-send versus sent provider dispatch and releasable write 
   );
 });
 
-test("0031 makes durable repository ordering use C collation", async () => {
-  const migrationUrl = new URL(
-    "0031_deterministic_repository_ordering.sql",
-    migrations
-  );
+test("0032 makes durable repository ordering use C collation", async () => {
+  const migrationUrl = new URL(GATEWAY_MIGRATION, migrations);
   assert.equal(existsSync(migrationUrl), true);
   const [migration, journalText, snapshotText] = await Promise.all([
     readFile(migrationUrl, "utf8"),
     readFile(new URL("meta/_journal.json", migrations), "utf8"),
-    readFile(new URL("meta/0031_snapshot.json", migrations), "utf8"),
+    readFile(new URL(GATEWAY_SNAPSHOT, migrations), "utf8"),
   ]);
 
   assert.match(
@@ -438,8 +440,8 @@ test("0031 makes durable repository ordering use C collation", async () => {
   const journal = JSON.parse(journalText) as {
     entries: Array<{ idx: number; tag: string; version: string }>;
   };
-  const entry = journal.entries.find(({ idx }) => idx === 31);
-  assert.equal(entry?.tag, "0031_deterministic_repository_ordering");
+  const entry = journal.entries.find(({ idx }) => idx === 32);
+  assert.equal(entry?.tag, "0032_github_tool_gateway");
   assert.equal(entry?.version, "7");
 
   const snapshot = JSON.parse(snapshotText) as {

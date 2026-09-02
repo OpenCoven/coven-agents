@@ -3,7 +3,7 @@
 **Coven Agents** is the OpenCoven product control plane for authenticated,
 tenant-scoped coding missions. The Next.js application owns product accounts,
 subscriptions, credential custody, run admission, execution records, and
-bounded evidence. Daytona is the sole execution provider.
+bounded evidence. Daytona is the sole production execution provider.
 
 Read the accepted [Product authority boundary](docs/architecture/adr-001-product-authority-boundary.md)
 and [Daytona execution boundary](docs/architecture/adr-002-daytona-execution-boundary.md)
@@ -58,6 +58,11 @@ before database, credential, or Daytona work.
 Review the living
 [Subscription and billing policy](docs/product/subscription-billing-policy.md)
 before changing entitlement, checkout, webhook, grace, or run-cap behavior.
+New subscription sales are default-off through
+`SUBSCRIPTION_CHECKOUT_ENABLED`; use the
+[release-readiness Stripe checklist](docs/roadmap/release-readiness.md#stripe-webhook-delivery)
+before enabling it. Customer Portal and automatic Stripe Tax collection are
+not part of the current release.
 
 ## Install
 
@@ -140,3 +145,19 @@ pnpm build
 GitHub Actions are intentionally disabled. These local gates are the merge
 boundary. A successful local run is repository evidence, not proof that a
 production deployment or provider operation occurred.
+
+### Hermetic browser certification
+
+Run the explicit local PostgreSQL browser certification with:
+
+```bash
+pnpm test:e2e:hermetic
+```
+
+It starts and removes one uniquely named `postgres:16-alpine` container unless
+`E2E_POSTGRES_URL` and the exact opt-in `E2E_POSTGRES_DISPOSABLE=1` are both
+provided. The command seeds fixed non-personal identities, uses signed Auth.js
+cookies, and selects a server-only deterministic executor only when both
+hermetic E2E flags are set outside production. It exercises application APIs,
+durable storage, accounting, reconciliation, SSE, and cancellation without
+Daytona or external network calls. It is not Daytona or production evidence.

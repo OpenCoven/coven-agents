@@ -19,13 +19,14 @@ const DEFAULT_TIMERS: PlaybackTimers = {
 export function schedulePlayback(
   steps: PlaybackStep[],
   callbacks: PlaybackCallbacks,
-  timers: PlaybackTimers = DEFAULT_TIMERS
+  timers: PlaybackTimers = DEFAULT_TIMERS,
+  isCurrent: () => boolean = () => true
 ) {
   let cancelled = false;
   let pendingTimer: unknown;
 
   const scheduleStep = (index: number) => {
-    if (cancelled) {
+    if (cancelled || !isCurrent()) {
       return;
     }
 
@@ -36,7 +37,7 @@ export function schedulePlayback(
     }
 
     pendingTimer = timers.setTimeout(() => {
-      if (cancelled) {
+      if (cancelled || !isCurrent()) {
         return;
       }
       callbacks.onReveal(step.event);

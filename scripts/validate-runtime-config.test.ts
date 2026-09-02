@@ -29,6 +29,9 @@ const VALID_ENV: Partial<NodeJS.ProcessEnv> = {
   DAYTONA_AUTO_ARCHIVE_MINUTES: "10080",
   DAYTONA_AUTO_STOP_MINUTES: "15",
   DAYTONA_DOMAIN_ALLOW_LIST: "github.com,api.github.com,app.example",
+  DAYTONA_SANDBOX_CPU_CORES: "2",
+  DAYTONA_SANDBOX_DISK_GIB: "20",
+  DAYTONA_SANDBOX_MEMORY_GIB: "4",
   DAYTONA_SNAPSHOT: "coven-agents-copilot-1",
   DAYTONA_TARGET: "us",
   OPERATOR_DIAGNOSTIC_TOKEN: "subprocess-test-operator-token",
@@ -79,9 +82,12 @@ const REQUIRED_PRODUCTION_VARIABLES = [
   "REDIS_URL",
   "RUNNER_MANUAL_RECONCILE_SECRET",
 ] as const;
-const DAYTONA_NON_NEGATIVE_SAFE_INTEGER_VARIABLES = [
+const DAYTONA_RESOURCE_POLICY_VARIABLES = [
   "DAYTONA_AUTO_ARCHIVE_MINUTES",
   "DAYTONA_AUTO_STOP_MINUTES",
+  "DAYTONA_SANDBOX_CPU_CORES",
+  "DAYTONA_SANDBOX_DISK_GIB",
+  "DAYTONA_SANDBOX_MEMORY_GIB",
 ] as const;
 const ADMISSION_LIMIT_MAXIMUMS = {
   RUN_ADMISSION_CONSECUTIVE_MAX: "2",
@@ -102,6 +108,7 @@ const RUNTIME_CONFIGURATION_KEYS = [
   "CREDENTIAL_KEK_CURRENT_VERSION",
   "CREDENTIAL_KEK_V1",
   "CREDENTIAL_KEK_V2",
+  "COVEN_HERMETIC_RUNNER",
   "CRON_SECRET",
   "DAYTONA_API_KEY",
   "DAYTONA_API_URL",
@@ -109,8 +116,12 @@ const RUNTIME_CONFIGURATION_KEYS = [
   "DAYTONA_AUTO_STOP_MINUTES",
   "DAYTONA_DOMAIN_ALLOW_LIST",
   "DAYTONA_REQUEST_TIMEOUT_MS",
+  "DAYTONA_SANDBOX_CPU_CORES",
+  "DAYTONA_SANDBOX_DISK_GIB",
+  "DAYTONA_SANDBOX_MEMORY_GIB",
   "DAYTONA_SNAPSHOT",
   "DAYTONA_TARGET",
+  "E2E_HERMETIC_RUNNER",
   "GLOBAL_DAILY_RUN_CAP",
   "GITHUB_APP_CLIENT_ID",
   "GITHUB_APP_CLIENT_SECRET",
@@ -316,6 +327,17 @@ test("enabled GitHub teams requires APP_ORIGIN hostname in restrictive Daytona e
   });
   assert.equal(accepted.status, 0, accepted.stderr);
   assert.doesNotMatch(rejected.stderr, /https:\/\/|app\.example/u);
+});
+
+test("rejects the hermetic runner selection for a production validation", () => {
+  const result = runValidator({
+    COVEN_HERMETIC_RUNNER: "1",
+    E2E_HERMETIC_RUNNER: "1",
+  });
+  assertRejectedWithMessage(
+    result,
+    "COVEN_HERMETIC_RUNNER is unavailable when NODE_ENV is production."
+  );
 });
 
 test("rejects blank required production configuration", () => {
@@ -744,31 +766,40 @@ test("rejects invalid RUN_ADMISSION_MODE values", () => {
   }
 });
 
-test("accepts zero-valued runtime and admission settings", () => {
+test("resource policy rejects disabled automatic lifecycle settings", () => {
   const result = runValidator({
     DAYTONA_AUTO_ARCHIVE_MINUTES: "0",
     DAYTONA_AUTO_STOP_MINUTES: "0",
-    RUN_ADMISSION_CONSECUTIVE_MAX: "0",
-    RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX: "0",
-    RUN_ADMISSION_TENANT_ACTIVE_MAX: "0",
-    RUN_ADMISSION_TENANT_QUEUE_MAX: "0",
   });
 
-  assert.equal(result.status, 0, result.stderr);
+  assertRejectedWithMessage(
+    result,
+    "DAYTONA_AUTO_ARCHIVE_MINUTES must be an integer between 60 and 43200."
+  );
 });
 
-test("rejects invalid Daytona interval settings", () => {
+test("rejects malformed and over-cap Daytona resource policy settings", () => {
   const invalidValues = ["-1", "1.5", "9007199254740992"] as const;
 
-  for (const variableName of DAYTONA_NON_NEGATIVE_SAFE_INTEGER_VARIABLES) {
+  for (const variableName of DAYTONA_RESOURCE_POLICY_VARIABLES) {
     for (const invalidValue of invalidValues) {
       const result = runValidator({ [variableName]: invalidValue });
 
-      assertRejectedWithMessage(
-        result,
-        `${variableName} must be a non-negative safe integer.`
-      );
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, new RegExp(variableName));
     }
+  }
+
+  for (const [variableName, invalidValue] of [
+    ["DAYTONA_AUTO_ARCHIVE_MINUTES", "43201"],
+    ["DAYTONA_AUTO_STOP_MINUTES", "61"],
+    ["DAYTONA_SANDBOX_CPU_CORES", "5"],
+    ["DAYTONA_SANDBOX_MEMORY_GIB", "9"],
+    ["DAYTONA_SANDBOX_DISK_GIB", "41"],
+  ] as const) {
+    const result = runValidator({ [variableName]: invalidValue });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, new RegExp(variableName));
   }
 });
 
@@ -846,6 +877,9 @@ test("accepts default runtime integer settings when omitted", () => {
   const result = runValidator({
     DAYTONA_AUTO_ARCHIVE_MINUTES: undefined,
     DAYTONA_AUTO_STOP_MINUTES: undefined,
+    DAYTONA_SANDBOX_CPU_CORES: undefined,
+    DAYTONA_SANDBOX_DISK_GIB: undefined,
+    DAYTONA_SANDBOX_MEMORY_GIB: undefined,
     RUN_ADMISSION_CONSECUTIVE_MAX: undefined,
     RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX: undefined,
     RUN_ADMISSION_TENANT_ACTIVE_MAX: undefined,

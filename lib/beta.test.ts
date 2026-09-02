@@ -114,6 +114,36 @@ test("only the exact cookieless GitHub tool path is exempt with base-path symmet
   }
 });
 
+test("the runner resource inventory machine route is exactly exempt", () => {
+  assert.equal(isBetaExempt("/api/internal/runner-resource-inventory"), true);
+  assert.equal(
+    betaVerdict(
+      readBetaGate(ON),
+      "/api/internal/runner-resource-inventory",
+      null
+    ),
+    "allow"
+  );
+  assert.equal(
+    isBetaExempt("/api/internal/runner-resource-inventory/extra"),
+    false
+  );
+  assert.equal(
+    isBetaExempt("/api/internal/runner-resource-inventory-now"),
+    false
+  );
+});
+
+test("the Stripe reconciliation machine route is exactly exempt", () => {
+  assert.equal(isBetaExempt("/api/internal/stripe-reconcile"), true);
+  assert.equal(
+    betaVerdict(readBetaGate(ON), "/api/internal/stripe-reconcile", null),
+    "allow"
+  );
+  assert.equal(isBetaExempt("/api/internal/stripe-reconcile/extra"), false);
+  assert.equal(isBetaExempt("/api/internal/stripe-reconcile-now"), false);
+});
+
 test("the runner health and operator diagnostic paths are exactly exempt", () => {
   for (const pathname of ["/api/health", "/api/diagnostics/sandbox"]) {
     assert.equal(isBetaExempt(pathname), true, pathname);

@@ -21,6 +21,10 @@ const cutoverAttestationUrl = new URL(
 );
 const readmeUrl = new URL("README.md", repositoryRoot);
 const roadmapUrl = new URL("ROADMAP.md", repositoryRoot);
+const releaseReadinessUrl = new URL(
+  "docs/roadmap/release-readiness.md",
+  repositoryRoot
+);
 const deliveryGovernanceUrl = new URL(
   "docs/roadmap/delivery-governance.md",
   repositoryRoot
@@ -74,6 +78,8 @@ const applicationRouteFiles = [
   "app/api/health/route.ts",
   "app/api/internal/github-tool/route.ts",
   "app/api/internal/runner-reconcile/route.ts",
+  "app/api/internal/runner-resource-inventory/route.ts",
+  "app/api/internal/stripe-reconcile/route.ts",
   "app/api/runs/[id]/events/route.ts",
   "app/api/runs/[id]/route.ts",
   "app/api/runs/[id]/stop/route.ts",
@@ -204,6 +210,9 @@ const environmentKeys = [
   "DAYTONA_AUTO_ARCHIVE_MINUTES",
   "DAYTONA_AUTO_STOP_MINUTES",
   "DAYTONA_DOMAIN_ALLOW_LIST",
+  "DAYTONA_SANDBOX_CPU_CORES",
+  "DAYTONA_SANDBOX_DISK_GIB",
+  "DAYTONA_SANDBOX_MEMORY_GIB",
   "DAYTONA_SNAPSHOT",
   "DAYTONA_TARGET",
   "DEMO_RECORDER_ACCOUNT_EMAIL",
@@ -313,10 +322,8 @@ const developmentDependencies = [
   "@playwright/test",
   "@tailwindcss/postcss",
   "@tailwindcss/typography",
-  "@types/d3-scale",
   "@types/node",
   "@types/papaparse",
-  "@types/pdf-parse",
   "@types/react",
   "@types/react-dom",
   "@types/sanitize-html",
@@ -352,6 +359,7 @@ const scriptNames = [
   "hygiene",
   "planning:check",
   "prepare",
+  "readiness:check",
   "roadmap:status",
   "secret:scan",
   "secret:scan:all",
@@ -359,6 +367,7 @@ const scriptNames = [
   "start",
   "subscription",
   "test",
+  "test:e2e:hermetic",
   "test:unit",
   "typecheck",
   "validate:platform-residue",
@@ -474,6 +483,42 @@ test("the accepted Daytona ADR records the current execution boundary", () => {
   }
 });
 
+test("credential materialization remains attempt-scoped inside persistent Daytona sandboxes", () => {
+  const adr = readFileSync(daytonaAdrUrl, "utf8");
+  const threatModel = readFileSync(
+    new URL("docs/security/execution-threat-model.md", repositoryRoot),
+    "utf8"
+  );
+  const attestation = readFileSync(cutoverAttestationUrl, "utf8");
+
+  for (const policy of [
+    /one tenant-scoped persistent Daytona sandbox/i,
+    /Daytona Secrets are not used/i,
+    /exactly one\s+environment entry/i,
+    /deterministic\s+`\(run, attempt\)` credential path/i,
+    /Replacement, deletion, and entitlement races/i,
+    /Cleanup ambiguity/i,
+  ]) {
+    assert.match(adr, policy);
+  }
+  assert.doesNotMatch(
+    adr,
+    /credential plaintext never crosses the server boundary/i
+  );
+  assert.match(
+    threatModel,
+    /server-to-authorized-sandbox attempt staging transport/
+  );
+  assert.match(threatModel, /session `404` or\s+`410`/);
+  assert.match(adr, /complete process tree/i);
+  assert.match(attestation, /repository policy ratification/i);
+  assert.match(
+    attestation,
+    /Earlier wording that environment injection requires an ephemeral per-run\s+sandbox is superseded/
+  );
+  assert.match(attestation, /deliberately detached descendant/i);
+});
+
 test("the cutover attestation separates repository and production evidence", () => {
   const attestation = readFileSync(cutoverAttestationUrl, "utf8");
 
@@ -520,6 +565,7 @@ test("the living subscription policy records current billing authorities", () =>
     "## Entitlement authority and timing",
     "## Checkout responsibilities",
     "## Webhook responsibilities",
+    "## Automatic bounded Stripe reconciliation",
     "## Usage cap and run accounting",
     "## Failure and recovery",
     "## Verification",
@@ -537,8 +583,13 @@ test("the living subscription policy records current billing authorities", () =>
     "lib/billing/webhook.ts",
     "app/api/checkout/route.ts",
     "app/api/stripe/webhook/route.ts",
+    "GET /api/internal/stripe-reconcile",
     "lib/credentials/runner-credential.ts",
     "StripeReconciliation",
+    "SubscriptionOverrideAudit",
+    "MAX_SUBSCRIPTION_OVERRIDE_DAYS = 3650",
+    "--reference-stdin",
+    "authorized operator override",
     "pending",
     "acknowledged",
     "resolved",
@@ -547,6 +598,12 @@ test("the living subscription policy records current billing authorities", () =>
   }
 
   assert.match(policy, /not.*production certification/is);
+  assert.match(policy, /not Stripe evidence/is);
+  assert.match(policy, /positive-repair sweep/is);
+  assert.match(policy, /StripeReconciliationRun/);
+  assert.match(policy, /database time/is);
+  assert.match(policy, /exact snapshot/is);
+  assert.match(policy, /never lists Customers globally/is);
   assert.match(policy, /no (user|Customer|Subscription).*stored/is);
   assert.match(policy, /retention.*operator/is);
 });
@@ -775,6 +832,20 @@ test("the prior UI audit retains its evidence and explicit correction", () => {
   assert.match(audit, /\[release-readiness runbook\]/);
 });
 
+test("release readiness requires exact signed deployment attestations", () => {
+  const readiness = readFileSync(releaseReadinessUrl, "utf8");
+
+  assert.match(readiness, /test manifest version 1/);
+  assert.match(readiness, /ephemeral evidence cannot satisfy/);
+  assert.match(readiness, /Ed25519 signature/);
+  assert.match(readiness, /complete release-decision digest/);
+  assert.match(readiness, /trusted reviewer-key file/);
+  assert.match(readiness, /independently supplied deployment environment/);
+  assert.match(readiness, /rollback\s+certification and schema-compatibility/);
+  assert.match(readiness, /rejects a rollback target equal to the\s+candidate/);
+  assert.match(readiness, /older than seven days/);
+});
+
 test("repo-local OpenCoven packages stay private workspace dependencies", () => {
   const observed = new Set<string>();
 
@@ -918,6 +989,15 @@ test("package dependencies and scripts match the current application contract", 
   assert.deepEqual(Object.keys(manifest.scripts ?? {}).sort(), [
     ...scriptNames,
   ]);
+});
+
+test("the required local check gate includes retired-platform residue validation", () => {
+  const manifest = readManifest("package.json");
+
+  assert.equal(
+    manifest.scripts?.check,
+    "pnpm validate:platform-residue && ultracite check && pnpm planning:check"
+  );
 });
 
 test("the development server uses the documented localhost origin", () => {

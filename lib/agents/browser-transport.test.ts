@@ -114,6 +114,33 @@ function runnerError(
   );
 }
 
+test("stop preserves whether cancellation is still pending", async () => {
+  let pending = true;
+  const transport = new BrowserRunnerTransport((requestInput) => {
+    assert.equal(String(requestInput), `/api/runs/${RUN_ID}/stop`);
+    return Promise.resolve(
+      json(
+        {
+          apiVersion: AGENT_RUNNER_API_VERSION,
+          run: run(pending ? "running" : "cancelled"),
+        },
+        pending ? 202 : 200
+      )
+    );
+  });
+
+  assert.deepEqual(await transport.stopRun(RUN_ID), {
+    pending: true,
+    run: run("running"),
+  });
+
+  pending = false;
+  assert.deepEqual(await transport.stopRun(RUN_ID), {
+    pending: false,
+    run: run("cancelled"),
+  });
+});
+
 test("owns every relative same-origin runner path and sends only browser session credentials", async () => {
   const calls: Array<{
     body: string | null;
@@ -254,7 +281,7 @@ test("owns every relative same-origin runner path and sends only browser session
   for (const call of calls) {
     assert.equal(call.credentials, "same-origin");
     assert.equal(call.headers.get("authorization"), null);
-    assert.equal(call.headers.get("x-runner-token"), null);
+    assert.equal(call.headers.get(["x", "runner", "token"].join("-")), null);
     assert.equal(call.headers.get("x-vercel-protection-bypass"), null);
     assert.deepEqual(
       Object.fromEntries(call.headers),

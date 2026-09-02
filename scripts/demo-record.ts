@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import {
   type DemoTranscript,
   demoTranscriptSchema,
+  exactEvidenceRedactions,
   type RunResult,
   sanitizeEvidenceText,
 } from "@opencoven/agent-contracts";
@@ -58,7 +59,7 @@ function safeErrorMessage(error: unknown, secrets: readonly string[]): string {
   }
   const message =
     error instanceof Error ? error.message : "Demo recording failed.";
-  return sanitizeEvidenceText(message, secrets);
+  return sanitizeEvidenceText(message, exactEvidenceRedactions(...secrets));
 }
 
 function buildTranscript(
@@ -68,11 +69,26 @@ function buildTranscript(
   arrivals: readonly ArrivedEvent[],
   result: RunResult
 ): DemoTranscript {
+  const provenance = {
+    fixture: name,
+    kind: "synthetic-demo" as const,
+  };
   return demoTranscriptSchema.parse({
-    events: toOffsets(arrivals),
+    events: toOffsets(arrivals).map((event) => ({ ...event, provenance })),
     name,
+    provenance,
     recordedAt,
-    result,
+    result: {
+      ...result,
+      commandResults: result.commandResults.map((command) => ({
+        ...command,
+        provenance,
+      })),
+      fileOperations: result.fileOperations.map((operation) => ({
+        ...operation,
+        provenance,
+      })),
+    },
     task,
   });
 }

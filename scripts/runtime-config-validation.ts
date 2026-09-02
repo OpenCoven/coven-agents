@@ -4,11 +4,14 @@ import { validateSubscriptionCheckoutEnvironment } from "../lib/billing/config-c
 import { credentialKekRingFromEnvironment } from "../lib/credentials/key-ring";
 import { validateGitHubEnvironment } from "../lib/github/config";
 import {
+  DAYTONA_SANDBOX_RESOURCE_POLICY_ENVIRONMENT_KEYS,
   daytonaDomainAllowList,
   daytonaGitHubGatewayHostname,
   daytonaRequestTimeout,
+  daytonaSandboxResourcePolicy,
   daytonaSnapshotConfiguration,
 } from "../lib/runner/daytona/config";
+import { hermeticRunnerMode } from "../lib/runner/hermetic/mode";
 
 const BETA_EMAIL = /^[^\s@,]+@[^\s@,]+$/;
 const REQUIRED_PRODUCTION_VARIABLES = [
@@ -28,10 +31,6 @@ const PRIVILEGED_RUNNER_SECRETS = [
   "RUNNER_MANUAL_RECONCILE_SECRET",
 ] as const;
 const MAX_PRIVILEGED_RUNNER_SECRET_LENGTH = 1024;
-const DAYTONA_INTERVAL_DEFAULTS = {
-  DAYTONA_AUTO_ARCHIVE_MINUTES: "10080",
-  DAYTONA_AUTO_STOP_MINUTES: "15",
-} as const;
 const ADMISSION_LIMIT_MAXIMUMS = {
   RUN_ADMISSION_CONSECUTIVE_MAX: "2",
   RUN_ADMISSION_DEPLOYMENT_ACTIVE_MAX: "25",
@@ -120,8 +119,8 @@ function validateProductionDaytonaConfig(environment: NodeJS.ProcessEnv): void {
   daytonaRequestTimeout(environment);
   const domainAllowList = daytonaDomainAllowList(environment);
   daytonaGitHubGatewayHostname(environment, domainAllowList);
+  daytonaSandboxResourcePolicy(environment);
   daytonaSnapshotConfiguration(environment);
-  validateDaytonaIntervals(environment);
   validateAdmissionSettings(environment);
 }
 
@@ -195,16 +194,12 @@ function validateConfiguredPreviewDaytonaConfig(
     });
   }
 
-  for (const name of Object.keys(DAYTONA_INTERVAL_DEFAULTS)) {
-    if (environment[name] !== undefined) {
-      validateNonNegativeSafeIntegerSetting(
-        name,
-        environment[name],
-        DAYTONA_INTERVAL_DEFAULTS[
-          name as keyof typeof DAYTONA_INTERVAL_DEFAULTS
-        ]
-      );
-    }
+  if (
+    DAYTONA_SANDBOX_RESOURCE_POLICY_ENVIRONMENT_KEYS.some(
+      (name) => environment[name] !== undefined
+    )
+  ) {
+    daytonaSandboxResourcePolicy(environment);
   }
   for (const [name, maximum] of Object.entries(ADMISSION_LIMIT_MAXIMUMS)) {
     if (environment[name] !== undefined) {
@@ -217,18 +212,6 @@ function validateConfiguredPreviewDaytonaConfig(
   }
   if (environment.RUN_ADMISSION_MODE !== undefined) {
     validateRunAdmissionMode(environment.RUN_ADMISSION_MODE);
-  }
-}
-
-function validateDaytonaIntervals(environment: NodeJS.ProcessEnv): void {
-  for (const [name, defaultValue] of Object.entries(
-    DAYTONA_INTERVAL_DEFAULTS
-  )) {
-    validateNonNegativeSafeIntegerSetting(
-      name,
-      environment[name],
-      defaultValue
-    );
   }
 }
 
@@ -294,6 +277,7 @@ export async function validateRuntimeConfig(
   env: NodeJS.ProcessEnv,
   explicitRelease: boolean
 ): Promise<void> {
+  hermeticRunnerMode(env);
   validateSubscriptionCheckoutEnvironment(env);
   validateGitHubEnvironment(env);
 

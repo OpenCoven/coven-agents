@@ -20,6 +20,7 @@ import {
   MAX_EVENTS_PER_RUN,
   MAX_PERSISTED_EVENT_BYTES_PER_RUN,
 } from "./evidence";
+import type { RunnerExecutionProvenance } from "./execution-provenance";
 import {
   createRunnerStore,
   type RunnerStoreDatabase,
@@ -41,6 +42,20 @@ const principal: RunnerPrincipal = {
 };
 const operator: RunnerOperator = { kind: "runner-operator" };
 const dialect = new PgDialect();
+const executionProvenance: RunnerExecutionProvenance = {
+  adapterVersion: "daytona-adapter-v1",
+  capabilityContractVersion: "hosted-v1",
+  lifecycle: "persistent",
+  pinnedSnapshot: "coven-agents-copilot-1",
+  productExecutionClass: "hosted",
+  provider: "daytona",
+  target: "us",
+};
+const retryExecutionProvenance: RunnerExecutionProvenance = {
+  ...executionProvenance,
+  pinnedSnapshot: "coven-agents-copilot-2",
+  target: "eu",
+};
 
 function queryText(statement: RunnerStoreStatement): string {
   return dialect.sqlToQuery(statement.query).sql;
@@ -64,6 +79,7 @@ function run(overrides: Partial<RunnerRunRecord> = {}): RunnerRunRecord {
     agentModel: "test-model",
     agentRuntime: "copilot",
     agentWorkspace: null,
+    authorityRevalidation: false,
     authVersion: 1,
     cancellationRequestedAt: null,
     commandEvidence: [],
@@ -78,6 +94,7 @@ function run(overrides: Partial<RunnerRunRecord> = {}): RunnerRunRecord {
     dispatchState: "dispatching",
     error: null,
     executionPermission: "unrestricted",
+    executionProvenance: null,
     fileEvidence: [],
     githubBrokerPolicy: null,
     id: "00000000-0000-4000-8000-000000000002",
@@ -1722,6 +1739,10 @@ test("finalization retains the terminal event when the live history is at capaci
   const terminalEvent = JSON.parse(
     String((statements[3] as RunnerStoreStatement).args.event)
   );
+  const agentStatus = queryText(statements[2] as RunnerStoreStatement);
+  assert.match(agentStatus, /"otherActive"\."agentId" = \$\d+/u);
+  assert.match(agentStatus, /"otherActive"\."authorityRevalidation" = false/u);
+  assert.match(agentStatus, /THEN 'running'/u);
   assert.equal(terminalEvent.id, MAX_EVENTS_PER_RUN + 1);
   assert.equal(terminalEvent.type, "completed");
   const prune = statements[4] as RunnerStoreStatement;
@@ -2107,6 +2128,7 @@ test("expired attempt recovery requires exact cleanup before requeue", async () 
   assert.match(releaseQuery, /"daytonaAttemptId" = NULL/);
   assert.match(releaseQuery, /"daytonaSessionId" = NULL/);
   assert.match(releaseQuery, /"daytonaCommandId" = NULL/);
+  assert.match(releaseQuery, /"executionProvenance" = NULL/);
   assert.match(releaseQuery, /"daytonaAttemptId" = \$\d+/);
   assert.match(
     releaseQuery,
@@ -2138,6 +2160,7 @@ test("expired attempt recovery requires exact cleanup before requeue", async () 
   assert.match(requeueQuery, /"daytonaAttemptId" IS NULL/);
   assert.match(requeueQuery, /"daytonaSessionId" IS NULL/);
   assert.match(requeueQuery, /"daytonaCommandId" IS NULL/);
+  assert.match(requeueQuery, /"executionProvenance" = NULL/);
 });
 
 test("expired attempt cleanup rotates durable ownership before provider cleanup", async () => {
@@ -2254,6 +2277,7 @@ test("confirmed attempt cleanup releases ownership and requeues atomically", asy
   );
   const update = statements[1] as RunnerStoreStatement;
   assert.match(queryText(update), /"daytonaAttemptId" = NULL/u);
+  assert.match(queryText(update), /"executionProvenance" = NULL/u);
   assert.match(queryText(update), /"daytonaLogCursor" = 0/u);
   assert.match(queryText(update), /"dispatchState" = 'queued'/u);
   assert.match(
@@ -2310,6 +2334,7 @@ test("terminal cleanup retains ownership until the exact attempt is released", a
     daytonaCommandId: "command",
     daytonaSessionId: daytonaRunSessionName(run().id, attemptId),
     dispatchState: "terminal",
+    executionProvenance,
     status: "completed",
   });
   const authority = {
@@ -2344,6 +2369,8 @@ test("terminal cleanup retains ownership until the exact attempt is released", a
   assert.match(releaseQuery, /"daytonaAttemptId" = NULL/);
   assert.match(releaseQuery, /"daytonaSessionId" = NULL/);
   assert.match(releaseQuery, /"daytonaCommandId" = NULL/);
+  assert.doesNotMatch(releaseQuery, /"executionProvenance" = NULL/);
+  assert.deepEqual(released.executionProvenance, executionProvenance);
 });
 
 test("terminal lease cleanup refuses unresolved provider ownership", async () => {
@@ -2568,6 +2595,30 @@ test("sandbox recovery scans durable ambiguous lifecycle rows with skip locking"
   assert.match(queryText(scan), /'decommissioning'/u);
   assert.doesNotMatch(queryText(scan), /"warmStatus"/u);
   assert.match(queryText(scan), /FOR UPDATE SKIP LOCKED/u);
+});
+
+test("operator inventory scans only bounded durable lifecycle mappings in stable order", async () => {
+  const { statements, store } = scripted([]);
+  await store.scanDaytonaSandboxInventory(operator, 10);
+
+  const [scan] = statements;
+  assert.ok(scan);
+  assert.equal(scan.name, "scan-daytona-sandbox-inventory");
+  const query = queryText(scan);
+  assert.match(query, /"daytonaSandboxId" IS NOT NULL/u);
+  assert.match(query, /'provisioning_ambiguous'/u);
+  assert.match(query, /'decommission_failed'/u);
+  assert.match(query, /ORDER BY "sandboxUpdatedAt" ASC, "id" ASC/u);
+  assert.match(query, /LIMIT \$\d+/u);
+  assert.doesNotMatch(query, /FOR UPDATE|SKIP LOCKED/u);
+  assert.deepEqual(scan.args, { limit: 10 });
+
+  for (const invalidLimit of [0, 101, 1.5]) {
+    assert.throws(
+      () => store.scanDaytonaSandboxInventory(operator, invalidLimit),
+      /Resource inventory limit/u
+    );
+  }
 });
 
 test("warm recovery has an independent bounded oldest-first scan", async () => {
@@ -2851,12 +2902,15 @@ test("fair dispatch selection locks scheduler and enforces tenant and agent capa
   const activeCount = queryText(statements[1] as RunnerStoreStatement);
   const candidate = queryText(statements[2] as RunnerStoreStatement);
   assert.match(activeCount, /"dispatchState" = 'terminal'/u);
+  assert.match(activeCount, /"authorityRevalidation" = false/u);
   assert.match(activeCount, /"daytonaAttemptId" IS NOT NULL/u);
   assert.match(activeCount, /"daytonaCommandId" IS NOT NULL/u);
   assert.match(activeCount, /"daytonaSessionId" IS NOT NULL/u);
   assert.match(candidate, /FOR UPDATE OF "queued" SKIP LOCKED/u);
   assert.match(candidate, /"agentActive"/u);
   assert.match(candidate, /"tenantActive"/u);
+  assert.match(candidate, /"agentActive"\."authorityRevalidation" = false/u);
+  assert.match(candidate, /"tenantActive"\."authorityRevalidation" = false/u);
   assert.match(
     candidate,
     /"agentActive"\."dispatchState" = 'terminal'[\s\S]*"agentActive"\."daytonaAttemptId" IS NOT NULL/u
@@ -2906,6 +2960,54 @@ test("queue selection stays globally FIFO until the consecutive tenant cap requi
   assert.equal(statements[2]?.args.consecutiveDispatches, 2);
   assert.match(selection, /FROM eligible_tenants AS "otherTenant"/u);
   assert.doesNotMatch(selection, /lastTenantEligible|lastHeadSequence/u);
+});
+
+test("authority revalidation claims queued work without scheduler capacity", async () => {
+  const queued = run({
+    dispatchLeaseExpiresAt: null,
+    dispatchLeaseToken: null,
+    dispatchState: "queued",
+    version: 1,
+  });
+  const claimed = run({
+    ...queued,
+    dispatchLeaseExpiresAt: new Date("2026-01-01T00:01:00.000Z"),
+    dispatchLeaseToken: "lease-revalidation",
+    dispatchState: "dispatching",
+    version: 2,
+  });
+  const { statements, store } = scripted([queued], [claimed]);
+
+  const result = await store.claimQueuedDispatchForRevalidation(operator, {
+    leaseExpiresAt: claimed.dispatchLeaseExpiresAt as Date,
+    leaseToken: claimed.dispatchLeaseToken as string,
+  });
+
+  assert.equal(result?.run.id, queued.id);
+  assert.deepEqual(
+    statements.map((entry) => entry.name),
+    ["lock-queued-dispatch-for-revalidation", "claim-next-dispatch"]
+  );
+  assert.equal(statements[1]?.args.authorityRevalidation, true);
+  const selection = queryText(statements[0] as RunnerStoreStatement);
+  assert.match(selection, /"dispatchState" = 'queued'/u);
+  assert.match(selection, /FOR UPDATE SKIP LOCKED/u);
+  assert.match(selection, /ORDER BY "updatedAt" ASC, "queueSequence" ASC/u);
+  assert.doesNotMatch(selection, /"RunnerScheduler"|tenantActive|agentActive/u);
+  await store.claimQueuedDispatchForRevalidation(operator, {
+    excludedRunIds: [
+      "00000000-0000-4000-8000-000000000010",
+      "00000000-0000-4000-8000-000000000011",
+    ],
+    leaseExpiresAt: claimed.dispatchLeaseExpiresAt as Date,
+    leaseToken: claimed.dispatchLeaseToken as string,
+  });
+  const exclusions = statements[2] as RunnerStoreStatement;
+  assert.match(queryText(exclusions), /"id" NOT IN \(\$1, \$2\)/u);
+  assert.deepEqual(queryParams(exclusions), [
+    "00000000-0000-4000-8000-000000000010",
+    "00000000-0000-4000-8000-000000000011",
+  ]);
 });
 
 test("dispatch authority cannot access unleased, expired, or another run", async () => {
@@ -2989,7 +3091,8 @@ test("dispatch store methods fence preparation, attachment, and release", async 
 
   const claim = await preparation.store.authorizeDaytonaPreparation(
     operator,
-    authority
+    authority,
+    { executionProvenance }
   );
   assert.equal(claim.kind, "authorized");
   assert.match(
@@ -3007,6 +3110,11 @@ test("dispatch store methods fence preparation, attachment, and release", async 
   assert.match(
     queryText(preparation.statements[1] as RunnerStoreStatement),
     /"version" = "version" \+ 1/
+  );
+  assert.deepEqual(
+    (preparation.statements[1] as RunnerStoreStatement).args
+      .executionProvenance,
+    executionProvenance
   );
   assert.equal(claim.kind, "authorized");
   if (claim.kind !== "authorized") {
@@ -3089,6 +3197,33 @@ test("dispatch store methods fence preparation, attachment, and release", async 
     queryText(release.statements[1] as RunnerStoreStatement),
     /"dispatchLeaseExpiresAt" > clock_timestamp\(\)/
   );
+  assert.match(
+    queryText(release.statements[1] as RunnerStoreStatement),
+    /"executionProvenance" = NULL/
+  );
+
+  const retryCurrent = run({
+    executionProvenance: null,
+    version: releaseUpdated.version,
+  });
+  const retryUpdated = run({
+    daytonaAttemptId: claim.attemptId,
+    executionProvenance: retryExecutionProvenance,
+    version: retryCurrent.version + 1,
+  });
+  const retry = scripted([retryCurrent], [retryUpdated]);
+  assert.equal(
+    (
+      await retry.store.authorizeDaytonaPreparation(operator, authority, {
+        executionProvenance: retryExecutionProvenance,
+      })
+    ).kind,
+    "authorized"
+  );
+  assert.deepEqual(
+    (retry.statements[1] as RunnerStoreStatement).args.executionProvenance,
+    retryExecutionProvenance
+  );
 
   let callbackLaunched = false;
   const callbacks = daytonaDispatchAuthorizers(
@@ -3112,7 +3247,8 @@ test("dispatch store methods fence preparation, attachment, and release", async 
         Promise.resolve({ authority, kind: "released" as const }),
     },
     operator,
-    authority
+    authority,
+    executionProvenance
   );
   const callbackClaim = await callbacks.authorizePreparation({
     runId: dispatching.id,
@@ -3151,15 +3287,45 @@ test("attempt ownership excludes parallel attempts and stale releases", async ()
   const parallel = scripted([
     run({
       daytonaAttemptId: existingClaim,
+      executionProvenance,
       version: authority.expectedVersion,
     }),
   ]);
 
   assert.deepEqual(
-    await parallel.store.authorizeDaytonaPreparation(operator, authority),
+    await parallel.store.authorizeDaytonaPreparation(operator, authority, {
+      executionProvenance: retryExecutionProvenance,
+    }),
     { kind: "not_live" }
   );
   assert.equal(parallel.statements.length, 1);
+  assert.equal(
+    "executionProvenance" in
+      (parallel.statements[0] as RunnerStoreStatement).args,
+    false,
+    "a claimed attempt cannot be overwritten with a different descriptor"
+  );
+
+  const staleProvenance = scripted([
+    run({
+      daytonaAttemptId: null,
+      executionProvenance,
+      version: authority.expectedVersion,
+    }),
+  ]);
+  assert.deepEqual(
+    await staleProvenance.store.authorizeDaytonaPreparation(
+      operator,
+      authority,
+      { executionProvenance: retryExecutionProvenance }
+    ),
+    { kind: "not_live" }
+  );
+  assert.equal(
+    staleProvenance.statements.length,
+    1,
+    "stale provenance must fence a new attempt before an attachment write"
+  );
 
   const staleAuthority = {
     ...authority,
@@ -3196,7 +3362,9 @@ test("dispatch callbacks deny a run with durable cancellation intent", async () 
   ]);
 
   assert.deepEqual(
-    await store.authorizeDaytonaPreparation(operator, authority),
+    await store.authorizeDaytonaPreparation(operator, authority, {
+      executionProvenance,
+    }),
     { kind: "not_live" }
   );
   assert.equal(statements.length, 1);
@@ -4316,9 +4484,11 @@ test("admission-aware starts serialize tenant depth and preserve queue refusal",
     /ON CONFLICT .* DO UPDATE/u
   );
   assert.match(queryText(statements[1] as RunnerStoreStatement), /FOR UPDATE/u);
+  const queuedCapacity = queryText(statements[4] as RunnerStoreStatement);
+  assert.match(queuedCapacity, /"dispatchState" = 'queued'/u);
   assert.match(
-    queryText(statements[4] as RunnerStoreStatement),
-    /"dispatchState" = 'queued'/u
+    queuedCapacity,
+    /"dispatchState" = 'dispatching'[\s\S]*"authorityRevalidation" = true/u
   );
 });
 

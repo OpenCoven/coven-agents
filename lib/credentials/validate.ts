@@ -69,6 +69,11 @@ export async function checkCopilotToken(
   token: string,
   fetchImpl: FetchLike = (input, init) => fetch(input, init)
 ): Promise<TokenCheck> {
+  // The E2E adapter proves the real credential route and encryption boundary
+  // without allowing its deterministic dummy token onto the network.
+  if (hermeticRunnerMode() === "hermetic") {
+    return token.trim() ? "valid" : "invalid_token";
+  }
   try {
     const response = await fetchImpl(COPILOT_USER_URL, {
       headers: {
@@ -82,3 +87,7 @@ export async function checkCopilotToken(
     return "unknown";
   }
 }
+
+import "server-only";
+
+import { hermeticRunnerMode } from "@/lib/runner/hermetic/mode";

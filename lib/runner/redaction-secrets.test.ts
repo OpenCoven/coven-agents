@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { sanitizeEvidenceText } from "@opencoven/agent-contracts";
+import {
+  exactEvidenceRedactions,
+  sanitizeEvidenceText,
+} from "@opencoven/agent-contracts";
 import { sanitizeRunText } from "./evidence";
 import {
   decodeRunnerAttemptRedactionSecrets,
@@ -25,7 +28,10 @@ test("runner evidence redacts every encoded attempt secret and preserves legacy 
   ];
   const encoded = encodeRunnerAttemptRedactionSecrets(secrets);
   const text = `first=${secrets[0]} second=${secrets[1]}`;
-  const sanitized = sanitizeRunText(text, encoded);
+  const sanitized = sanitizeRunText(
+    text,
+    exactEvidenceRedactions(...decodeRunnerAttemptRedactionSecrets(encoded))
+  );
   assert.doesNotMatch(sanitized, new RegExp(secrets[0], "u"));
   assert.doesNotMatch(sanitized, new RegExp(secrets[1], "u"));
   assert.match(sanitized, /\[REDACTED\]/u);
@@ -35,9 +41,12 @@ test("runner evidence redacts every encoded attempt secret and preserves legacy 
     ["legacy-single-secret"]
   );
   assert.equal(
-    sanitizeEvidenceText("legacy-single-secret", [
-      ...decodeRunnerAttemptRedactionSecrets("legacy-single-secret"),
-    ]),
+    sanitizeEvidenceText(
+      "legacy-single-secret",
+      exactEvidenceRedactions(
+        ...decodeRunnerAttemptRedactionSecrets("legacy-single-secret")
+      )
+    ),
     "[REDACTED]"
   );
 });

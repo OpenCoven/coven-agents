@@ -75,6 +75,7 @@ export async function readCredentialForTenantWithoutRefresh(
     .select()
     .from(tenantCredential)
     .where(credentialWhere(tenant, harnessId))
+    .for("update")
     .limit(1);
   const [row] = rows;
   if (!row) {

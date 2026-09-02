@@ -10,11 +10,13 @@
  * the route enforce that authority itself without opening descendants or
  * future `/api/diagnostics/*` routes.
  *
- * `/api/internal/runner-reconcile` is the one machine-triggered route that
- * carries no Auth.js cookie. Gating it would disable recovery instead of
- * closing the beta. The route authenticates itself with its dedicated cron or
- * manual-recovery credential. No other `/api/internal/*` route inherits this
- * exemption.
+ * `/api/internal/runner-reconcile`,
+ * `/api/internal/runner-resource-inventory`, and
+ * `/api/internal/stripe-reconcile` are machine-triggered routes that carry no
+ * Auth.js cookie. Gating them would disable recovery or operator inventory
+ * instead of closing the beta. Each authenticates itself with its
+ * route-specific machine credential. No other `/api/internal/*` route inherits
+ * this exemption.
  *
  * `/api/internal/github-tool` is the exact cookieless agent gateway. Proxy
  * must let the route enforce its step capability instead of redirecting it to
@@ -47,6 +49,8 @@ const EXEMPT_PATHS = new Set([
   "/api/health",
   "/api/internal/github-tool",
   "/api/internal/runner-reconcile",
+  "/api/internal/runner-resource-inventory",
+  "/api/internal/stripe-reconcile",
 ]);
 
 export type BetaGate = {

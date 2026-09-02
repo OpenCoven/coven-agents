@@ -6,6 +6,7 @@ import {
   Image,
   SnapshotState,
 } from "@daytona/sdk";
+import { COPILOT_CLI_VERSION as PINNED_COPILOT_CLI_VERSION } from "../copilot-version";
 import type { DaytonaSnapshotConfiguration } from "./config";
 
 export {
@@ -17,7 +18,7 @@ export {
 
 export const DAYTONA_COPILOT_IMAGE_BASE = "node:22-bookworm-slim";
 export const DAYTONA_COPILOT_SNAPSHOT_NAME = "coven-agents-copilot-1";
-export const COPILOT_CLI_VERSION = "1.0.80";
+export { COPILOT_CLI_VERSION } from "../copilot-version";
 export const PNPM_VERSION = "10.32.1";
 export const WORKSPACE_DIRECTORY = "/workspace";
 
@@ -103,7 +104,7 @@ export function daytonaClientConfiguration(
 export function createDaytonaCopilotImage(): Image {
   return Image.base(DAYTONA_COPILOT_IMAGE_BASE)
     .runCommands(
-      `npm install --global pnpm@${PNPM_VERSION} @github/copilot@${COPILOT_CLI_VERSION}`,
+      `npm install --global pnpm@${PNPM_VERSION} @github/copilot@${PINNED_COPILOT_CLI_VERSION}`,
       `mkdir --parents ${WORKSPACE_DIRECTORY}`
     )
     .workdir(WORKSPACE_DIRECTORY);

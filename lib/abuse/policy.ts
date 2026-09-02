@@ -99,6 +99,8 @@ const POLICIES = Object.freeze({
   skill_delete: closedPolicy(["ip", "tenant"], 0, DESTRUCTIVE_WRITE),
   skill_read: closedPolicy(["ip", "user"], 0, STANDARD_READ),
   skill_write: closedPolicy(["ip", "tenant"], 8192, SENSITIVE_WRITE),
+  // Scheduled repair does no request parsing and is bounded by its DB lease.
+  stripe_reconcile: closedPolicy(["ip"], 0, rateClass(120, 60, 1200, 3600)),
   // Admission runs before the signed raw body is read.
   stripe_webhook: closedPolicy(["ip"], 262_144, WEBHOOK_WRITE),
   subscription_read: closedPolicy(["user"], 0, STANDARD_READ),

@@ -41,6 +41,7 @@ const EXPECTED_ROUTES = [
   "analytics_read",
   "model_list",
   "stripe_webhook",
+  "stripe_reconcile",
   "run_start",
   "internal_credential",
   "runner_public_read",
@@ -117,6 +118,7 @@ const EXPECTED_POLICIES = {
   skill_delete: expectedPolicy(["ip", "tenant"], 0, 5, 60, 20, 3600),
   skill_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
   skill_write: expectedPolicy(["ip", "tenant"], 8192, 10, 60, 40, 3600),
+  stripe_reconcile: expectedPolicy(["ip"], 0, 120, 60, 1200, 3600),
   stripe_webhook: expectedPolicy(["ip"], 262_144, 600, 60, 10_000, 3600),
   subscription_read: expectedPolicy(["user"], 0, 60, 60, 600, 3600),
   subscription_read_ip: expectedPolicy(["ip"], 0, 600, 60, 10_000, 3600),
@@ -165,6 +167,13 @@ test("the internal GitHub tool uses a high-headroom IP-only pre-database budget"
   assert.deepEqual(
     abusePolicyFor("github_tool"),
     expectedPolicy(["ip"], 524_288, 600, 60, 10_000, 3600)
+  );
+});
+
+test("Stripe reconciliation is an IP-only empty-body machine route", () => {
+  assert.deepEqual(
+    abusePolicyFor("stripe_reconcile"),
+    expectedPolicy(["ip"], 0, 120, 60, 1200, 3600)
   );
 });
 

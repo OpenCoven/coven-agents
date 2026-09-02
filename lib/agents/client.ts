@@ -11,6 +11,7 @@ import type { HarnessStatus } from "@opencoven/harness";
 import {
   BrowserRunnerTransport,
   RunnerApiError,
+  type RunnerStopOutcome,
   type RunnerTransport,
 } from "./browser-transport";
 
@@ -145,7 +146,7 @@ export class RunnerClient {
     return this.transport.streamRunEvents(runId, options);
   }
 
-  stopRun(runId: string, signal?: AbortSignal): Promise<RunSnapshot> {
+  stopRun(runId: string, signal?: AbortSignal): Promise<RunnerStopOutcome> {
     return this.transport.stopRun(runId, signal);
   }
 

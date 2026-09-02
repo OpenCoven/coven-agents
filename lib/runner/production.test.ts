@@ -12,6 +12,8 @@ import { diagnoseDaytonaSandbox, runEphemeralDiagnostic } from "./production";
 import {
   createProductionRunnerRuntime,
   dispatchProductionClaim,
+  preflightQueuedProductionClaim,
+  preflightQueuedProductionDispatch,
 } from "./runtime";
 import { RunnerServiceError } from "./service";
 import type { RunnerStore } from "./store";
@@ -68,6 +70,7 @@ function run(authVersion: number | null): RunnerRunRecord {
     dispatchState: "dispatching",
     error: null,
     executionPermission: "unrestricted",
+    executionProvenance: null,
     fileEvidence: [],
     githubBrokerPolicy: null,
     id: "00000000-0000-4000-8000-000000000002",
@@ -127,6 +130,22 @@ test("ephemeral diagnostics delete the sandbox after a bounded probe", async () 
 test("ephemeral diagnostics clean up after probe failure and hide provider output", async () => {
   const calls: string[] = [];
   const failures: unknown[] = [];
+  const privateValues = [
+    "tenant-credential-diagnostic",
+    ["sk", "proj", "syntheticdaytonaapikeyfixture000000"].join("-"),
+    "manual-reconcile-service-bearer",
+    [
+      "eyJhbGciOiJIUzI1NiJ9",
+      "eyJzdWIiOiJmaXh0dXJlIn0",
+      "c2lnbmVkLWRpYWdub3N0aWMtYm91bmRhcnk",
+    ].join("."),
+    "daytona-sandbox-diagnostic-id",
+    "daytona-sandbox-diagnostic-name",
+    "daytona-session-diagnostic-id",
+    "daytona-command-diagnostic-id",
+    "daytona-attempt-diagnostic-id",
+    "tenant-b-diagnostic-marker",
+  ];
 
   await assert.rejects(
     runEphemeralDiagnostic({
@@ -139,7 +158,7 @@ test("ephemeral diagnostics clean up after probe failure and hide provider outpu
           },
           execute: () => {
             calls.push("execute");
-            return Promise.reject(new Error("provider=private-detail"));
+            return Promise.reject(new Error(privateValues.join(" | ")));
           },
         });
       },
@@ -150,14 +169,18 @@ test("ephemeral diagnostics clean up after probe failure and hide provider outpu
     (error: unknown) => {
       assert.ok(error instanceof RunnerServiceError);
       assert.equal(error.code, "diagnostic_unavailable");
-      assert.equal(error.message.includes("private-detail"), false);
+      for (const value of privateValues) {
+        assert.equal(error.message.includes(value), false);
+      }
       return true;
     }
   );
 
   assert.deepEqual(calls, ["create", "execute", "delete"]);
   assert.deepEqual(failures, [{ category: "unknown", stage: "execute" }]);
-  assert.equal(JSON.stringify(failures).includes("private-detail"), false);
+  for (const value of privateValues) {
+    assert.equal(JSON.stringify(failures).includes(value), false);
+  }
 });
 
 test("ephemeral diagnostics classify provider authentication failures safely", async () => {
@@ -750,6 +773,133 @@ test("production terminalizes revoked, legacy, and unsubscribed authority before
   );
 });
 
+test("production queued authority preflight terminalizes revocation before capacity", async () => {
+  const current = claimed(4);
+  let cleanupCalls = 0;
+  let finalizedError: unknown;
+
+  const result = await preflightQueuedProductionClaim(current, {
+    clock: () => new Date("2026-08-28T15:00:30.000Z"),
+    environment: {},
+    findAccount: () =>
+      Promise.resolve({
+        authVersion: 5,
+        billingPeriodStart: new Date("2026-08-01T00:00:00.000Z"),
+        subscribedUntil: ACTIVE_SUBSCRIPTION_UNTIL,
+      }),
+    operator,
+    store: {
+      cleanupTerminalLease: () => {
+        cleanupCalls += 1;
+        return Promise.resolve({
+          kind: "updated" as const,
+          value: run(current.run.authVersion),
+        });
+      },
+      finalizeRun: (
+        _operator: RunnerOperator,
+        input: Parameters<RunnerStore["finalizeRun"]>[1]
+      ) => {
+        finalizedError = input.error;
+        return Promise.resolve({
+          kind: "finalized" as const,
+          prunedRunIds: [],
+          run: run(current.run.authVersion),
+        });
+      },
+      releaseUnstartedDispatch: () =>
+        Promise.reject(new Error("revoked authority must not be requeued")),
+    },
+  });
+
+  assert.equal(result, "terminalized");
+  assert.equal(cleanupCalls, 1);
+  assert.deepEqual(finalizedError, {
+    code: "authority_revoked",
+    message: "Run authority is no longer valid.",
+    retryable: false,
+  });
+});
+
+test("queued authority preflight moves past eligible capacity-blocked work", async () => {
+  const allowedRun = {
+    ...run(5),
+    id: "00000000-0000-4000-8000-000000000004",
+    queueSequence: 1,
+  };
+  const allowed = {
+    authority: {
+      ...claimed(5).authority,
+      runId: allowedRun.id,
+    } as RunnerDispatchAuthority,
+    run: allowedRun,
+  };
+  const revokedRun = {
+    ...run(4),
+    id: "00000000-0000-4000-8000-000000000005",
+    queueSequence: 2,
+  };
+  const revoked = {
+    authority: {
+      ...claimed(4).authority,
+      runId: revokedRun.id,
+    } as RunnerDispatchAuthority,
+    run: revokedRun,
+  };
+  const pending = [allowed, revoked];
+  const claimInputs: Array<{ excludedRunIds?: readonly string[] }> = [];
+  const releasedRunIds: string[] = [];
+  const finalizedRunIds: string[] = [];
+
+  await preflightQueuedProductionDispatch({
+    dispatchLeaseMs: 1000,
+    environment: {},
+    findAccount: () =>
+      Promise.resolve({
+        authVersion: 5,
+        billingPeriodStart: new Date("2026-08-01T00:00:00.000Z"),
+        subscribedUntil: ACTIVE_SUBSCRIPTION_UNTIL,
+      }),
+    operator,
+    store: {
+      claimQueuedDispatchForRevalidation: (_operator, input) => {
+        claimInputs.push({
+          excludedRunIds: [...(input.excludedRunIds ?? [])],
+        });
+        return Promise.resolve(pending.shift() ?? null);
+      },
+      cleanupTerminalLease: (_operator, input) =>
+        Promise.resolve({
+          kind: "updated" as const,
+          value: input.runId === revoked.run.id ? revoked.run : allowed.run,
+        }),
+      finalizeRun: (_operator, input) => {
+        finalizedRunIds.push(input.runId);
+        return Promise.resolve({
+          kind: "finalized" as const,
+          prunedRunIds: [],
+          run: input.runId === revoked.run.id ? revoked.run : allowed.run,
+        });
+      },
+      releaseUnstartedDispatch: (_operator, input) => {
+        releasedRunIds.push(input.runId);
+        return Promise.resolve({
+          kind: "released" as const,
+          value: input.runId === allowed.run.id ? allowed.run : revoked.run,
+        });
+      },
+    },
+  });
+
+  assert.deepEqual(releasedRunIds, [allowed.run.id]);
+  assert.deepEqual(finalizedRunIds, [revoked.run.id]);
+  assert.deepEqual(claimInputs, [
+    { excludedRunIds: [] },
+    { excludedRunIds: [allowed.run.id] },
+    { excludedRunIds: [allowed.run.id, revoked.run.id] },
+  ]);
+});
+
 test("production dispatches only a currently subscribed matching authority", async () => {
   const current = claimed(5);
   let dispatchedClaim: RunnerClaimedDispatch | undefined;
@@ -783,6 +933,85 @@ test("production dispatches only a currently subscribed matching authority", asy
     keySecret: "production-test-key",
     periodStart: new Date("2026-08-01T00:00:00.000Z"),
   });
+});
+
+test("production passes a fresh account revalidation to credential dispatch", async () => {
+  const current = claimed(5);
+  let accountReads = 0;
+  let revalidated: string | undefined;
+
+  const result = await dispatchProductionClaim(current, {
+    dispatch: async (_actualClaim, _context, revalidate) => {
+      revalidated = (await revalidate()).kind;
+      return revalidated === "authority_revoked"
+        ? { kind: "refused", reason: "authority", runId: current.run.id }
+        : { kind: "started", runId: current.run.id };
+    },
+    environment: {
+      ABUSE_KEY_SECRET: "production-test-key",
+      GLOBAL_DAILY_RUN_CAP: "500",
+    },
+    findAccount: () => {
+      accountReads += 1;
+      return Promise.resolve({
+        authVersion: accountReads === 1 ? 5 : 6,
+        billingPeriodStart: new Date("2026-08-01T00:00:00.000Z"),
+        subscribedUntil: ACTIVE_SUBSCRIPTION_UNTIL,
+      });
+    },
+    operator,
+    store: {} as never,
+  });
+
+  assert.deepEqual(result, {
+    kind: "refused",
+    reason: "authority",
+    runId: current.run.id,
+  });
+  assert.equal(revalidated, "authority_revoked");
+  assert.equal(accountReads, 2);
+});
+
+test("production revalidation returns the current billing-period context", async () => {
+  const current = claimed(5);
+  let accountReads = 0;
+  let refreshedContext: unknown;
+
+  const result = await dispatchProductionClaim(current, {
+    dispatch: async (_actualClaim, _context, revalidate) => {
+      const refreshed = await revalidate();
+      assert.equal(refreshed.kind, "allowed");
+      if (refreshed.kind === "allowed") {
+        refreshedContext = refreshed.context;
+      }
+      return { kind: "started", runId: current.run.id };
+    },
+    environment: {
+      ABUSE_KEY_SECRET: "production-test-key",
+      GLOBAL_DAILY_RUN_CAP: "500",
+    },
+    findAccount: () => {
+      accountReads += 1;
+      return Promise.resolve({
+        authVersion: 5,
+        billingPeriodStart:
+          accountReads === 1
+            ? new Date("2026-08-01T00:00:00.000Z")
+            : new Date("2026-09-01T00:00:00.000Z"),
+        subscribedUntil: ACTIVE_SUBSCRIPTION_UNTIL,
+      });
+    },
+    operator,
+    store: {} as never,
+  });
+
+  assert.deepEqual(result, { kind: "started", runId: current.run.id });
+  assert.deepEqual(refreshedContext, {
+    globalDailyCap: 500,
+    keySecret: "production-test-key",
+    periodStart: new Date("2026-09-01T00:00:00.000Z"),
+  });
+  assert.equal(accountReads, 2);
 });
 
 test("production releases failed claim setup for durable retry without provider leakage", async () => {

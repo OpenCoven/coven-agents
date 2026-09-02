@@ -146,6 +146,14 @@ test("closed beta keeps GitHub tool descendants and lookalikes gated", async () 
   });
 });
 
+test("closed beta keeps Stripe reconciliation reachable with a query string", async () => {
+  const response = await withClosedBeta(() =>
+    visit(undefined, "/api/internal/stripe-reconcile?source=cron")
+  );
+  assert.equal(response.headers.get("location"), null);
+  assert.equal(response.headers.get("location"), null);
+});
+
 test("closed beta keeps exact runner machine routes reachable with query strings", async () => {
   await withClosedBeta(async () => {
     await Promise.all(

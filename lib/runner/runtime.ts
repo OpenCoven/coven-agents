@@ -1,7 +1,6 @@
 import "server-only";
 
-import { randomBytes, randomUUID } from "node:crypto";
-import type { Daytona } from "@daytona/sdk";
+import { randomBytes } from "node:crypto";
 import {
   HARNESS_SPECS,
   type HarnessStatus,
@@ -11,24 +10,18 @@ import {
   globalDailyRunCapFromEnv,
   requireNonemptyAbuseKeySecret,
 } from "@/lib/abuse/config";
-import { configuredApplicationBasePath } from "@/lib/application-path";
-import { configuredApplicationOrigin } from "@/lib/auth/application-origin";
 import { sessionAuthorityMatches } from "@/lib/auth/session-revocation";
 import { periodStart } from "@/lib/billing/period";
 import type { databaseFor } from "@/lib/db/access";
 import type { SubscriberSession } from "@/lib/session";
 import type { RunnerAdmissionLimits, RunnerDispatchResult } from "./admission";
-import { COPILOT_CLI_VERSION } from "./daytona/image";
 import type {
   RunnerReconciliationExecutionResult,
   RunnerReconciliationResult,
-} from "./reconcile";
-import type {
-  RunnerDeleteAgentResult,
-  RunnerPrewarmOptions,
-  RunnerService,
-  RunnerWarmSandboxResult,
-} from "./service";
+} from "./attempt-reconcile";
+import { COPILOT_CLI_VERSION } from "./copilot-version";
+import type { RunnerResourceOperationObservation } from "./resource-observability";
+import type { RunnerService } from "./service";
 import type { RunnerStore } from "./store";
 import type {
   RunnerClaimedDispatch,
@@ -38,6 +31,8 @@ import type {
 
 const OPERATOR: RunnerOperator = { kind: "runner-operator" };
 const RECONCILIATION_LEASE_TTL_SECONDS = 360;
+const HERMETIC_DISPATCH_LEASE_MS = 1000;
+const QUEUED_AUTHORITY_PREFLIGHT_BATCH_SIZE = 20;
 const EMPTY_RECONCILIATION_COUNTS: RunnerReconciliationResult = {
   adopted: 0,
   deferred: 0,
@@ -52,7 +47,7 @@ const EMPTY_RECONCILIATION_COUNTS: RunnerReconciliationResult = {
   terminalLeaseCleaned: 0,
 };
 
-type ProductionDatabase = ReturnType<typeof databaseFor>;
+export type ProductionDatabase = ReturnType<typeof databaseFor>;
 
 type CredentialContext = Readonly<{
   globalDailyCap: number;
@@ -71,11 +66,11 @@ type ProductionDispatchAccount = Readonly<{
   subscribedUntil: Date | null;
 }>;
 
-type ProductionDatabasePrincipal = SubscriberSession | RunnerOperator;
-type ProductionDatabaseFactory = (
+export type ProductionDatabasePrincipal = SubscriberSession | RunnerOperator;
+export type ProductionDatabaseFactory = (
   principal: ProductionDatabasePrincipal
 ) => ProductionDatabase | Promise<ProductionDatabase>;
-type ProductionAccountFinder = (
+export type ProductionAccountFinder = (
   userId: string
 ) => Promise<ProductionDispatchAccount | null>;
 
@@ -83,7 +78,8 @@ export type ProductionClaimDependencies = Readonly<{
   clock?: () => Date;
   dispatch: (
     claimed: RunnerClaimedDispatch,
-    context: CredentialContext
+    context: CredentialContext,
+    revalidateCredentialContext: () => Promise<CredentialContextDecision>
   ) => Promise<RunnerDispatchResult>;
   environment?: Readonly<Record<string, string | undefined>>;
   findAccount?: ProductionAccountFinder;
@@ -94,9 +90,17 @@ export type ProductionClaimDependencies = Readonly<{
   >;
 }>;
 
+type ProductionQueuedAuthorityPreflightDependencies = Pick<
+  ProductionClaimDependencies,
+  "clock" | "environment" | "findAccount" | "operator" | "store"
+>;
+
 export type ProductionRunnerRuntimeDependencies = Readonly<{
   databaseFor?: ProductionDatabaseFactory;
   findAccount?: ProductionAccountFinder;
+  reportResourceOperation?: (
+    observation: RunnerResourceOperationObservation
+  ) => void;
   reportReconciliationFailure?: (failure: RunnerReconciliationFailure) => void;
 }>;
 
@@ -167,7 +171,7 @@ export async function runLeasedReconciliation(
   }
 }
 
-async function productionDatabase(
+export async function productionDatabase(
   principal: ProductionDatabasePrincipal
 ): Promise<ProductionDatabase> {
   const access = await import("@/lib/db/access");
@@ -272,6 +276,104 @@ async function releaseUnstartedClaim(
   }
 }
 
+async function terminalizeRevokedProductionClaim(
+  claimed: RunnerClaimedDispatch,
+  dependencies: ProductionQueuedAuthorityPreflightDependencies
+): Promise<RunnerDispatchResult> {
+  const { terminalizeUnstartedDispatchFailure } = await import("./admission");
+  const terminalized = await terminalizeUnstartedDispatchFailure(
+    dependencies,
+    claimed.authority,
+    claimed.run,
+    "authority_revoked",
+    "Run authority is no longer valid.",
+    false
+  );
+  return terminalized
+    ? { kind: "refused", reason: "authority", runId: claimed.run.id }
+    : {
+        kind: "retained",
+        reason: "cleanup_pending",
+        runId: claimed.run.id,
+      };
+}
+
+/**
+ * Revalidates a claimed queued run without obtaining credentials or reaching
+ * the executor. Eligible work is put back exactly where the scheduler found
+ * it; revoked work is terminalized before capacity can defer that decision.
+ */
+export async function preflightQueuedProductionClaim(
+  claimed: RunnerClaimedDispatch,
+  dependencies: ProductionQueuedAuthorityPreflightDependencies
+): Promise<"released" | "retained" | "terminalized"> {
+  let decision: CredentialContextDecision;
+  try {
+    decision = await credentialContextForRun(claimed.run, dependencies);
+  } catch {
+    decision = { kind: "unavailable" };
+  }
+  if (decision.kind === "authority_revoked") {
+    return (await terminalizeRevokedProductionClaim(claimed, dependencies))
+      .kind === "refused"
+      ? "terminalized"
+      : "retained";
+  }
+  return (
+    await releaseUnstartedClaim(
+      dependencies.store,
+      claimed,
+      dependencies.operator
+    )
+  ).kind === "retained"
+    ? "retained"
+    : "released";
+}
+
+/**
+ * Performs bounded capacity-independent queued authority checks per
+ * reconciliation. The normal scheduler still owns all execution admission.
+ */
+export async function preflightQueuedProductionDispatch(
+  dependencies: ProductionQueuedAuthorityPreflightDependencies &
+    Readonly<{
+      dispatchLeaseMs: number;
+      store: Pick<
+        RunnerStore,
+        | "claimQueuedDispatchForRevalidation"
+        | "cleanupTerminalLease"
+        | "finalizeRun"
+        | "releaseUnstartedDispatch"
+      >;
+    }>
+): Promise<void> {
+  const excludedRunIds: string[] = [];
+  for (
+    let index = 0;
+    index < QUEUED_AUTHORITY_PREFLIGHT_BATCH_SIZE;
+    index += 1
+  ) {
+    // biome-ignore lint/performance/noAwaitInLoops: Claims must stay sequential so each revalidation lease is fenced.
+    const claimed = await dependencies.store.claimQueuedDispatchForRevalidation(
+      dependencies.operator,
+      {
+        ...nextDispatchLease(dependencies.dispatchLeaseMs),
+        excludedRunIds,
+      }
+    );
+    if (!claimed) {
+      return;
+    }
+    excludedRunIds.push(claimed.run.id);
+    if (
+      (await preflightQueuedProductionClaim(claimed, dependencies)) ===
+      "retained"
+    ) {
+      throw new Error("Queued authority preflight cleanup is pending.");
+    }
+  }
+}
+
 export async function dispatchProductionClaim(
   claimed: RunnerClaimedDispatch,
   dependencies: ProductionClaimDependencies
@@ -287,22 +389,7 @@ export async function dispatchProductionClaim(
     );
   }
   if (decision.kind === "authority_revoked") {
-    const { terminalizeUnstartedDispatchFailure } = await import("./admission");
-    const terminalized = await terminalizeUnstartedDispatchFailure(
-      dependencies,
-      claimed.authority,
-      claimed.run,
-      "authority_revoked",
-      "Run authority is no longer valid.",
-      false
-    );
-    return terminalized
-      ? { kind: "refused", reason: "authority", runId: claimed.run.id }
-      : {
-          kind: "retained",
-          reason: "cleanup_pending",
-          runId: claimed.run.id,
-        };
+    return terminalizeRevokedProductionClaim(claimed, dependencies);
   }
   if (decision.kind === "unavailable") {
     return releaseUnstartedClaim(
@@ -311,7 +398,9 @@ export async function dispatchProductionClaim(
       dependencies.operator
     );
   }
-  return dependencies.dispatch(claimed, decision.context);
+  return dependencies.dispatch(claimed, decision.context, () =>
+    credentialContextForRun(claimed.run, dependencies)
+  );
 }
 
 function nextDispatchLease(leaseMilliseconds: number): Readonly<{
@@ -324,216 +413,7 @@ function nextDispatchLease(leaseMilliseconds: number): Readonly<{
   };
 }
 
-function configuredDispatcher(
-  database: ProductionDatabase,
-  store: RunnerStore,
-  daytona: Daytona,
-  findAccount?: ProductionAccountFinder
-): () => Promise<RunnerDispatchResult> {
-  return async () => {
-    const admission = await import("./admission");
-    let claimed: RunnerClaimedDispatch | null;
-    let limits: RunnerAdmissionLimits;
-    try {
-      limits = admission.admissionLimitsFromEnvironment();
-      claimed = await store.claimNextDispatch(OPERATOR, {
-        ...nextDispatchLease(admission.DEFAULT_DISPATCH_LEASE_MS),
-        limits,
-      });
-    } catch {
-      return { kind: "unavailable", reason: "admission_unavailable" };
-    }
-    if (!claimed) {
-      return { kind: "idle" };
-    }
-
-    return configuredClaimDispatcher(
-      database,
-      store,
-      daytona,
-      limits,
-      findAccount
-    )(claimed);
-  };
-}
-
-function configuredClaimDispatcher(
-  database: ProductionDatabase,
-  store: RunnerStore,
-  daytona: Daytona,
-  limits?: RunnerAdmissionLimits,
-  findAccount?: ProductionAccountFinder
-): (claimed: RunnerClaimedDispatch) => Promise<RunnerDispatchResult> {
-  return async (claimed) => {
-    const [
-      admission,
-      credentials,
-      githubApp,
-      githubCapability,
-      githubConfig,
-      githubConnection,
-      sandbox,
-      teamStore,
-    ] = await Promise.all([
-      import("./admission"),
-      import("@/lib/credentials/runner-credential"),
-      import("@/lib/github/app-auth"),
-      import("@/lib/github/capability"),
-      import("@/lib/github/config"),
-      import("@/lib/github/connection"),
-      import("./daytona/sandbox"),
-      import("@/lib/teams/store"),
-    ]);
-    const resolvedLimits = limits ?? admission.admissionLimitsFromEnvironment();
-    return dispatchProductionClaim(claimed, {
-      dispatch: (authorized, context) => {
-        const credentialDependencies =
-          credentials.drizzleRunnerCredentialDependencies(database);
-        const dependencies = admission.daytonaRunnerDispatchDependencies({
-          credentialDependencies,
-          credentialInput: (run, _agent) => ({
-            ...context,
-            harnessId: run.agentRuntime,
-            operationId: run.operationId,
-            runId: run.id,
-            tenant: run.tenant,
-          }),
-          limits: resolvedLimits,
-          operator: OPERATOR,
-          sandboxConfiguration: sandbox.daytonaSandboxConfiguration(),
-          sandboxDependencies: { daytona },
-          store,
-          ...(githubToolEndpoint()
-            ? {
-                githubTool: {
-                  issueCapability: async ({ attemptId, run }) => {
-                    const policy = run.githubBrokerPolicy;
-                    if (!policy) {
-                      throw new Error(
-                        "GitHub capability issuance requires persisted policy."
-                      );
-                    }
-                    const now = new Date();
-                    const dispatchDeadline =
-                      run.dispatchLeaseExpiresAt?.getTime();
-                    if (
-                      !dispatchDeadline ||
-                      dispatchDeadline - now.getTime() <= 5000
-                    ) {
-                      throw new Error(
-                        "GitHub capability issuance requires a live dispatch lease."
-                      );
-                    }
-                    const deadlineAt = Math.min(
-                      dispatchDeadline - 5000,
-                      now.getTime() +
-                        githubCapability.MAX_GITHUB_CAPABILITY_ISSUANCE_MS
-                    );
-                    const authorityStore = teamStore.createTeamStore(
-                      teamStore.drizzleTeamStoreDatabase(database)
-                    );
-                    const issued =
-                      await githubCapability.issueGitHubStepCapability(
-                        {
-                          attemptId,
-                          capabilityId: randomUUID(),
-                          deadlineAt,
-                          expiresAt: new Date(
-                            now.getTime() +
-                              githubCapability.MAX_GITHUB_CAPABILITY_LIFETIME_MS
-                          ),
-                          now,
-                          policy,
-                          runnerRunId: run.id,
-                          tenant: run.tenant,
-                          userId: policy.actorUserId,
-                        },
-                        {
-                          refreshAuthority: async ({
-                            abortSignal,
-                            deadlineAt: authorityDeadlineAt,
-                          }) => {
-                            const config = githubConfig.githubAppConfig();
-                            const refreshed =
-                              await githubConnection.refreshGitHubConnectionAuthority(
-                                {
-                                  abortSignal,
-                                  config,
-                                  deadlineAt: authorityDeadlineAt,
-                                  principal: {
-                                    kind: "subscriber",
-                                    tenant: run.tenant,
-                                    userId: policy.actorUserId,
-                                  },
-                                  provider: githubApp.createGitHubAppClient({
-                                    appId: config.appId,
-                                    appSlug: config.appSlug,
-                                    privateKey: config.privateKey,
-                                  }),
-                                  store: authorityStore,
-                                }
-                              );
-                            if (refreshed.kind !== "current") {
-                              throw new Error(
-                                "GitHub connection authority changed before capability issuance."
-                              );
-                            }
-                            return refreshed.snapshot;
-                          },
-                          replaceCapability: (input) =>
-                            githubCapability
-                              .createGitHubGatewayStore(
-                                teamStore.drizzleTeamStoreDatabase(database)
-                              )
-                              .replaceCapability(OPERATOR, input),
-                        }
-                      );
-                    return { rawCapability: issued.rawToken };
-                  },
-                  revokeCapability: async ({ attemptId, run }) => {
-                    const revoked = await githubCapability
-                      .createGitHubGatewayStore(
-                        teamStore.drizzleTeamStoreDatabase(database)
-                      )
-                      .revokeCapability(OPERATOR, {
-                        attemptId,
-                        runnerRunId: run.id,
-                      });
-                    return (
-                      revoked.kind === "revoked" || revoked.kind === "not_found"
-                    );
-                  },
-                  url: githubToolEndpoint() as string,
-                },
-              }
-            : {}),
-        });
-        return admission.dispatchRunnerClaim(authorized, dependencies);
-      },
-      findAccount,
-      operator: OPERATOR,
-      store,
-    });
-  };
-}
-
-function githubToolEndpoint(): string | null {
-  try {
-    const origin = configuredApplicationOrigin(process.env);
-    if (!origin) {
-      return null;
-    }
-    const basePath = configuredApplicationBasePath(process.env);
-    return new URL(
-      `${basePath}/api/internal/github-tool`.replace(/\/+/gu, "/"),
-      origin
-    ).toString();
-  } catch {
-    return null;
-  }
-}
-
-function registryHarnesses(): readonly HarnessStatus[] {
+export function registryHarnesses(): readonly HarnessStatus[] {
   return HARNESS_SPECS.map((spec) =>
     harnessStatus(spec, {
       installed: spec.id === "copilot",
@@ -542,7 +422,7 @@ function registryHarnesses(): readonly HarnessStatus[] {
   );
 }
 
-function reconciliationFailure(
+export function reconciliationFailure(
   error: unknown,
   stage: RunnerReconciliationFailure["stage"],
   runnerError: boolean
@@ -588,11 +468,92 @@ function reconciliationFailure(
   };
 }
 
-function productionReconcile(
+function hermeticConfiguredDispatcher(
+  database: ProductionDatabase,
+  store: RunnerStore,
+  findAccount?: ProductionAccountFinder
+): () => Promise<RunnerDispatchResult> {
+  return async () => {
+    const admission = await import("./admission");
+    let claimed: RunnerClaimedDispatch | null;
+    let limits: RunnerAdmissionLimits;
+    try {
+      limits = admission.admissionLimitsFromEnvironment();
+      claimed = await store.claimNextDispatch(OPERATOR, {
+        ...nextDispatchLease(HERMETIC_DISPATCH_LEASE_MS),
+        limits,
+      });
+    } catch {
+      return { kind: "unavailable", reason: "admission_unavailable" };
+    }
+    if (!claimed) {
+      return { kind: "idle" };
+    }
+    return hermeticConfiguredClaimDispatcher(
+      database,
+      store,
+      limits,
+      findAccount
+    )(claimed);
+  };
+}
+
+function hermeticConfiguredClaimDispatcher(
+  database: ProductionDatabase,
+  store: RunnerStore,
+  limits?: RunnerAdmissionLimits,
+  findAccount?: ProductionAccountFinder
+): (claimed: RunnerClaimedDispatch) => Promise<RunnerDispatchResult> {
+  return async (claimed) => {
+    const [admission, credentials, composition] = await Promise.all([
+      import("./admission"),
+      import("@/lib/credentials/runner-credential"),
+      import("./hermetic/composition"),
+    ]);
+    const resolvedLimits = limits ?? admission.admissionLimitsFromEnvironment();
+    return dispatchProductionClaim(claimed, {
+      dispatch: (authorized, context, revalidateCredentialContext) => {
+        let currentContext = context;
+        return admission.dispatchRunnerClaim(
+          authorized,
+          composition.hermeticRunnerDispatchDependencies({
+            credentialDependencies:
+              credentials.drizzleRunnerCredentialDependencies(database),
+            credentialInput: (run) => ({
+              ...currentContext,
+              harnessId: run.agentRuntime,
+              operationId: run.operationId,
+              runId: run.id,
+              tenant: run.tenant,
+            }),
+            limits: resolvedLimits,
+            operator: OPERATOR,
+            revalidateCredentialAuthority: async () => {
+              const decision = await revalidateCredentialContext();
+              if (decision.kind === "allowed") {
+                currentContext = decision.context;
+              }
+              return decision.kind;
+            },
+            store,
+          })
+        );
+      },
+      findAccount,
+      operator: OPERATOR,
+      store,
+    });
+  };
+}
+
+function hermeticProductionReconcile(
   database: ProductionDatabase,
   store: RunnerStore,
   findAccount?: ProductionAccountFinder,
-  reportFailure?: (failure: RunnerReconciliationFailure) => void
+  reportFailure?: (failure: RunnerReconciliationFailure) => void,
+  reportResourceOperation?: (
+    observation: RunnerResourceOperationObservation
+  ) => void
 ): RunnerService["reconcileAndDispatch"] {
   return async () => {
     let stage: RunnerReconciliationFailure["stage"] = "lease";
@@ -602,39 +563,39 @@ function productionReconcile(
           stage = "composition";
           const [
             admission,
-            client,
             credentials,
-            errors,
             reconciliation,
-            sandbox,
+            composition,
+            resourceLifecycleModule,
             teamOrchestration,
             teamStoreModule,
           ] = await Promise.all([
             import("./admission"),
-            import("./daytona/client"),
             import("@/lib/credentials/runner-credential"),
-            import("./errors"),
-            import("./reconcile"),
-            import("./daytona/sandbox"),
+            import("./attempt-reconcile"),
+            import("./hermetic/composition"),
+            import("./hermetic/resource-lifecycle"),
             import("@/lib/teams/orchestrate"),
             import("@/lib/teams/store"),
           ]);
-          const daytona = client.daytonaClient();
           const credentialDependencies =
             credentials.drizzleRunnerCredentialDependencies(database);
-          const composition =
-            reconciliation.daytonaRunnerReconciliationDependencies({
+          const resourceLifecycle =
+            resourceLifecycleModule.hermeticPersistentResourceLifecycle(
+              store,
+              reportResourceOperation
+            );
+          const dependencies =
+            composition.hermeticRunnerReconciliationDependencies({
               credentialDependencies,
               credentialInput: () => {
-                throw new errors.RunnerServiceError(
-                  "reconcile_unavailable",
+                throw new Error(
                   "Reconciliation dispatch must resolve account credentials first."
                 );
               },
-              daytona,
               limits: admission.admissionLimitsFromEnvironment(),
               operator: OPERATOR,
-              sandboxConfiguration: sandbox.daytonaSandboxConfiguration(),
+              resourceLifecycle,
               store,
             });
           const teams = teamOrchestration.createTeamOrchestrator({
@@ -642,10 +603,10 @@ function productionReconcile(
             cancelRun: (_principal, runId) =>
               reconciliation.cancelRunnerRun(
                 runId,
-                reconciliation.daytonaRunnerCancellationDependencies({
+                composition.hermeticRunnerCancellationDependencies({
                   credentialDependencies,
-                  daytona,
                   operator: OPERATOR,
+                  resourceLifecycle,
                   store,
                 })
               ),
@@ -654,24 +615,28 @@ function productionReconcile(
               teamStoreModule.drizzleTeamStoreDatabase(database)
             ),
           });
-          const dispatchClaim = configuredClaimDispatcher(
-            database,
-            store,
-            daytona,
-            undefined,
-            findAccount
-          );
           stage = "reconcile";
           return reconciliation.reconcileAndDispatch({
-            ...composition,
+            ...dependencies,
             claimTeamRuns: teams.claimReadySteps,
-            dispatch: configuredDispatcher(
+            dispatch: hermeticConfiguredDispatcher(
               database,
               store,
-              daytona,
               findAccount
             ),
-            dispatchClaim,
+            dispatchClaim: hermeticConfiguredClaimDispatcher(
+              database,
+              store,
+              undefined,
+              findAccount
+            ),
+            preflightQueuedDispatch: () =>
+              preflightQueuedProductionDispatch({
+                dispatchLeaseMs: HERMETIC_DISPATCH_LEASE_MS,
+                findAccount,
+                operator: OPERATOR,
+                store,
+              }),
             projectTeamRuns: teams.projectTerminalSteps,
           });
         },
@@ -697,7 +662,7 @@ function productionReconcile(
   };
 }
 
-async function createProductionRunnerServiceForPrincipal(
+async function createHermeticRunnerServiceForPrincipal(
   databasePrincipal: ProductionDatabasePrincipal,
   dependencies: ProductionRunnerRuntimeDependencies
 ) {
@@ -705,19 +670,17 @@ async function createProductionRunnerServiceForPrincipal(
     databasePrincipal
   );
   const [
-    client,
     credentials,
-    process,
     reconciliation,
-    sandbox,
+    composition,
+    resourceLifecycleModule,
     service,
     storeModule,
   ] = await Promise.all([
-    import("./daytona/client"),
     import("@/lib/credentials/runner-credential"),
-    import("./daytona/process"),
-    import("./reconcile"),
-    import("./daytona/sandbox"),
+    import("./attempt-reconcile"),
+    import("./hermetic/composition"),
+    import("./hermetic/resource-lifecycle"),
     import("./service"),
     import("./store"),
   ]);
@@ -726,96 +689,55 @@ async function createProductionRunnerServiceForPrincipal(
   );
   const credentialDependencies =
     credentials.drizzleRunnerCredentialDependencies(database);
+  const resourceLifecycle =
+    resourceLifecycleModule.hermeticPersistentResourceLifecycle(
+      store,
+      dependencies.reportResourceOperation
+    );
 
   return service.createRunnerService({
     cancelRun: (runId) =>
       reconciliation.cancelRunnerRun(
         runId,
-        reconciliation.daytonaRunnerCancellationDependencies({
+        composition.hermeticRunnerCancellationDependencies({
           credentialDependencies,
-          daytona: client.daytonaClient(),
           operator: OPERATOR,
+          resourceLifecycle,
           store,
         })
       ),
-    deleteSandbox: async (
-      principal,
-      agentId
-    ): Promise<RunnerDeleteAgentResult> => {
-      try {
-        const result = await sandbox.deleteDaytonaSandbox(principal, agentId, {
-          daytona: client.daytonaClient(),
-          store,
-        });
-        if (result.kind === "failed") {
-          return result.error === "non_retryable"
-            ? { kind: "provider_rejected" }
-            : { kind: "unavailable", source: "provider" };
-        }
-        return result;
-      } catch {
-        return { kind: "unavailable", source: "database" };
-      }
-    },
-    dispatchClaim: (claimed) => {
-      const daytona = client.daytonaClient();
-      return configuredClaimDispatcher(
-        database,
-        store,
-        daytona,
-        undefined,
-        dependencies.findAccount
-      )(claimed);
-    },
+    dispatchClaim: hermeticConfiguredClaimDispatcher(
+      database,
+      store,
+      undefined,
+      dependencies.findAccount
+    ),
     listHarnesses: async () => registryHarnesses(),
-    reconcileAndDispatch: productionReconcile(
+    reconcileAndDispatch: hermeticProductionReconcile(
       database,
       store,
       dependencies.findAccount,
-      dependencies.reportReconciliationFailure
+      dependencies.reportReconciliationFailure,
+      dependencies.reportResourceOperation
     ),
+    resourceLifecycle,
     store,
-    warmSandbox: async (
-      principal,
-      agent,
-      options?: RunnerPrewarmOptions
-    ): Promise<RunnerWarmSandboxResult> => {
-      try {
-        const daytona = options?.deadline
-          ? client.daytonaClientForDeadline(options.deadline)
-          : client.daytonaClient();
-        const result = await sandbox.warmDaytonaSandbox(
-          principal,
-          agent,
-          sandbox.daytonaSandboxConfiguration(),
-          {
-            daytona,
-            lifecycle: {
-              deadline: options?.deadline,
-              signal: options?.signal,
-            },
-            probe: async (sandboxHandle, signal, timeoutSeconds, sessionId) => {
-              await process.probeDaytonaHarnesses(sandboxHandle, {
-                deadline: options?.deadline,
-                sessionId,
-                signal,
-                timeoutSeconds,
-              });
-            },
-            store,
-          }
-        );
-        if (result.kind === "failed") {
-          return result.error === "non_retryable"
-            ? { kind: "provider_rejected" }
-            : { kind: "unavailable", source: "provider" };
-        }
-        return result;
-      } catch {
-        return { kind: "unavailable", source: "database" };
-      }
-    },
   });
+}
+
+async function createProductionRunnerServiceForPrincipal(
+  databasePrincipal: ProductionDatabasePrincipal,
+  dependencies: ProductionRunnerRuntimeDependencies
+) {
+  const { hermeticRunnerMode } = await import("./hermetic/mode");
+  if (hermeticRunnerMode() === "hermetic") {
+    return createHermeticRunnerServiceForPrincipal(
+      databasePrincipal,
+      dependencies
+    );
+  }
+  const provider = await import("./provider-composition");
+  return provider.createHostedRunnerService(databasePrincipal, dependencies);
 }
 
 export function createProductionRunnerRuntime(
@@ -832,6 +754,9 @@ export function createProductionRunnerRuntime(
 const productionRunnerRuntime = createProductionRunnerRuntime({
   reportReconciliationFailure: (failure) => {
     console.error("Runner reconciliation failed.", failure);
+  },
+  reportResourceOperation: (observation) => {
+    console.info("Runner resource operation.", observation);
   },
 });
 

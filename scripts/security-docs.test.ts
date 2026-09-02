@@ -65,6 +65,12 @@ test("the execution threat model covers every required security surface", () => 
     "lib/credentials/store.ts",
     "lib/credentials/runner-credential.ts",
     "lib/runner/runtime.ts",
+    "lib/runner/daytona/process.ts",
+    "lib/runner/daytona/reconcile.ts",
+    "lib/runner/attempt-reconcile.ts",
+    "ExactEvidenceRedactions",
+    "DAYTONA_API_KEY",
+    "RUNNER_MANUAL_RECONCILE_SECRET",
     "coven-agents-cloud.4",
     "coven-agents-security.3",
   ]) {
