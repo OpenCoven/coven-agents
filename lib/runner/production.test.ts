@@ -900,6 +900,56 @@ test("queued authority preflight moves past eligible capacity-blocked work", asy
   ]);
 });
 
+test("queued authority preflight reports invalid credential configuration", async () => {
+  const current = claimed(5);
+  const reported: { detail: string; runId: string }[] = [];
+  const releasedRunIds: string[] = [];
+  let claimCalls = 0;
+
+  await preflightQueuedProductionDispatch({
+    dispatchLeaseMs: 1000,
+    environment: {
+      ABUSE_KEY_SECRET: "production-test-key",
+      GLOBAL_DAILY_RUN_CAP: "not-a-number",
+    },
+    findAccount: () =>
+      Promise.resolve({
+        authVersion: 5,
+        billingPeriodStart: new Date("2026-08-01T00:00:00.000Z"),
+        subscribedUntil: ACTIVE_SUBSCRIPTION_UNTIL,
+      }),
+    operator,
+    reportCredentialMisconfiguration: (misconfiguration) => {
+      reported.push({ ...misconfiguration });
+    },
+    store: {
+      claimQueuedDispatchForRevalidation: () => {
+        claimCalls += 1;
+        return Promise.resolve(claimCalls === 1 ? current : null);
+      },
+      cleanupTerminalLease: () =>
+        Promise.reject(new Error("valid authority must not be terminalized")),
+      finalizeRun: () =>
+        Promise.reject(new Error("valid authority must not be finalized")),
+      releaseUnstartedDispatch: (_operator, input) => {
+        releasedRunIds.push(input.runId);
+        return Promise.resolve({
+          kind: "released" as const,
+          value: current.run,
+        });
+      },
+    },
+  });
+
+  assert.deepEqual(releasedRunIds, [current.run.id]);
+  assert.deepEqual(reported, [
+    {
+      detail: "GLOBAL_DAILY_RUN_CAP must be a positive integer.",
+      runId: current.run.id,
+    },
+  ]);
+});
+
 test("production dispatches only a currently subscribed matching authority", async () => {
   const current = claimed(5);
   let dispatchedClaim: RunnerClaimedDispatch | undefined;
