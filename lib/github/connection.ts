@@ -162,6 +162,10 @@ export type GitHubConnectionDependencies = Readonly<{
   idempotencyStore: IdempotencyStore;
   now?: () => Date;
   randomBytes?: (size: number) => Uint8Array;
+  serializeUserAuthorization: <T>(
+    subscriber: RunnerAuthenticatedSubscriber,
+    operation: () => Promise<T>
+  ) => Promise<T>;
 }>;
 
 export type GitHubConnectionHandlers = Readonly<{
@@ -1139,17 +1143,21 @@ async function completeUserAuthorization(
 
   let userAuthority: GitHubUserInstallationAuthority;
   try {
-    userAuthority = await input.dependencies
-      .createUserAuthorizationClient(input.config)
-      .proveInstallationAccess({
-        code: input.callback.code,
-        codeVerifier: githubCodeVerifier(
-          input.claims,
-          input.config.stateSigningKey
-        ),
-        installationId: input.claims.installationId,
-        redirectUri: input.callbackUrl,
-      });
+    userAuthority = await input.dependencies.serializeUserAuthorization(
+      input.subscriber,
+      () =>
+        input.dependencies
+          .createUserAuthorizationClient(input.config)
+          .proveInstallationAccess({
+            code: input.callback.code,
+            codeVerifier: githubCodeVerifier(
+              input.claims,
+              input.config.stateSigningKey
+            ),
+            installationId: input.claims.installationId,
+            redirectUri: input.callbackUrl,
+          })
+    );
   } catch (error) {
     return {
       code: callbackErrorCode(error),

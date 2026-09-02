@@ -1,5 +1,6 @@
 import "server-only";
 
+import { sql } from "drizzle-orm";
 import { auth } from "@/app/(auth)/auth";
 import { configuredApplicationBasePath } from "@/lib/application-path";
 import { configuredApplicationOrigin } from "@/lib/auth/application-origin";
@@ -47,5 +48,12 @@ export function productionGitHubConnectionHandlers(): GitHubConnectionHandlers {
     },
     getConfig: () => validateGitHubEnvironment(process.env),
     idempotencyStore: databaseIdempotencyStore,
+    serializeUserAuthorization: async (subscriber, operation) =>
+      databaseFor(subscriber.session).transaction(async (transaction) => {
+        await transaction.execute(
+          sql`SELECT pg_advisory_xact_lock(1129270855, 1431194708)`
+        );
+        return operation();
+      }),
   });
 }

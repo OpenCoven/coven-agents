@@ -130,7 +130,7 @@ export function createGitHubUserAuthorizationClient(
   async function timedRequest<T>(
     url: string,
     init: RequestInit,
-    stage: "exchange" | "revoke" | "user",
+    stage: "exchange" | "refresh-revoke" | "revoke" | "user",
     consume: (response: Response) => Promise<T>
   ): Promise<T> {
     const controller = new AbortController();
@@ -153,7 +153,8 @@ export function createGitHubUserAuthorizationClient(
         });
         if (
           (stage === "revoke" && response.status !== 204) ||
-          (stage !== "revoke" && !response.ok)
+          (stage === "refresh-revoke" && response.status !== 202) ||
+          (stage !== "refresh-revoke" && stage !== "revoke" && !response.ok)
         ) {
           await response.body?.cancel().catch(() => undefined);
           throw statusError(response, stage);
@@ -440,6 +441,63 @@ export function createGitHubUserAuthorizationClient(
     });
   }
 
+  async function revokeGrant(token: string): Promise<void> {
+    await withClientSecret(input.clientSecret, async (clientSecret) => {
+      const basic = Buffer.from(
+        `${input.clientId}:${clientSecret}`,
+        "utf8"
+      ).toString("base64");
+      await timedRequest(
+        `${GITHUB_API_ORIGIN}/applications/${input.clientId}/grant`,
+        {
+          body: JSON.stringify({ access_token: token }),
+          headers: apiHeaders(`Basic ${basic}`),
+          method: "DELETE",
+        },
+        "revoke",
+        () => Promise.resolve()
+      );
+    });
+  }
+
+  async function revokeRefreshToken(token: string): Promise<void> {
+    await timedRequest(
+      `${GITHUB_API_ORIGIN}/credentials/revoke`,
+      {
+        body: JSON.stringify({ credentials: [token] }),
+        headers: {
+          accept: "application/vnd.github+json",
+          "content-type": "application/json",
+          "user-agent": "OpenCoven-GitHub-App",
+          "x-github-api-version": GITHUB_API_VERSION,
+        },
+        method: "POST",
+      },
+      "refresh-revoke",
+      () => Promise.resolve()
+    );
+  }
+
+  async function revokeCompleteAuthority(
+    accessToken: string,
+    refreshToken: string
+  ): Promise<void> {
+    const [grantResult] = await Promise.allSettled([revokeGrant(accessToken)]);
+    if (grantResult?.status === "fulfilled") {
+      return;
+    }
+    const fallback = await Promise.allSettled([
+      revokeRefreshToken(refreshToken),
+      revokeToken(accessToken),
+    ]);
+    const fallbackError = fallback.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected"
+    )?.reason;
+    if (fallbackError !== undefined) {
+      throw fallbackError;
+    }
+  }
+
   return {
     async proveInstallationAccess(proof) {
       assertProofInput(proof);
@@ -475,10 +533,18 @@ export function createGitHubUserAuthorizationClient(
 
       let revocationError: unknown;
       try {
-        const results = await Promise.allSettled([
-          ...(refreshToken === null ? [] : [revokeToken(refreshToken)]),
-          ...(accessToken === null ? [] : [revokeToken(accessToken)]),
-        ]);
+        const revocations =
+          accessToken !== null &&
+          refreshToken !== null &&
+          OAUTH_USER_PATTERN.test(accessToken)
+            ? [revokeCompleteAuthority(accessToken, refreshToken)]
+            : [
+                ...(refreshToken === null
+                  ? []
+                  : [revokeRefreshToken(refreshToken)]),
+                ...(accessToken === null ? [] : [revokeToken(accessToken)]),
+              ];
+        const results = await Promise.allSettled(revocations);
         revocationError = results.find(
           (result): result is PromiseRejectedResult =>
             result.status === "rejected"
@@ -653,7 +719,7 @@ async function withClientSecret<T>(
 
 function statusError(
   response: Response,
-  stage: "exchange" | "revoke" | "user"
+  stage: "exchange" | "refresh-revoke" | "revoke" | "user"
 ): GitHubProviderError {
   const requestIdValue = response.headers.get("x-github-request-id");
   const requestId =
