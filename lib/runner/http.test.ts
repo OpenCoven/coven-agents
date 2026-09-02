@@ -12,6 +12,12 @@ import type {
   AbuseEnforcementInput,
 } from "@/lib/abuse/enforce";
 import type {
+  IdempotencyClaimInput,
+  IdempotencyClaimResult,
+  IdempotencyCompleteInput,
+  IdempotencyStore,
+} from "@/lib/abuse/idempotency";
+import type {
   RunnerAuth,
   RunnerAuthenticatedSubscriber,
   RunnerSecretAuthorization,
@@ -45,6 +51,61 @@ class Request extends NativeRequest {
       }
     }
     super(input, { ...init, headers });
+  }
+}
+
+class SingleRecordIdempotencyStore implements IdempotencyStore {
+  private completed:
+    | Readonly<{
+        keyHash: string;
+        ownerId: string;
+        requestHash: string;
+        response: IdempotencyCompleteInput["response"];
+      }>
+    | undefined;
+
+  claim(input: IdempotencyClaimInput): Promise<IdempotencyClaimResult> {
+    if (!this.completed) {
+      return Promise.resolve({
+        claim: {
+          claimExpiresAt: input.claimExpiresAt,
+          keyHash: input.keyHash,
+          operation: input.operation,
+          ownerId: input.ownerId,
+          requestHash: input.requestHash,
+        },
+        kind: "claimed",
+      });
+    }
+    if (
+      this.completed.keyHash !== input.keyHash ||
+      this.completed.ownerId !== input.ownerId ||
+      this.completed.requestHash !== input.requestHash
+    ) {
+      return Promise.resolve({ kind: "conflict" });
+    }
+    return Promise.resolve({
+      kind: "completed",
+      response: this.completed.response,
+    });
+  }
+
+  cleanupExpired(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  complete(input: IdempotencyCompleteInput): Promise<"completed" | "lost"> {
+    this.completed = {
+      keyHash: input.claim.keyHash,
+      ownerId: input.claim.ownerId,
+      requestHash: input.claim.requestHash,
+      response: input.response,
+    };
+    return Promise.resolve("completed");
+  }
+
+  release(): Promise<"lost" | "released"> {
+    return Promise.resolve("released");
   }
 }
 
@@ -222,6 +283,7 @@ function handlers(
       | null;
     appOrigin?: string | (() => string | null);
     auth?: RunnerAuth;
+    idempotencyStore?: IdempotencyStore;
     onAbuse?: (input: AbuseEnforcementInput) => void;
     service?: RunnerService;
   } = {}
@@ -274,6 +336,9 @@ function handlers(
       admissions.push(input);
       return Promise.resolve(options.admission ?? { kind: "allowed" });
     },
+    ...(options.idempotencyStore
+      ? { idempotencyStore: options.idempotencyStore }
+      : {}),
     ipAddress: () => "203.0.113.10",
     logger: {
       error: (_message, details) => {
@@ -813,6 +878,36 @@ test("valid subscriber writes preserve preflight, auth, abuse, body, service, pr
     "service",
     "provider",
   ]);
+});
+
+test("agent creation replays a stable server-side idempotency result", async () => {
+  let creates = 0;
+  const fixture = handlers({
+    idempotencyStore: new SingleRecordIdempotencyStore(),
+    service: service({
+      createAgent: () => {
+        creates += 1;
+        return Promise.resolve({ agent: definition(), kind: "created" });
+      },
+    }),
+  });
+  const request = () =>
+    new Request("https://app.test/api/agents", {
+      body: validDefinitionBody(),
+      headers: {
+        "idempotency-key": "builtin-github-agent-scout-v1",
+      },
+      method: "POST",
+    });
+
+  const first = await fixture.handlers.createAgent(request());
+  const replay = await fixture.handlers.createAgent(request());
+
+  assert.equal(first.status, 201);
+  assert.equal(replay.status, 201);
+  assert.equal(replay.headers.get("idempotency-replayed"), "true");
+  assert.equal(creates, 1);
+  assert.deepEqual(await first.json(), await replay.json());
 });
 
 test("create rejects malformed, oversized, unknown, and owner-injected inputs", async () => {

@@ -246,7 +246,11 @@ test("owns every relative same-origin runner path and sends only browser session
   await transport.listHarnesses();
   await transport.listAgents();
   await transport.getAgent(AGENT_ID);
-  await transport.createAgent(input);
+  await transport.createAgent(
+    input,
+    undefined,
+    "builtin-github-agent-scout-v1"
+  );
   await transport.updateAgent(AGENT_ID, input);
   await transport.deleteAgent(AGENT_ID);
   await transport.prewarmTenant();
@@ -291,6 +295,11 @@ test("owns every relative same-origin runner path and sends only browser session
           ? {
               accept: "application/json",
               "content-type": "application/json",
+              ...(call.method === "POST" && call.path === "/api/agents"
+                ? {
+                    "idempotency-key": "builtin-github-agent-scout-v1",
+                  }
+                : {}),
             }
           : { accept: "application/json" }
     );

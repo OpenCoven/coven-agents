@@ -2418,6 +2418,7 @@ test.describe("Run console", () => {
     });
     await notifySessionChange(page);
     await sessionRefresh;
+    await page.getByRole("button", { name: "Account and settings" }).click();
     await page.getByRole("tab", { exact: true, name: "Account" }).click();
     await expect(
       page.getByText("second@example.invalid", { exact: true })
@@ -2578,6 +2579,7 @@ test.describe("Run console", () => {
     });
     await notifySessionChange(page);
     await sessionRefresh;
+    await page.getByRole("button", { name: "Account and settings" }).click();
     await page.getByRole("tab", { exact: true, name: "Account" }).click();
     await expect(
       page.getByText("second@example.invalid", { exact: true })

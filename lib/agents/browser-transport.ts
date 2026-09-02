@@ -72,7 +72,8 @@ type ReadJsonOptions = Readonly<{
 export interface RunnerTransport {
   createAgent: (
     input: CreateAgentInput,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    idempotencyKey?: string
   ) => Promise<AgentDefinition>;
   deleteAgent: (agentId: string, signal?: AbortSignal) => Promise<void>;
   getAgent: (agentId: string, signal?: AbortSignal) => Promise<AgentDefinition>;
@@ -273,12 +274,14 @@ export class BrowserRunnerTransport implements RunnerTransport {
 
   async createAgent(
     input: CreateAgentInput,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    idempotencyKey?: string
   ): Promise<AgentDefinition> {
     return (
       await this.readJson(
         await this.fetch("/api/agents", {
           body: JSON.stringify(input),
+          idempotencyKey,
           method: "POST",
           signal,
         }),
@@ -441,6 +444,7 @@ export class BrowserRunnerTransport implements RunnerTransport {
     options: Readonly<{
       accept?: "text/event-stream";
       body?: string;
+      idempotencyKey?: string;
       lastEventId?: number;
       method?: "DELETE" | "GET" | "POST" | "PUT";
       signal?: AbortSignal;
@@ -457,6 +461,9 @@ export class BrowserRunnerTransport implements RunnerTransport {
         headers: {
           accept: options.accept ?? "application/json",
           ...(options.body ? { "content-type": "application/json" } : {}),
+          ...(options.idempotencyKey
+            ? { "idempotency-key": options.idempotencyKey }
+            : {}),
           ...(options.lastEventId
             ? { "last-event-id": String(options.lastEventId) }
             : {}),

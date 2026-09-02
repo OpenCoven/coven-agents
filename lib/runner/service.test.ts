@@ -132,6 +132,47 @@ test("agent creation stamps the authenticated tenant and rejects supplied owners
   assert.deepEqual(ownerInjected, { kind: "invalid" });
 });
 
+test("idempotent agent creation derives one stable id and recovers a committed row", async () => {
+  const ids: string[] = [];
+  let stored: RunnerAgentRecord | null = null;
+  const service = createRunnerService({
+    store: baseStore({
+      createAgent: (_principal: RunnerPrincipal, input: { id: string }) => {
+        ids.push(input.id);
+        if (stored) {
+          return Promise.resolve({ kind: "conflict" as const });
+        }
+        stored = agent({ id: input.id });
+        return Promise.resolve({ agent: stored, kind: "created" as const });
+      },
+      getAgent: () => Promise.resolve(stored),
+    }),
+  });
+  const providerIdempotencyKey = `coven_${"a".repeat(64)}`;
+
+  const first = await service.createAgent(
+    PRINCIPAL,
+    definition(),
+    providerIdempotencyKey
+  );
+  const replay = await service.createAgent(
+    PRINCIPAL,
+    definition(),
+    providerIdempotencyKey
+  );
+
+  assert.equal(first.kind, "created");
+  assert.equal(replay.kind, "created");
+  assert.equal(ids.length, 2);
+  assert.equal(ids[0], ids[1]);
+  assert.equal(
+    first.kind === "created" && replay.kind === "created"
+      ? first.agent.id
+      : null,
+    replay.kind === "created" ? replay.agent.id : null
+  );
+});
+
 test("public agent projections require warm state and omit provider records", async () => {
   const service = createRunnerService({
     createId: () => AGENT_ID,

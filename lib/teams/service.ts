@@ -241,6 +241,14 @@ function projectTeamRun(record: TeamRunRecord): TeamRun {
     status: record.status,
     steps: record.steps.map((step) => ({
       agentId: step.agentId,
+      approvalCapabilities: step.skillSnapshots
+        .flatMap(({ requiredCapabilities }) => requiredCapabilities)
+        .filter(
+          (capability, index, capabilities) =>
+            capability.startsWith("github.") &&
+            capability.endsWith(".write") &&
+            capabilities.indexOf(capability) === index
+        ),
       approvalStatus: step.approvalStatus,
       completedAt: step.completedAt?.toISOString() ?? null,
       createdAt: step.createdAt.toISOString(),

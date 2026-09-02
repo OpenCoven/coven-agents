@@ -133,6 +133,7 @@ const teamRun: TeamRun = {
   steps: [
     {
       agentId: AGENT_A,
+      approvalCapabilities: ["github.issues.write"],
       approvalStatus: "pending",
       completedAt: null,
       createdAt: "2026-08-30T12:00:00.000Z",

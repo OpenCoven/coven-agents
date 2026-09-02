@@ -178,6 +178,7 @@ const browserTransportRoutes = [
 const browserTransportHeaderNames = [
   "accept",
   "content-type",
+  "idempotency-key",
   "last-event-id",
 ] as const;
 const browserTransportImports = [
