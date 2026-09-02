@@ -1,16 +1,17 @@
 # Current Repository State
 
 - Snapshot date: 2026-09-01
-- Application baseline: `3ad1232f061b5eaf4440b6fd3c7c13967a6c423f`
+- Application baseline: `4bf89dc98667efa1c46b5131e10d4b14bf5f86c3`
 - Evidence class: verified repository and local contract evidence, retained
   infrastructure cutover evidence, and a public exact-build guest replay
 
 This snapshot includes merged P0 repository certification through PR #183, the
-replay-timeline correction in PR #184, and the public exact-build guest replay
-recorded by PR #185. It distinguishes those completed boundaries from pending
-deployed Daytona lifecycle, observation-window, and full product release
-approval. Private planning reconciliation remains pending and is not inferred
-from repository or Project evidence.
+replay-timeline correction in PR #184, the public exact-build guest replay
+recorded by PR #185, and unreachable UI removal in PR #186. It distinguishes
+those completed boundaries from pending deployed Daytona lifecycle,
+observation-window, and full product release approval. Private planning
+reconciliation remains pending and is not inferred from repository or Project
+evidence.
 
 ## Implemented surfaces
 
@@ -63,15 +64,18 @@ from repository or Project evidence.
   provider-neutral execution, billing, entitlement, credential, replay, and
   hermetic certification gates as `52fe9f8`.
 - [PR #184](https://github.com/OpenCoven/coven-agents/pull/184) stabilized
-  replay event timelines and is the current application baseline.
+  replay event timelines.
 - [PR #185](https://github.com/OpenCoven/coven-agents/pull/185) recorded the
   credential-free public exact-build guest replay.
+- [PR #186](https://github.com/OpenCoven/coven-agents/pull/186) removed
+  unreachable UI and orphaned dependency residue and is the current repository
+  baseline.
 
 The application baseline also includes the merged console, billing,
 deployment-policy, branding, runner-reliability, coordinated-team, dependency,
 subscriber-surface, credential-lifecycle, and session-path corrections plus
 the P0 repository certification through
-`3ad1232f061b5eaf4440b6fd3c7c13967a6c423f`. The
+`4bf89dc98667efa1c46b5131e10d4b14bf5f86c3`. The
 [cutover attestation](../operations/daytona-cutover-attestation.md) records
 infrastructure production evidence and exact application-preview results while
 preserving the remaining product certification and approval gates.

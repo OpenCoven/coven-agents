@@ -1,7 +1,7 @@
 # Verification Matrix
 
 This matrix records implemented source and retained evidence as of 2026-09-01
-for application baseline `3ad1232f061b5eaf4440b6fd3c7c13967a6c423f`
+for application baseline `4bf89dc98667efa1c46b5131e10d4b14bf5f86c3`
 and the documentation-only candidate that updates this matrix. Repository and
 local contract procedures are verified; infrastructure cutover evidence is
 retained; public guest replay is verified; deployed Daytona lifecycle,
