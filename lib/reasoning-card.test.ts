@@ -76,6 +76,11 @@ test("activities expose status without leaking inputs or outputs", () => {
       type: "tool-createDocument",
     },
     {
+      output: { error: "sensitive application failure" },
+      state: "output-available",
+      type: "tool-updateDocument",
+    },
+    {
       errorText: "sensitive provider failure",
       state: "output-error",
       type: "tool-getWeather",
@@ -101,6 +106,12 @@ test("activities expose status without leaking inputs or outputs", () => {
     },
     {
       kind: "tool",
+      label: "Update document",
+      state: "failed",
+      tool: "updateDocument",
+    },
+    {
+      kind: "tool",
       label: "Get weather",
       state: "failed",
       tool: "getWeather",
@@ -119,6 +130,10 @@ test("activities expose status without leaking inputs or outputs", () => {
     },
   ]);
   assert.doesNotMatch(JSON.stringify(activities), /secret|provider response/u);
+  assert.doesNotMatch(
+    JSON.stringify(activities),
+    /sensitive application failure/u
+  );
 
   const model = buildReasoningCardModel({
     activities: [
@@ -132,9 +147,9 @@ test("activities expose status without leaking inputs or outputs", () => {
     isStreaming: false,
   });
 
-  assert.equal(model.failureCount, 2);
-  assert.equal(model.toolCallCount, 4);
-  assert.equal(model.stepCount, 5);
+  assert.equal(model.failureCount, 3);
+  assert.equal(model.toolCallCount, 5);
+  assert.equal(model.stepCount, 6);
   assert.match(model.footer, /failed/u);
 });
 

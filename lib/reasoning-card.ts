@@ -39,6 +39,7 @@ type BuildReasoningCardModelInput = Readonly<{
 
 type ToolPart = Readonly<{
   approval?: unknown;
+  output?: unknown;
   state?: unknown;
   text?: unknown;
   type?: unknown;
@@ -86,7 +87,8 @@ function humanizeToolName(tool: string): string {
 
 function toolState(
   value: unknown,
-  approval: unknown
+  approval: unknown,
+  output: unknown
 ): ReasoningToolActivity["state"] {
   const denied =
     value === "approval-responded" &&
@@ -98,7 +100,11 @@ function toolState(
     return "failed";
   }
   if (value === "output-available") {
-    return "completed";
+    return output !== null &&
+      typeof output === "object" &&
+      Object.hasOwn(output, "error")
+      ? "failed"
+      : "completed";
   }
   if (value === "approval-requested") {
     return "waiting";
@@ -134,7 +140,7 @@ export function reasoningCardActivities(
     activities.push({
       kind: "tool",
       label: humanizeToolName(tool),
-      state: toolState(part.state, part.approval),
+      state: toolState(part.state, part.approval, part.output),
       tool,
     });
   }
