@@ -7,13 +7,12 @@ const migrations = new URL("../db/migrations/", import.meta.url);
 
 const GATEWAY_MIGRATION = "0032_github_tool_gateway.sql";
 const GATEWAY_SNAPSHOT = "meta/0032_snapshot.json";
-const PROJECT_AUTHORITY_MIGRATION = "0035_fair_killraven.sql";
-const PROJECT_AUTHORITY_FRESHNESS_MIGRATION = "0036_damp_the_leader.sql";
+const PROJECT_AUTHORITY_MIGRATION = "0035_spicy_hammerhead.sql";
 
 test("current main and the GitHub gateway form one migration lineage", async () => {
   const migrationNames = (await import("node:fs/promises")).readdir(migrations);
   const names = await migrationNames;
-  for (let index = 25; index <= 36; index += 1) {
+  for (let index = 25; index <= 35; index += 1) {
     const prefix = `${String(index).padStart(4, "0")}_`;
     assert.equal(
       names.filter((name) => name.startsWith(prefix) && name.endsWith(".sql"))
@@ -84,7 +83,7 @@ test("0035 fails closed while preserving existing GitHub connections", async () 
     migration,
     /ADD COLUMN "userProjectIds" jsonb DEFAULT '\[\]'::jsonb NOT NULL/u
   );
-  assert.match(migration, /ALTER COLUMN "userProjectIds" DROP DEFAULT/u);
+  assert.doesNotMatch(migration, /ALTER COLUMN "userProjectIds" DROP DEFAULT/u);
   assert.match(
     migration,
     /UPDATE "RunnerGitHubConnection"[\s\S]*"userProjectManagementCurrent" = false/u
@@ -101,9 +100,9 @@ test("0035 fails closed while preserving existing GitHub connections", async () 
   assert.match(migration, /userProjectManagementCurrent/u);
 });
 
-test("0036 persists bounded Project proof bindings and exact operation Project ids", async () => {
+test("0035 persists bounded Project proof bindings and exact operation Project ids", async () => {
   const migration = await readFile(
-    new URL(PROJECT_AUTHORITY_FRESHNESS_MIGRATION, migrations),
+    new URL(PROJECT_AUTHORITY_MIGRATION, migrations),
     "utf8"
   );
   for (const column of [
@@ -122,6 +121,14 @@ test("0036 persists bounded Project proof bindings and exact operation Project i
   }
   assert.match(
     migration,
+    /"userProjectAuthorityExpiresAt" timestamp with time zone/u
+  );
+  assert.match(
+    migration,
+    /"userProjectAuthorityIssuedAt" timestamp with time zone/u
+  );
+  assert.match(
+    migration,
     /"userProjectAuthorityExpiresAt" <= "RunnerGitHubConnection"\."userProjectAuthorityIssuedAt" \+ interval '15 minutes'/u
   );
   assert.match(
@@ -132,7 +139,24 @@ test("0036 persists bounded Project proof bindings and exact operation Project i
     migration,
     /ADD COLUMN "projectAuthorityBound" boolean DEFAULT false NOT NULL/u
   );
-  assert.match(migration, /ALTER COLUMN "projectAuthorityBound" DROP DEFAULT/u);
+  assert.doesNotMatch(
+    migration,
+    /ALTER COLUMN "projectAuthorityBound" DROP DEFAULT/u
+  );
+  assert.match(
+    migration,
+    /CREATE TRIGGER "RGHConn_normalize_project_authority"/u
+  );
+  assert.match(migration, /NEW\."userProjectManagementCurrent" := false/u);
+  assert.match(migration, /NOT COALESCE\([\s\S]*false\) THEN/u);
+  assert.match(
+    migration,
+    /CREATE TRIGGER "RGHOp_require_current_project_authority"/u
+  );
+  assert.match(
+    migration,
+    /NEW\."projectAuthorityBound" = false[\s\S]*RAISE EXCEPTION/u
+  );
   assert.match(migration, /project\.item\.field\.update/u);
 });
 

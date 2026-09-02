@@ -56,6 +56,19 @@ test("Project proof is current before, but not at, its exact expiry", () => {
   );
 });
 
+test("Project proof preserves absolute instants across explicit time-zone offsets", () => {
+  assert.equal(
+    isCurrentGitHubProjectAuthority(
+      proof({
+        userProjectAuthorityExpiresAt: "2026-09-02T07:15:00.000-05:00",
+        userProjectAuthorityIssuedAt: "2026-09-02T07:00:00.000-05:00",
+      }),
+      binding
+    ),
+    true
+  );
+});
+
 test("Project proof fails closed for stale generations, sessions, tenants, and malformed lifetimes", () => {
   for (const [authority, authorityBinding] of [
     [proof(), { ...binding, authVersion: 8 }],

@@ -1417,9 +1417,16 @@ export const runnerGitHubConnection = pgTable(
       "userProjectAuthorityConnectionGeneration",
       { mode: "number" }
     ),
-    userProjectAuthorityExpiresAt: timestamp("userProjectAuthorityExpiresAt"),
-    userProjectAuthorityIssuedAt: timestamp("userProjectAuthorityIssuedAt"),
-    userProjectIds: jsonb("userProjectIds").$type<string[]>().notNull(),
+    userProjectAuthorityExpiresAt: timestamp("userProjectAuthorityExpiresAt", {
+      withTimezone: true,
+    }),
+    userProjectAuthorityIssuedAt: timestamp("userProjectAuthorityIssuedAt", {
+      withTimezone: true,
+    }),
+    userProjectIds: jsonb("userProjectIds")
+      .$type<string[]>()
+      .notNull()
+      .default(sql`'[]'::jsonb`),
     userProjectManagementCeiling: boolean(
       "userProjectManagementCeiling"
     ).notNull(),
@@ -1583,7 +1590,9 @@ export const runnerGitHubOperation = pgTable(
       .notNull(),
     operationId: uuid("operationId").notNull(),
     operationMarker: varchar("operationMarker", { length: 80 }),
-    projectAuthorityBound: boolean("projectAuthorityBound").notNull(),
+    projectAuthorityBound: boolean("projectAuthorityBound")
+      .notNull()
+      .default(false),
     projectId: varchar("projectId", { length: 256 }),
     providerDispatchPhase: varchar("providerDispatchPhase", {
       enum: ["not_applicable", "pre_send", "sent"],
