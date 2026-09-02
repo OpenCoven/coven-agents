@@ -439,9 +439,26 @@ export function evidenceSetManifestDigest(
     }))
     .sort((left, right) => left.id.localeCompare(right.id));
   return sha256({
-    redaction: evidence.redaction,
-    retiredProvider: evidence.retiredProvider,
-    syntheticCorrelations: evidence.syntheticCorrelations,
+    redaction: {
+      candidateDigest: evidence.redaction.candidateDigest,
+      evidenceDigest: evidence.redaction.evidenceDigest,
+      outcome: evidence.redaction.outcome,
+      recordedAt: evidence.redaction.recordedAt,
+      retentionClass: evidence.redaction.retentionClass,
+      scannerVersion: evidence.redaction.scannerVersion,
+    },
+    retiredProvider: {
+      candidateDigest: evidence.retiredProvider.candidateDigest,
+      evidenceDigest: evidence.retiredProvider.evidenceDigest,
+      outcome: evidence.retiredProvider.outcome,
+      recordedAt: evidence.retiredProvider.recordedAt,
+      retentionClass: evidence.retiredProvider.retentionClass,
+    },
+    syntheticCorrelations: {
+      accountDigest: evidence.syntheticCorrelations.accountDigest,
+      runDigest: evidence.syntheticCorrelations.runDigest,
+      tenantDigest: evidence.syntheticCorrelations.tenantDigest,
+    },
     tests,
   }) as `sha256:${string}`;
 }
