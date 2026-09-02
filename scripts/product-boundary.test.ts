@@ -79,6 +79,7 @@ const applicationRouteFiles = [
   "app/api/internal/github-tool/route.ts",
   "app/api/internal/runner-reconcile/route.ts",
   "app/api/internal/runner-resource-inventory/route.ts",
+  "app/api/internal/runner-resource-repair/route.ts",
   "app/api/internal/stripe-reconcile/route.ts",
   "app/api/runs/[id]/events/route.ts",
   "app/api/runs/[id]/route.ts",

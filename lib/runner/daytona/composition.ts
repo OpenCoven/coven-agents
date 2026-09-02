@@ -282,6 +282,13 @@ function persistentResourceLifecycle(
       observe: options.observe,
       operator: OPERATOR,
       providerConcurrency: options.providerConcurrency,
+      repairDaytona: (repairOptions) =>
+        client.daytonaClientForDeadline(
+          Math.min(
+            repairOptions?.deadline ?? Number.POSITIVE_INFINITY,
+            Date.now() + 15_000
+          )
+        ),
       store,
     })
   );
@@ -458,6 +465,13 @@ export async function createDaytonaRunnerServiceForPrincipal(
       inventoryDaytona: () => client.daytonaClient(),
       observe: dependencies.reportResourceOperation,
       operator: OPERATOR,
+      repairDaytona: (repairOptions) =>
+        client.daytonaClientForDeadline(
+          Math.min(
+            repairOptions?.deadline ?? Number.POSITIVE_INFINITY,
+            Date.now() + 15_000
+          )
+        ),
       store,
     });
   const provider = () =>

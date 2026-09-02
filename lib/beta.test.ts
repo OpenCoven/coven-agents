@@ -134,6 +134,19 @@ test("the runner resource inventory machine route is exactly exempt", () => {
   );
 });
 
+test("the runner resource repair machine route is exactly exempt", () => {
+  assert.equal(isBetaExempt("/api/internal/runner-resource-repair"), true);
+  assert.equal(
+    betaVerdict(readBetaGate(ON), "/api/internal/runner-resource-repair", null),
+    "allow"
+  );
+  assert.equal(
+    isBetaExempt("/api/internal/runner-resource-repair/extra"),
+    false
+  );
+  assert.equal(isBetaExempt("/api/internal/runner-resource-repair-now"), false);
+});
+
 test("the Stripe reconciliation machine route is exactly exempt", () => {
   assert.equal(isBetaExempt("/api/internal/stripe-reconcile"), true);
   assert.equal(

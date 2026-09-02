@@ -8,6 +8,7 @@ export type RunnerResourceOperation =
   | "create"
   | "delete"
   | "inventory"
+  | "repair"
   | "recover"
   | "reset"
   | "warm";
@@ -24,6 +25,7 @@ export type RunnerResourceOperationOutcome =
   | "provider_rejected"
   | "ready"
   | "recovered"
+  | "repaired"
   | "reset"
   | "stale_version"
   | "unavailable";

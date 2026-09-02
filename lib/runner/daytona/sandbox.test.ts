@@ -78,6 +78,7 @@ function sandbox(
     refreshData?: () => Promise<void>;
     recover?: () => Promise<void>;
     start?: () => Promise<void>;
+    waitForResizeComplete?: (timeout?: number) => Promise<void>;
     waitUntilStarted?: (timeout?: number) => Promise<void>;
   } = {}
 ): Sandbox {
@@ -90,6 +91,8 @@ function sandbox(
     refreshData: () => hooks.refreshData?.() ?? Promise.resolve(),
     start: () => hooks.start?.() ?? Promise.resolve(),
     state,
+    waitForResizeComplete: (timeout?: number) =>
+      hooks.waitForResizeComplete?.(timeout) ?? Promise.resolve(),
     waitUntilStarted: (timeout?: number) =>
       hooks.waitUntilStarted?.(timeout) ?? Promise.resolve(),
   } as unknown as Sandbox;
@@ -464,7 +467,6 @@ test("only started sandboxes are ready; Daytona lifecycle methods handle every o
     SandboxState.PENDING_BUILD,
     SandboxState.BUILDING_SNAPSHOT,
     SandboxState.PULLING_SNAPSHOT,
-    SandboxState.RESIZING,
     SandboxState.SNAPSHOTTING,
     SandboxState.FORKING,
     SandboxState.RESUMING,
@@ -572,6 +574,43 @@ test("only started sandboxes are ready; Daytona lifecycle methods handle every o
       )
     )
   );
+});
+
+test("a resizing sandbox completes its resize before starting", async () => {
+  const available = agent({
+    daytonaSandboxId: "stored",
+    sandboxLifecycle: "ready",
+  });
+  let resizeWaits = 0;
+  let starts = 0;
+  let startedWaits = 0;
+  const resolved = sandbox(SandboxState.RESIZING, {
+    start: () => {
+      starts += 1;
+      return Promise.resolve();
+    },
+    waitForResizeComplete: () => {
+      resizeWaits += 1;
+      resolved.state = SandboxState.STOPPED;
+      return Promise.resolve();
+    },
+    waitUntilStarted: () => {
+      startedWaits += 1;
+      return Promise.resolve();
+    },
+  });
+
+  await ensureDaytonaSandbox(principal, available, config, {
+    daytona: {
+      create: () => Promise.reject(new Error("must not create")),
+      get: () => Promise.resolve(resolved),
+    },
+    store: store({}),
+  });
+
+  assert.equal(resizeWaits, 1);
+  assert.equal(starts, 1);
+  assert.equal(startedWaits, 0);
 });
 
 test("shutdown transitions refresh to every stable startable state before starting", async () => {
