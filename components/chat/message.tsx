@@ -145,7 +145,9 @@ const PurePreviewMessage = ({
     (acc, part) => {
       if (part.type === "reasoning" && part.text?.trim().length > 0) {
         return {
-          isStreaming: "state" in part ? part.state === "streaming" : false,
+          isStreaming:
+            acc.isStreaming ||
+            ("state" in part ? part.state === "streaming" : false),
           present: true,
           rendered: false,
         };
