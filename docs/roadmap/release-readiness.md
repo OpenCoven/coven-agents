@@ -81,6 +81,42 @@ pnpm build
 
 Record the candidate SHA and exact exit status for every command.
 
+## Staging evidence collection
+
+The bounded staging collector records deployment-scoped operator evidence; it
+is **staging evidence collection only** and does not make a final readiness decision.
+It performs the fixed same-origin health and signed-out refusal
+checks, the bounded diagnostic, scheduled and repeated manual reconciliation,
+read-only inventory before and after reconciliation, and cross-channel
+credential-isolation refusals. Manual reconciliation can have bounded effects,
+so an operator must explicitly confirm them.
+
+With the exact staging origin preapproved in the process environment and the
+three distinct operator credentials preconfigured there (never command-line
+arguments), run:
+
+```bash
+pnpm staging:certify -- \
+  --origin https://staging.example.invalid \
+  --deployment-id dpl_exampleDeploymentIdentifier \
+  --source-sha "$(git rev-parse HEAD)" \
+  --source-tree-sha "$(git rev-parse HEAD^{tree})" \
+  --app-build staging-build-identifier \
+  --output path/to/staging-certification.json \
+  --confirm-effects
+```
+
+Use either `--app-build` or `--deployment-metadata`, never both. The collector
+accepts only an exact HTTPS origin and writes a new mode-`0600` JSON receipt
+atomically; it refuses to overwrite an existing receipt. Responses are
+size-bounded, JSON-only, redacted by omission, and never retain authorization
+headers, credentials, or raw provider output. Retain the receipt only in the
+approved evidence system, not in the repository.
+
+The receipt deliberately leaves subscriber lifecycle, persistent sandbox
+lifecycle, resource disposition, Stripe checkout/webhook failure-retry,
+observation window, approvals, and final release approval uncertified.
+
 ## Required smoke paths
 
 - health and authenticated account access;

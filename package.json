@@ -28,6 +28,7 @@
     "secret:scan": "tsx scripts/secret-scan.ts --staged",
     "secret:scan:all": "tsx scripts/secret-scan.ts --tracked",
     "secret:scan:history": "tsx scripts/secret-scan.ts --history",
+    "staging:certify": "tsx scripts/staging-certification.ts",
     "start": "pnpm validate:release && next start",
     "subscription": "tsx --env-file-if-exists=.env.local --conditions=react-server scripts/subscription.ts",
     "test": "export PLAYWRIGHT=True && pnpm exec playwright test",

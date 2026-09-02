@@ -366,6 +366,7 @@ const scriptNames = [
   "secret:scan",
   "secret:scan:all",
   "secret:scan:history",
+  "staging:certify",
   "start",
   "subscription",
   "test",

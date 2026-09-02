@@ -225,6 +225,23 @@ authorization correctly required a matching durable user and current
 `authVersion`. The operator did not add a production-only bypass, copy another
 user's identity or credential, or weaken database revalidation.
 
+### Repeatable staging evidence collection
+
+Use `pnpm staging:certify` for a new bounded staging evidence collection, with
+an exact HTTPS deployment origin, deployment and source identifiers, one build
+metadata form, a new receipt path, and `--confirm-effects`. The command reads
+the separately configured operator credentials only from its process
+environment; they are never command-line inputs or receipt fields. It follows
+the fixed health, signed-out refusal, diagnostic, reconciliation, inventory,
+and cross-channel credential-isolation sequence and writes a mode-`0600`
+sanitized receipt without overwriting existing evidence.
+
+This is evidence collection only. It does not certify subscriber lifecycle. It
+does not certify persistent sandbox lifecycle, resource disposition, Stripe
+checkout/webhook failure-retry, the observation window, named approvals, or a
+final readiness decision. The [release-readiness runbook](../roadmap/release-readiness.md#staging-evidence-collection)
+defines its invocation and evidence-retention boundary.
+
 ## Accepted credential materialization policy
 
 This is a repository policy ratification, not a claim of a new deployed
