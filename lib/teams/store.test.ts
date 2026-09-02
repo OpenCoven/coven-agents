@@ -156,6 +156,7 @@ function githubConnectionRow(
     updatedAt: NOW,
     userPermissionCeiling: "write",
     userPermissionCurrent: "write",
+    userProjectIds: [],
     userProjectManagementCeiling: false,
     userProjectManagementCurrent: false,
     version: 0,
@@ -174,6 +175,7 @@ function githubConnectionAuthority(connection: GitHubConnectionRecord) {
     githubUserLogin: connection.githubUserLogin,
     userPermissionCeiling: connection.userPermissionCeiling,
     userPermissionCurrent: connection.userPermissionCurrent,
+    userProjectIds: connection.userProjectIds,
     userProjectManagementCeiling: connection.userProjectManagementCeiling,
     userProjectManagementCurrent: connection.userProjectManagementCurrent,
   };

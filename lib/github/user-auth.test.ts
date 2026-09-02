@@ -31,7 +31,7 @@ test("user authorization proves an exact accessible installation and revokes its
 
   const authority = await client.proveInstallationAccess(proofInput());
 
-  assert.equal(requests.length, 6);
+  assert.equal(requests.length, 7);
   assert.deepEqual(authority, {
     repositories: [
       {
@@ -40,13 +40,14 @@ test("user authorization proves an exact accessible installation and revokes its
         nodeId: "R_24680",
         owner: "OpenCoven",
         permission: "write",
+        projectIds: [],
       },
     ],
     user: { id: "112233", login: "BunsDev" },
   });
   assert.deepEqual(
     requests.map(({ redirect }) => redirect),
-    ["error", "error", "error", "error", "error", "error"]
+    ["error", "error", "error", "error", "error", "error", "error"]
   );
   assert.equal(requests[0]?.url, "https://github.com/login/oauth/access_token");
   assert.equal(requests[0]?.method, "POST");
@@ -150,6 +151,89 @@ test("user authorization enumerates exact installation repositories and derives 
       }
     );
   }
+});
+
+test("user authorization keeps only exact ProjectV2 update authority", async () => {
+  const requests: CapturedRequest[] = [];
+  const authority = await clientFor(
+    sequenceFetch(
+      requests,
+      [
+        jsonResponse(tokenBody()),
+        jsonResponse(installationsBody([INSTALLATION_ID])),
+      ],
+      [
+        { id: "PVT_permitted", viewerCanUpdate: true },
+        { id: "PVT_read_only", viewerCanUpdate: false },
+      ]
+    )
+  ).proveInstallationAccess(proofInput());
+
+  assert.deepEqual(authority.repositories[0]?.projectIds, ["PVT_permitted"]);
+  const request = requests.find(
+    ({ url }) => url === "https://api.github.com/graphql"
+  );
+  assert.equal(request?.method, "POST");
+  assert.deepEqual(JSON.parse(request?.body ?? "{}"), {
+    query:
+      "query CovenProjectAuthority($owner: String!) { organization(login: $owner) { login projectsV2(first: 100) { nodes { id viewerCanUpdate } pageInfo { hasNextPage endCursor } } } }",
+    variables: { owner: "opencoven" },
+  });
+});
+
+test("user authorization accepts a final ProjectV2 page cursor", async () => {
+  const authority = await clientFor(
+    sequenceFetch(
+      [],
+      [
+        jsonResponse(tokenBody()),
+        jsonResponse(installationsBody([INSTALLATION_ID])),
+      ],
+      [{ id: "PVT_permitted", viewerCanUpdate: true }],
+      "Y3Vyc29yOjE="
+    )
+  ).proveInstallationAccess(proofInput());
+
+  assert.deepEqual(authority.repositories[0]?.projectIds, ["PVT_permitted"]);
+});
+
+test("user authorization accepts a complete 100-Project authority page", async () => {
+  const projects = Array.from({ length: 100 }, (_, index) => ({
+    id: `PVT_${index}`,
+    viewerCanUpdate: true,
+  }));
+  const authority = await clientFor(
+    sequenceFetch(
+      [],
+      [
+        jsonResponse(tokenBody()),
+        jsonResponse(installationsBody([INSTALLATION_ID])),
+      ],
+      projects,
+      "Y3Vyc29yOjEwMA=="
+    )
+  ).proveInstallationAccess(proofInput());
+
+  assert.equal(authority.repositories[0]?.projectIds.length, 100);
+});
+
+test("user authorization does not query Projects for personal repositories", async () => {
+  const requests: CapturedRequest[] = [];
+  const authority = await clientFor(
+    authorityFetch(
+      requests,
+      userRepositoriesBody(
+        { admin: false, pull: true, push: true },
+        { ownerLogin: "BunsDev", ownerType: "User" }
+      )
+    )
+  ).proveInstallationAccess(proofInput());
+
+  assert.deepEqual(authority.repositories[0]?.projectIds, []);
+  assert.equal(
+    requests.some(({ url }) => url === "https://api.github.com/graphql"),
+    false
+  );
 });
 
 test("user repository pages accept an omitted selection but reject explicit all access", async () => {
@@ -936,7 +1020,7 @@ test("expiring-token refresh authority is retained only until both tokens are re
 
   await client.proveInstallationAccess(proofInput());
 
-  assert.equal(requests.length, 6);
+  assert.equal(requests.length, 7);
   const authorityRequests = JSON.stringify(
     requests
       .filter((request) => !isCleanupRequest(request))
@@ -1120,24 +1204,47 @@ function userRepositoriesBody(
     triage?: boolean;
   }>,
   options: Readonly<{
+    ownerLogin?: string;
+    ownerType?: "Organization" | "User";
     repositoryId?: string;
     totalCount?: number;
   }> = {}
 ) {
   const repositoryId = options.repositoryId ?? "24680";
+  const ownerLogin = options.ownerLogin ?? "OpenCoven";
   return {
     repositories: [
       {
-        full_name: "OpenCoven/coven-agents",
+        full_name: `${ownerLogin}/coven-agents`,
         id: repositoryId,
         name: "coven-agents",
         node_id: `R_${repositoryId}`,
-        owner: { login: "OpenCoven" },
+        owner: {
+          login: ownerLogin,
+          type: options.ownerType ?? "Organization",
+        },
         permissions,
       },
     ],
     repository_selection: "selected",
     total_count: options.totalCount ?? 1,
+  };
+}
+
+function projectAuthorityBody(
+  projects: Array<{ id: string; viewerCanUpdate: boolean }> = [],
+  endCursor: string | null = null
+) {
+  return {
+    data: {
+      organization: {
+        login: "OpenCoven",
+        projectsV2: {
+          nodes: projects,
+          pageInfo: { endCursor, hasNextPage: false },
+        },
+      },
+    },
   };
 }
 
@@ -1165,7 +1272,9 @@ function delayedJsonResponse(body: unknown, delayMs: number): Response {
 
 function sequenceFetch(
   captured: CapturedRequest[],
-  responses: Response[]
+  responses: Response[],
+  projects: Array<{ id: string; viewerCanUpdate: boolean }> = [],
+  projectEndCursor: string | null = null
 ): FetchLike {
   return (input, init = {}) => {
     captured.push(capturedRequest(input, init));
@@ -1187,6 +1296,11 @@ function sequenceFetch(
             triage: true,
           })
         )
+      );
+    }
+    if (input === "https://api.github.com/graphql") {
+      return Promise.resolve(
+        jsonResponse(projectAuthorityBody(projects, projectEndCursor))
       );
     }
     if (input === REFRESH_REVOCATION_URL) {
@@ -1228,6 +1342,9 @@ function authorityFetch(
       return Promise.resolve(
         next instanceof Response ? next : jsonResponse(next)
       );
+    }
+    if (input === "https://api.github.com/graphql") {
+      return Promise.resolve(jsonResponse(projectAuthorityBody()));
     }
     if (input.includes("/user/installations?")) {
       return Promise.resolve(
@@ -1300,6 +1417,9 @@ function concurrentTokenFetch(captured: CapturedRequest[]): FetchLike {
           })
         )
       );
+    }
+    if (input === "https://api.github.com/graphql") {
+      return Promise.resolve(jsonResponse(projectAuthorityBody()));
     }
     if (input.includes("/user/installations?")) {
       const token = new Headers(init.headers)
