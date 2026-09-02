@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-09-01",
+  "deployment": {
+    "id": "dpl_83qug3pWqY3rHQRsJRcjYEABAaqo",
+    "sourceCommit": "52fe9f8a28b5b06099ad70c25eb6504d70597ee4",
+    "sourceTree": "28ec05d475ff8464a4fbe2f09e4416714fced78a",
+    "staticGenerationCount": 42,
+    "requiredRoutes": [
+      "/api/internal/runner-resource-inventory",
+      "/api/internal/stripe-reconcile"
+    ]
+  },
+  "checks": [
+    {
+      "route": "/api/health",
+      "status": 200,
+      "apiVersion": "1.0",
+      "mode": "cloud",
+      "minimumClientVersion": "1.0.0",
+      "capabilities": [
+        "agent-profiles",
+        "async-runs",
+        "idempotent-runs",
+        "run-events",
+        "run-cancel",
+        "command-evidence",
+        "file-evidence"
+      ]
+    },
+    {
+      "route": "/api/agents",
+      "status": 401,
+      "apiVersion": "1.0",
+      "outcome": "unauthorized",
+      "requestId": "e155ed8b-13eb-46b3-aa55-b9edb3044414",
+      "retryable": false
+    },
+    {
+      "route": "/api/diagnostics/sandbox",
+      "status": 503,
+      "apiVersion": "1.0",
+      "outcome": "diagnostic_unavailable",
+      "requestId": "2be60f00-5882-4909-af1d-8f1de5c40695",
+      "retryable": true
+    },
+    {
+      "route": "/api/internal/runner-resource-inventory",
+      "status": 503,
+      "apiVersion": "1.0",
+      "outcome": "reconcile_unavailable",
+      "requestId": "b091ba86-b3df-4cb0-be21-e13df7e0de45",
+      "retryable": true
+    }
+  ],
+  "containsCredentialMaterial": false,
+  "providerLifecycleCertified": false
+}
