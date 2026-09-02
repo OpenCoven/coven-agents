@@ -1309,8 +1309,9 @@ async function verifiedInstallationAuthority(
         repositoryOwner: selected.owner,
         userPermissionCeiling: userRepository.permission,
         userPermissionCurrent: userRepository.permission,
-        userProjectManagementCeiling: false,
-        userProjectManagementCurrent: false,
+        userProjectIds: [...userRepository.projectIds],
+        userProjectManagementCeiling: userRepository.projectIds.length > 0,
+        userProjectManagementCurrent: userRepository.projectIds.length > 0,
       });
     }
   } else {
@@ -1381,6 +1382,7 @@ async function verifiedInstallationAuthority(
         repositoryOwner: selected.owner,
         userPermissionCeiling: existing.userPermissionCeiling,
         userPermissionCurrent: current,
+        userProjectIds: [],
         userProjectManagementCeiling: existing.userProjectManagementCeiling,
         userProjectManagementCurrent: false,
       });

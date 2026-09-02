@@ -49,6 +49,7 @@ const CONNECTIONS = [
     updatedAt: NOW,
     userPermissionCeiling: "write" as const,
     userPermissionCurrent: "write" as const,
+    userProjectIds: [],
     userProjectManagementCeiling: false,
     userProjectManagementCurrent: false,
     version: 0,
@@ -105,6 +106,7 @@ test("broker policy derives only declared reads and actor-approved declared writ
         repositoryOwner: "OpenCoven",
         userPermissionCeiling: "write",
         userPermissionCurrent: "write",
+        userProjectIds: [],
         userProjectManagementCeiling: false,
         userProjectManagementCurrent: false,
       },
@@ -161,6 +163,7 @@ test("broker policy intersects app permissions and per-repository user authority
             githubUserLogin: "BunsDev",
             userPermissionCeiling: role,
             userPermissionCurrent: role,
+            userProjectIds: [],
             userProjectManagementCeiling: false,
             userProjectManagementCurrent: false,
           },
@@ -194,6 +197,7 @@ test("broker policy intersects app permissions and per-repository user authority
             githubUserLogin: "BunsDev",
             userPermissionCeiling: role,
             userPermissionCurrent: role,
+            userProjectIds: [],
             userProjectManagementCeiling: false,
             userProjectManagementCurrent: false,
           },
@@ -241,6 +245,30 @@ test("broker policy fails contents writes closed after an app permission downgra
       }),
     /no executable capability/u
   );
+});
+
+test("broker policy exposes Project writes only for exact current Project ids", () => {
+  const built = buildGitHubBrokerPolicy({
+    actorUserId: USER_ID,
+    approvedCapabilities: ["github.projects.write"],
+    authVersion: 7,
+    connectionSnapshot: {
+      connections: [
+        {
+          ...CONNECTIONS[0],
+          userProjectIds: ["PVT_permitted"],
+          userProjectManagementCeiling: true,
+          userProjectManagementCurrent: true,
+        },
+      ],
+      generation: 9,
+    },
+    declaredCapabilities: ["github.projects.write"],
+    teamRunId: TEAM_RUN_ID,
+    teamStepId: TEAM_STEP_ID,
+  });
+  assert.deepEqual(built.allowedCapabilities, ["github.projects.write"]);
+  assert.deepEqual(built.repositories[0]?.userProjectIds, ["PVT_permitted"]);
 });
 
 test("custom approval text or undeclared approvals cannot broaden broker policy", () => {
@@ -307,6 +335,7 @@ test("broker policy rejects malformed or broadened repository authority snapshot
     {
       userPermissionCeiling: "read",
       userPermissionCurrent: "admin",
+      userProjectIds: [],
     },
     {
       userProjectManagementCeiling: false,
@@ -697,6 +726,7 @@ function authorityRow(overrides: Record<string, unknown> = {}) {
     teamRunStatus: "running",
     userPermissionCeiling: "write",
     userPermissionCurrent: "write",
+    userProjectIds: [],
     userProjectManagementCeiling: false,
     userProjectManagementCurrent: false,
     ...overrides,
@@ -1529,7 +1559,10 @@ test("provider mutation authorization rechecks every live fence immediately befo
   const query = queryText(authorized.statements[0]);
   assert.match(query, /UPDATE "RunnerGitHubOperation"/u);
   assert.match(query, /"providerDispatchPhase" = 'sent'/u);
-  assert.match(query, /"providerSentAt" = clock_timestamp\(\)/u);
+  assert.match(
+    query,
+    /"providerSentAt" = COALESCE\(\s+"operation"\."providerSentAt",\s+clock_timestamp\(\)\s+\)/u
+  );
   assert.match(
     query,
     /'github\.contents\.write'\s+AND "connection"\."appContentsPermission" = 'write'/u

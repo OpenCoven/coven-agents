@@ -1737,6 +1737,7 @@ export function createGitHubOperationProvider(
             if (!commitSha) {
               throw invalidResponse();
             }
+            await authorizeMutation(execution.authorizeMutation, deadlineAt);
             const createdRef = await request(
               authorization,
               `${basePath}/git/refs`,

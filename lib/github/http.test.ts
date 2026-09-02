@@ -530,7 +530,7 @@ test("repository.commit publishes one bounded branch commit through Git data", a
       repositoryIds: ["789"],
     },
   ]);
-  assert.equal(authorizations, 1);
+  assert.equal(authorizations, 2);
   assert.deepEqual(
     sequence.requests.map(({ method, url }) => [method, new URL(url).pathname]),
     [
