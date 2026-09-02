@@ -133,6 +133,9 @@ export function ReasoningCard({
         Math.max(1, Math.ceil((Date.now() - startedAtRef.current) / 1000))
       );
       startedAtRef.current = null;
+      if (!isOpen) {
+        hasAutoClosedRef.current = true;
+      }
     }
     if (isOpen && !hasAutoClosedRef.current) {
       const timer = setTimeout(() => {
