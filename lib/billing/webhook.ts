@@ -464,15 +464,19 @@ async function applyMinutePackEvent(
   if (String(pack.minutes) !== session.metadata?.minutes) {
     /**
      * The Price is configured but sells a different number of minutes than
-     * the session recorded, so the customer paid for one thing and the
-     * configuration describes another. Retrying cannot fix it — the session's
-     * metadata is immutable — and only a human can decide which figure is
-     * owed, so this is durable evidence rather than a retry loop.
+     * the session recorded. The session's metadata is immutable, but the
+     * configuration is not: a rolling deploy that changes a pack's minutes
+     * leaves old instances disagreeing with sessions the new ones created,
+     * and that resolves itself. Only a disagreement that outlives the deploy
+     * window is a real one, and then only a human can decide which figure is
+     * owed.
      */
-    return {
-      kind: "manual_reconciliation",
-      reason: "minute_pack_minutes_mismatch",
-    };
+    return unconfiguredPackIsStillYoung(event, dependencies)
+      ? { kind: "retry", reason: "minute_pack_unconfigured" }
+      : {
+          kind: "manual_reconciliation",
+          reason: "minute_pack_minutes_mismatch",
+        };
   }
   const paymentIntent = session.payment_intent;
   const paymentIntentId =

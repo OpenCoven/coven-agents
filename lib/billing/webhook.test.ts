@@ -3442,9 +3442,31 @@ class MemoryStripeEventWriter {
   }
 }
 
-test("a top-up whose minutes no longer match the configured pack is recorded, not retried", async () => {
+test("a top-up whose minutes no longer match the configured pack is recorded once the deploy window passes", async () => {
   const recorded: StripeReconciliationRecord[] = [];
   let credited = 0;
+  const drifted = minutePackEvent({
+    id: "evt_pack_drift",
+    metadata: {
+      kind: "minute_pack",
+      minutePackFlowVersion: "1",
+      minutes: "3000",
+      priceId: PACK_PRICE_ID,
+      userId: USER_ID,
+    },
+  });
+
+  // A rolling deploy can leave an old instance disagreeing with a session a
+  // new one created, so a young mismatch is retried rather than recorded.
+  const young = await webhookResponse(
+    request({ signature: "valid" }),
+    dependenciesFor(drifted, {
+      now: () => new Date((drifted.created + 60) * 1000),
+    }),
+    null
+  );
+  assert.equal(young.status, 503);
+
   const response = await webhookResponse(
     request({ signature: "valid" }),
     dependenciesFor(
@@ -3463,6 +3485,7 @@ test("a top-up whose minutes no longer match the configured pack is recorded, no
           credited += 1;
           return Promise.resolve("applied");
         },
+        now: () => new Date((drifted.created + 7200) * 1000),
         recordManualReconciliation: (record) => {
           recorded.push(record);
           return Promise.resolve({ kind: "manual_reconciliation", record });
@@ -3472,7 +3495,8 @@ test("a top-up whose minutes no longer match the configured pack is recorded, no
     null
   );
 
-  // Retrying cannot fix immutable session metadata, so this must not 503.
+  // Two hours on it is a real disagreement, and only a human can say which
+  // figure is owed, so it must not keep retrying.
   assert.equal(response.status, 200);
   assert.equal(credited, 0);
   assert.deepEqual(recorded, [

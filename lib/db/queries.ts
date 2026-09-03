@@ -441,9 +441,11 @@ export async function applyStripeEventUpdate(
 }
 
 /**
- * Credits a paid top-up exactly once. The event claim and the unique session
- * index are both idempotency guards: a redelivery with a fresh event id still
- * finds the session already credited.
+ * Credits a paid top-up exactly once. The unique session index is the only
+ * idempotency guard: the event marker records that Stripe was heard, which
+ * any handler may write — evidence about a failure included — so treating it
+ * as proof of payment would strand a top-up that was recorded but never
+ * credited.
  */
 export async function creditMinutePack(
   input: MinutePackCreditInput
