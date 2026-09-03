@@ -50,10 +50,28 @@ export type RunnerResourceOperationObservation = Readonly<{
 }> &
   RunnerResourceProviderSignal;
 
-const PROVIDER_WIRE_VALUE = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/u;
+/**
+ * A machine-readable provider code, which the SDK sends in upper snake case.
+ * Anything hyphenated or lower case is prose or an identifier rather than a
+ * code, and this module promises to carry neither.
+ */
+const PROVIDER_CODE = /^[A-Z][A-Z0-9_]{0,63}$/u;
 
-function wireToken(value: unknown): string | undefined {
-  return typeof value === "string" && PROVIDER_WIRE_VALUE.test(value)
+/** The services the SDK stamps on a wire envelope. */
+const PROVIDER_SOURCES = new Set([
+  "DAYTONA_API",
+  "DAYTONA_DAEMON",
+  "DAYTONA_PROXY",
+]);
+
+function readProviderCode(value: unknown): string | undefined {
+  return typeof value === "string" && PROVIDER_CODE.test(value)
+    ? value
+    : undefined;
+}
+
+function readProviderSource(value: unknown): string | undefined {
+  return typeof value === "string" && PROVIDER_SOURCES.has(value)
     ? value
     : undefined;
 }
@@ -73,8 +91,8 @@ export function runnerResourceProviderSignal(
     source?: unknown;
     statusCode?: unknown;
   };
-  const code = wireToken(provider.code);
-  const source = wireToken(provider.source);
+  const code = readProviderCode(provider.code);
+  const source = readProviderSource(provider.source);
   const status = provider.statusCode;
   return {
     ...(code === undefined ? {} : { providerCode: code }),

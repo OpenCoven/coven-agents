@@ -49,11 +49,7 @@ function activeSnapshot(): DaytonaSnapshot {
 
 test("defines the pinned Copilot CLI snapshot image exactly", () => {
   const image = createDaytonaCopilotImage();
-  const definition = createDaytonaSnapshotDefinition(configuration, {
-    cpu: 2,
-    disk: 10,
-    memory: 4,
-  });
+  const definition = createDaytonaSnapshotDefinition(configuration);
 
   assert.equal(
     image.dockerfile,
@@ -479,51 +475,4 @@ test("rejects a created snapshot that cannot be verified as active", async () =>
     }),
     /is not active after creation \(state: build_failed\)/u
   );
-});
-
-test("the snapshot carries the resource policy every sandbox inherits", () => {
-  const definition = createDaytonaSnapshotDefinition(configuration, {
-    cpu: 2,
-    disk: 10,
-    memory: 4,
-  });
-
-  assert.deepEqual(definition.resources, { cpu: 2, disk: 10, memory: 4 });
-  assert.equal(definition.name, configuration.snapshotName);
-});
-
-test("provisioning sends the declared resources to Daytona", async () => {
-  let calls = 0;
-  let created:
-    | Readonly<{ name: string; resources: Readonly<Record<string, number>> }>
-    | undefined;
-  const snapshot: DaytonaSnapshotService = {
-    create: (parameters) => {
-      created = {
-        name: parameters.name,
-        resources: parameters.resources,
-      };
-      return Promise.resolve(activeSnapshot());
-    },
-    get: () => {
-      calls += 1;
-      return calls === 1
-        ? Promise.reject(new DaytonaNotFoundError("missing"))
-        : Promise.resolve(activeSnapshot());
-    },
-  };
-
-  await provisionDaytonaSnapshot(configuration, {
-    environment: {
-      DAYTONA_SANDBOX_CPU_CORES: "2",
-      DAYTONA_SANDBOX_DISK_GIB: "10",
-      DAYTONA_SANDBOX_MEMORY_GIB: "4",
-      NODE_ENV: "test",
-    },
-    log: () => undefined,
-    snapshot,
-  });
-
-  assert.equal(created?.name, configuration.snapshotName);
-  assert.deepEqual(created?.resources, { cpu: 2, disk: 10, memory: 4 });
 });

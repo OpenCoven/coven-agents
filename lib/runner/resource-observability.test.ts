@@ -122,3 +122,24 @@ test("observations forward only the finite provider signal", () => {
     },
   ]);
 });
+
+test("provider signals reject identifiers dressed as codes", () => {
+  // A hyphenated token is a name, not a machine-readable code, and this
+  // module promises to carry no identifiers at all.
+  assert.deepEqual(
+    runnerResourceProviderSignal(
+      Object.assign(new Error("refused"), {
+        code: "coven-agents-tenant-42",
+        source: "coven-agents-tenant-42",
+        statusCode: 400,
+      })
+    ),
+    { providerStatus: 400 }
+  );
+  assert.deepEqual(
+    runnerResourceProviderSignal(
+      Object.assign(new Error("refused"), { source: "SOMEWHERE_ELSE" })
+    ),
+    {}
+  );
+});

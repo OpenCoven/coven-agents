@@ -10,11 +10,7 @@ import {
   harnessInstallSpecifier,
   SUPPORTED_HARNESS_SPECS,
 } from "@opencoven/harness";
-import {
-  type DaytonaSandboxResourcePolicy,
-  type DaytonaSnapshotConfiguration,
-  daytonaSandboxResourcePolicy,
-} from "./config";
+import type { DaytonaSnapshotConfiguration } from "./config";
 
 export {
   DAYTONA_DEFAULT_API_URL,
@@ -80,21 +76,15 @@ export type DaytonaSnapshot = Readonly<{
 
 export type DaytonaSnapshotService = Readonly<{
   create: (
-    parameters: Readonly<{
-      image: Image;
-      name: string;
-      resources: DaytonaSandboxResourcePolicy["resources"];
-    }>,
+    parameters: Readonly<{ image: Image; name: string }>,
     options: Readonly<{ onLogs: (chunk: string) => void }>
   ) => Promise<DaytonaSnapshot>;
   get: (name: string) => Promise<DaytonaSnapshot>;
 }>;
 
 export type DaytonaSnapshotProvisioningDependencies = Readonly<{
-  environment?: NodeJS.ProcessEnv;
   image?: Image;
   log: (message: string) => void;
-  resources?: DaytonaSandboxResourcePolicy["resources"];
   snapshot: DaytonaSnapshotService;
 }>;
 
@@ -137,29 +127,12 @@ export function createDaytonaCopilotImage(): Image {
     .workdir(WORKSPACE_DIRECTORY);
 }
 
-/**
- * Resources belong to the snapshot, not to the sandboxes built from it: a
- * sandbox create that names them is refused, so declaring them here is the
- * only way the policy reaches a sandbox. Snapshots are immutable and are never
- * rebuilt under an existing name, so this describes what the *next* snapshot
- * is built with. A snapshot built before this ran carries no resources, and
- * sandboxes from it keep Daytona's defaults until the generation is bumped,
- * that snapshot is built, and `DAYTONA_SNAPSHOT` is repointed — a sequence
- * that also replaces every existing workspace, which is why it is deliberate
- * operator work rather than a side effect of this change.
- */
 export function createDaytonaSnapshotDefinition(
-  configuration: Pick<DaytonaSnapshotConfiguration, "snapshotName">,
-  resources: DaytonaSandboxResourcePolicy["resources"]
-): Readonly<{
-  image: Image;
-  name: string;
-  resources: DaytonaSandboxResourcePolicy["resources"];
-}> {
+  configuration: Pick<DaytonaSnapshotConfiguration, "snapshotName">
+): Readonly<{ image: Image; name: string }> {
   return {
     image: createDaytonaCopilotImage(),
     name: configuration.snapshotName,
-    resources,
   };
 }
 
@@ -407,18 +380,12 @@ export async function provisionDaytonaSnapshot(
     );
   }
 
-  const definition = createDaytonaSnapshotDefinition(
-    configuration,
-    dependencies.resources ??
-      daytonaSandboxResourcePolicy(dependencies.environment).resources
-  );
   const logSanitizer = createDaytonaBuildLogSanitizer(configuration.apiKey);
   try {
     await dependencies.snapshot.create(
       {
-        image: dependencies.image ?? definition.image,
-        name: definition.name,
-        resources: definition.resources,
+        image: dependencies.image ?? createDaytonaCopilotImage(),
+        name: configuration.snapshotName,
       },
       {
         onLogs: (chunk) => {

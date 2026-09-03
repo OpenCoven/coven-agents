@@ -457,8 +457,10 @@ for removal of the superseded provider.
   respectively. A sandbox create never names CPU, memory, or disk, because a
   create that does is refused; those values reach a sandbox only through the
   snapshot it was built from, so the snapshot in use governs them until a new
-  one is built. Daytona itself allows at most 4 vCPU, 8 GiB, and 10 GiB per
-  sandbox, so the declared disk exceeds what the provider will build.
+  one is built. The snapshot in production carries no declared resources, so
+  its sandboxes run on Daytona's defaults; the declared 20 GiB disk also
+  exceeds the 10 GiB the provider allows per sandbox, which is why applying
+  the policy needs both a new snapshot and a policy the provider accepts.
   Persistent sandbox TTL is fixed at zero and auto-delete at negative one;
   public previews, volumes, linked/forked resources, and warm pools are not
   configured.

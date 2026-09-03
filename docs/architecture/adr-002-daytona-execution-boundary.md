@@ -67,10 +67,11 @@ remains in PostgreSQL.
    read-only, list-bounded, and returns only versioned aggregate ownership and
    lifecycle categories.
 10. **Persistent resources use explicit server policy.** Sandbox creation
-    always requests bounded auto-stop and auto-archive values, and takes its
-    bounded CPU, memory, and disk from the immutable pinned snapshot, because
-    Daytona refuses a snapshot create that also names resources. Changing a
-    resource value means building a new pinned snapshot. Public previews are false; volumes, linked/forked sandboxes, and
+    always requests bounded auto-stop and auto-archive values. CPU, memory,
+    and disk come from the immutable pinned snapshot instead, because Daytona
+    refuses a sandbox create that names them, so the declared policy governs a
+    sandbox only once a snapshot is built from it. Public previews are false;
+    volumes, linked/forked sandboxes, and
     warm pools are not configured. TTL is explicitly disabled and automatic
     deletion remains disabled so valid persistent work cannot disappear
     outside fenced database recovery and decommission.
