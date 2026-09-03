@@ -51,27 +51,44 @@ test("resource operation observability discards untyped provider data", () => {
   ]);
 });
 
-test("a provider rejection reports a bounded status and error name", () => {
+test("a provider rejection reports the provider's own wire fields", () => {
   const rejection = Object.assign(new Error("sandbox refused"), {
-    name: "DaytonaBadRequestError",
+    code: "SANDBOX_RESOURCES_NOT_ALLOWED",
+    source: "DAYTONA_API",
     statusCode: 400,
   });
 
   assert.deepEqual(runnerResourceProviderSignal(rejection), {
-    providerErrorName: "DaytonaBadRequestError",
+    providerCode: "SANDBOX_RESOURCES_NOT_ALLOWED",
+    providerSource: "DAYTONA_API",
     providerStatus: 400,
+  });
+});
+
+test("provider signals survive the minification that renames error classes", () => {
+  // A production build renames the SDK's error classes, so the class name is
+  // "e" or similar exactly when the diagnostic is needed; the wire fields are
+  // values the server sent and are unaffected.
+  const minified = Object.assign(new Error("refused"), {
+    code: "SANDBOX_INVALID_REQUEST",
+    statusCode: 422,
+  });
+  minified.name = "e";
+
+  assert.deepEqual(runnerResourceProviderSignal(minified), {
+    providerCode: "SANDBOX_INVALID_REQUEST",
+    providerStatus: 422,
   });
 });
 
 test("provider signals never carry unbounded or non-numeric provider detail", () => {
   assert.deepEqual(runnerResourceProviderSignal("not an error"), {});
-  assert.deepEqual(runnerResourceProviderSignal(new Error("plain")), {
-    providerErrorName: "Error",
-  });
+  assert.deepEqual(runnerResourceProviderSignal(new Error("plain")), {});
   assert.deepEqual(
     runnerResourceProviderSignal(
       Object.assign(new Error("odd"), {
-        name: "sandbox coven-agents-tenant-42 refused",
+        code: "sandbox coven-agents-tenant-42 refused",
+        source: 12,
         statusCode: "400",
       })
     ),
@@ -87,7 +104,9 @@ test("observations forward only the finite provider signal", () => {
     outcome: "provider_rejected",
     ...runnerResourceProviderSignal(
       Object.assign(new Error("refused"), {
-        name: "DaytonaUnprocessableEntityError",
+        code: "SANDBOX_RESOURCES_NOT_ALLOWED",
+        message: "sandbox coven-agents-tenant-42 was refused",
+        source: "DAYTONA_API",
         statusCode: 422,
       })
     ),
@@ -97,7 +116,8 @@ test("observations forward only the finite provider signal", () => {
     {
       operation: "create",
       outcome: "provider_rejected",
-      providerErrorName: "DaytonaUnprocessableEntityError",
+      providerCode: "SANDBOX_RESOURCES_NOT_ALLOWED",
+      providerSource: "DAYTONA_API",
       providerStatus: 422,
     },
   ]);

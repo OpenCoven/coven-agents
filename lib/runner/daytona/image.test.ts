@@ -86,7 +86,7 @@ test("pins the harness versions to the snapshot generation", () => {
     },
     {
       harnesses: ["@github/copilot@1.0.80"],
-      snapshot: "coven-agents-copilot-2",
+      snapshot: "coven-agents-copilot-1",
     }
   );
 });

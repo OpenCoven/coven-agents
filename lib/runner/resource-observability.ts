@@ -32,12 +32,15 @@ export type RunnerResourceOperationOutcome =
 
 /**
  * A provider rejection is only actionable if the operator can tell which call
- * the provider refused. The status code and the provider error class are
- * finite, identifier-free signals; provider messages and bodies stay out
- * because they carry sandbox names, tenants, and occasionally credentials.
+ * the provider refused. These are the provider's own wire fields — a status
+ * code, its machine-readable error code, and which service answered — so they
+ * survive the minification that renames error classes in a production build.
+ * Provider messages and bodies stay out because they carry sandbox names,
+ * tenants, and occasionally credentials.
  */
 export type RunnerResourceProviderSignal = Readonly<{
-  providerErrorName?: string;
+  providerCode?: string;
+  providerSource?: string;
   providerStatus?: number;
 }>;
 
@@ -47,7 +50,13 @@ export type RunnerResourceOperationObservation = Readonly<{
 }> &
   RunnerResourceProviderSignal;
 
-const PROVIDER_ERROR_NAME = /^[A-Za-z]{1,64}$/u;
+const PROVIDER_WIRE_VALUE = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/u;
+
+function wireToken(value: unknown): string | undefined {
+  return typeof value === "string" && PROVIDER_WIRE_VALUE.test(value)
+    ? value
+    : undefined;
+}
 
 /**
  * Reads the bounded provider signal from an unknown thrown value. Anything
@@ -59,10 +68,17 @@ export function runnerResourceProviderSignal(
   if (!(error instanceof Error)) {
     return {};
   }
-  const name = PROVIDER_ERROR_NAME.test(error.name) ? error.name : undefined;
-  const status = (error as { statusCode?: unknown }).statusCode;
+  const provider = error as {
+    code?: unknown;
+    source?: unknown;
+    statusCode?: unknown;
+  };
+  const code = wireToken(provider.code);
+  const source = wireToken(provider.source);
+  const status = provider.statusCode;
   return {
-    ...(name === undefined ? {} : { providerErrorName: name }),
+    ...(code === undefined ? {} : { providerCode: code }),
+    ...(source === undefined ? {} : { providerSource: source }),
     ...(typeof status === "number" && Number.isInteger(status)
       ? { providerStatus: status }
       : {}),
@@ -80,9 +96,12 @@ export function observeRunnerResourceOperation(
   observer?.({
     operation: observation.operation,
     outcome: observation.outcome,
-    ...(observation.providerErrorName === undefined
+    ...(observation.providerCode === undefined
       ? {}
-      : { providerErrorName: observation.providerErrorName }),
+      : { providerCode: observation.providerCode }),
+    ...(observation.providerSource === undefined
+      ? {}
+      : { providerSource: observation.providerSource }),
     ...(observation.providerStatus === undefined
       ? {}
       : { providerStatus: observation.providerStatus }),

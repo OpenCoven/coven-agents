@@ -21,7 +21,7 @@ const configuration: DaytonaSandboxConfiguration = {
   autoArchiveInterval: 10_080,
   autoDeleteInterval: -1,
   autoStopInterval: 15,
-  resources: { cpu: 2, disk: 20, memory: 4 },
+  resources: { cpu: 2, disk: 10, memory: 4 },
   snapshotName: "coven-agents-copilot-1",
   target: "us",
   ttlMinutes: 0,
@@ -319,7 +319,7 @@ test("configuration drift reports direction without resource values", async () =
   const drifted = sandbox(mapping, {
     autoPauseInterval: 30,
     cpu: 1,
-    disk: 10,
+    disk: 9,
     memory: 8,
   });
 

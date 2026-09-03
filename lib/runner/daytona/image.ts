@@ -29,7 +29,7 @@ export const DAYTONA_COPILOT_IMAGE_BASE = "node:22-bookworm-slim";
  * this generation counter is part of the pin: bumping any harness
  * `installVersion` without bumping this leaves the old CLI running.
  */
-export const DAYTONA_COPILOT_SNAPSHOT_NAME = "coven-agents-copilot-2";
+export const DAYTONA_COPILOT_SNAPSHOT_NAME = "coven-agents-copilot-1";
 export const PNPM_VERSION = "10.32.1";
 export const WORKSPACE_DIRECTORY = "/workspace";
 
@@ -140,10 +140,13 @@ export function createDaytonaCopilotImage(): Image {
 /**
  * Resources belong to the snapshot, not to the sandboxes built from it: a
  * sandbox create that names them is refused, so declaring them here is the
- * only way the policy reaches a sandbox. Snapshots are immutable, which makes
- * the policy part of the pin — changing any resource value requires bumping
- * `DAYTONA_COPILOT_SNAPSHOT_NAME`, building that snapshot, and pointing
- * `DAYTONA_SNAPSHOT` at it.
+ * only way the policy reaches a sandbox. Snapshots are immutable and are never
+ * rebuilt under an existing name, so this describes what the *next* snapshot
+ * is built with. A snapshot built before this ran carries no resources, and
+ * sandboxes from it keep Daytona's defaults until the generation is bumped,
+ * that snapshot is built, and `DAYTONA_SNAPSHOT` is repointed — a sequence
+ * that also replaces every existing workspace, which is why it is deliberate
+ * operator work rather than a side effect of this change.
  */
 export function createDaytonaSnapshotDefinition(
   configuration: Pick<DaytonaSnapshotConfiguration, "snapshotName">,

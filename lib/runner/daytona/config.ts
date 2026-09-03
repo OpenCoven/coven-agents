@@ -204,7 +204,7 @@ export function daytonaSandboxResourcePolicy(
       disk: boundedPositiveInteger(
         environment,
         "DAYTONA_SANDBOX_DISK_GIB",
-        3,
+        10,
         DAYTONA_SANDBOX_RESOURCE_POLICY_CAPS.disk,
         DAYTONA_SANDBOX_RESOURCE_POLICY_DEFAULTS.disk
       ),
