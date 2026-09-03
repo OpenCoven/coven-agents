@@ -379,9 +379,9 @@ export function Analytics() {
                   }}
                 >
                   A run is counted when an agent starts, whether it succeeds or
-                  not. Its minutes are the charge settled against the cap from
-                  the same reservation admission checked, so this and your usage
-                  cannot disagree.
+                  not. Its minutes are charged against the cap (reserved, then
+                  settled) from the same reservation admission checked, so this
+                  and your usage cannot disagree.
                 </p>
 
                 <details>

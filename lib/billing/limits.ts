@@ -5,14 +5,9 @@
  * enforcement point. A cap quoted in three places that can disagree is worse
  * than no cap, because two of them will be a lie.
  *
- * The plan is a prepaid bucket: 300 minutes for the monthly price, which
- * works out to ten cents a minute, drained by the minutes each run actually
- * held. Nothing is billed per run and nothing is billed beyond the price.
- * A minute of the default sandbox profile (2 vCPU, 4 GiB, 20 GiB) costs
- * roughly $0.0028 at Daytona list pricing, so a fully drained bucket is
- * under a dollar of raw container cost against a $30 price; the idle time a
- * sandbox spends after each run is the larger cost and is covered by the
- * same price. Top-up packs extend the bucket; see `lib/billing/minute-packs`.
+ * The plan is a prepaid bucket: 300 minutes for the configured monthly price,
+ * drained by the minutes each run actually held. Nothing is billed per run
+ * and nothing is billed beyond the price.
  */
 export const MONTHLY_MINUTE_CAP = 300;
 
