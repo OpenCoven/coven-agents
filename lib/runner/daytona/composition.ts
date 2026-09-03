@@ -522,6 +522,7 @@ export async function createDaytonaRunnerServiceForPrincipal(
       dependencies.reportReconciliationFailure,
       dependencies.reportResourceOperation
     ),
+    reportAdmissionFailure: dependencies.reportAdmissionFailure,
     resourceLifecycle,
     store,
   });

@@ -25,6 +25,10 @@ import {
   type RunnerAdmissionLimits,
   type RunnerDispatchResult,
 } from "./admission";
+import {
+  type RunnerAdmissionFailure,
+  runnerAdmissionFailure,
+} from "./admission-observability";
 import type {
   CancelRunnerRunResult,
   RunnerReconciliationExecutionResult,
@@ -95,6 +99,7 @@ export type RunnerServiceDependencies = Readonly<{
     "decommission" | "prewarm"
   > &
     Partial<Pick<RunnerPersistentResourceLifecycle, "inventory" | "repair">>;
+  reportAdmissionFailure?: (failure: RunnerAdmissionFailure) => void;
   store: RunnerServiceStore;
 }>;
 
@@ -415,6 +420,7 @@ export function createRunnerService(
     ((input) =>
       admitRunnerRun(input, {
         limits: dependencies.admissionLimits,
+        reportFailure: dependencies.reportAdmissionFailure,
         store: dependencies.store as unknown as Parameters<
           typeof admitRunnerRun
         >[1]["store"],
@@ -700,7 +706,10 @@ export function createRunnerService(
       let agent: RunnerAgentRecord | null;
       try {
         agent = await dependencies.store.getAgent(principal, agentId);
-      } catch {
+      } catch (error) {
+        dependencies.reportAdmissionFailure?.(
+          runnerAdmissionFailure("agent_lookup", error)
+        );
         return {
           code: "admission_unavailable",
           kind: "refused",
@@ -728,7 +737,10 @@ export function createRunnerService(
           requestHash: hashRunRequest(agentId, parsed.data.task),
           task: parsed.data.task,
         });
-      } catch {
+      } catch (error) {
+        dependencies.reportAdmissionFailure?.(
+          runnerAdmissionFailure("admission", error)
+        );
         return {
           code: "admission_unavailable",
           kind: "refused",

@@ -15,6 +15,7 @@ import { periodStart } from "@/lib/billing/period";
 import type { databaseFor } from "@/lib/db/access";
 import type { SubscriberSession } from "@/lib/session";
 import type { RunnerAdmissionLimits, RunnerDispatchResult } from "./admission";
+import type { RunnerAdmissionFailure } from "./admission-observability";
 import type {
   RunnerReconciliationExecutionResult,
   RunnerReconciliationResult,
@@ -116,6 +117,7 @@ type ProductionQueuedAuthorityPreflightDependencies = Pick<
 export type ProductionRunnerRuntimeDependencies = Readonly<{
   databaseFor?: ProductionDatabaseFactory;
   findAccount?: ProductionAccountFinder;
+  reportAdmissionFailure?: (failure: RunnerAdmissionFailure) => void;
   reportResourceOperation?: (
     observation: RunnerResourceOperationObservation
   ) => void;
@@ -756,6 +758,7 @@ async function createHermeticRunnerServiceForPrincipal(
       dependencies.reportReconciliationFailure,
       dependencies.reportResourceOperation
     ),
+    reportAdmissionFailure: dependencies.reportAdmissionFailure,
     resourceLifecycle,
     store,
   });
@@ -788,6 +791,9 @@ export function createProductionRunnerRuntime(
 }
 
 const productionRunnerRuntime = createProductionRunnerRuntime({
+  reportAdmissionFailure: (failure) => {
+    console.error("Runner admission failed.", failure);
+  },
   reportReconciliationFailure: (failure) => {
     console.error("Runner reconciliation failed.", failure);
   },

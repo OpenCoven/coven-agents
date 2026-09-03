@@ -1,6 +1,7 @@
 // biome-ignore-all lint/suspicious/useAwait: Dependency doubles keep async signatures for readability.
 import assert from "node:assert/strict";
 import test from "node:test";
+import { DrizzleQueryError } from "drizzle-orm";
 import { acquireRunnerCredential } from "@/lib/credentials/runner-credential";
 import {
   admissionLimitsFromEnvironment,
@@ -398,6 +399,15 @@ test("admission preserves exact team step and GitHub broker authority despite ca
 
 test("admission store outages return a typed retryable error without a database cause", async () => {
   const current = run();
+  const failures: unknown[] = [];
+  const databaseError = new DrizzleQueryError(
+    "select private_column from private_table",
+    ["private-parameter"],
+    Object.assign(new Error("database connection token=unsafe"), {
+      code: "23514",
+      name: "PostgresError",
+    })
+  );
   const result = await admitRunnerRun(
     {
       agentId: current.agentId,
@@ -412,9 +422,12 @@ test("admission store outages return a typed retryable error without a database 
       clock: () => new Date("2026-08-28T15:00:00.000Z"),
       limits: admissionLimitsFromEnvironment({}),
       randomToken: () => "lease",
+      reportFailure: (failure) => {
+        failures.push(failure);
+      },
       store: {
         startRun: async () => {
-          throw new Error("database connection token=unsafe");
+          throw databaseError;
         },
       } as never,
     }
@@ -426,6 +439,10 @@ test("admission store outages return a typed retryable error without a database 
     JSON.stringify(result).includes("database connection token=unsafe"),
     false
   );
+  assert.deepEqual(failures, [
+    { code: "23514", name: "PostgresError", stage: "run_insert" },
+  ]);
+  assert.equal(JSON.stringify(failures).includes("private"), false);
 });
 
 test("dispatch claim outages do not expose store errors", async () => {
