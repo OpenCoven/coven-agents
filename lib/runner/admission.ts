@@ -11,6 +11,10 @@ import type {
   RunnerCredentialAcquireResult,
 } from "@/lib/credentials/runner-credential";
 import {
+  type RunnerAdmissionFailure,
+  runnerAdmissionFailure,
+} from "./admission-observability";
+import {
   type RunnerAttemptRedactionEnvelope,
   sealRunnerAttemptRedactionFromEnvironment,
 } from "./attempt-redaction";
@@ -109,6 +113,7 @@ export type RunnerAdmissionDependencies = Readonly<{
   dispatchLeaseMs?: number;
   limits?: RunnerAdmissionLimits;
   randomToken?: () => string;
+  reportFailure?: (failure: RunnerAdmissionFailure) => void;
   store: AdmissionStore;
 }>;
 
@@ -338,7 +343,8 @@ export async function admitRunnerRun(
       task: input.task,
       teamStepId: input.teamStepId ?? null,
     });
-  } catch {
+  } catch (error) {
+    dependencies.reportFailure?.(runnerAdmissionFailure("run_insert", error));
     return {
       error: new RunnerAdmissionError(
         "admission_unavailable",

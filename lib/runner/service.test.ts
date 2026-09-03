@@ -613,9 +613,13 @@ test("start maps admission conflict, capacity, and unavailable results without p
 });
 
 test("start converts an admission exception into typed retryable unavailability", async () => {
+  const failures: unknown[] = [];
   const service = createRunnerService({
     admit: () => Promise.reject(new Error("database=private-detail")),
     createId: () => RUN_ID,
+    reportAdmissionFailure: (failure) => {
+      failures.push(failure);
+    },
     store: baseStore(),
   });
 
@@ -630,6 +634,44 @@ test("start converts an admission exception into typed retryable unavailability"
       retryable: true,
     }
   );
+  assert.deepEqual(failures, [
+    { code: null, name: "Error", stage: "admission" },
+  ]);
+  assert.equal(JSON.stringify(failures).includes("private-detail"), false);
+});
+
+test("start reports a sanitized agent lookup failure stage", async () => {
+  const failures: unknown[] = [];
+  const service = createRunnerService({
+    reportAdmissionFailure: (failure) => {
+      failures.push(failure);
+    },
+    store: baseStore({
+      getAgent: () =>
+        Promise.reject(
+          Object.assign(new Error("database=private-detail"), {
+            code: "42P01",
+            name: "tenant_private_identifier_ABC123",
+          })
+        ),
+    }),
+  });
+
+  assert.deepEqual(
+    await service.startRun(PRINCIPAL, 1, AGENT_ID, {
+      operationId: OPERATION_ID,
+      task: "Do the thing.",
+    }),
+    {
+      code: "admission_unavailable",
+      kind: "refused",
+      retryable: true,
+    }
+  );
+  assert.deepEqual(failures, [
+    { code: "42P01", name: "unknown", stage: "agent_lookup" },
+  ]);
+  assert.equal(JSON.stringify(failures).includes("private-detail"), false);
 });
 
 test("start rejects unsupported harnesses before admission, persistence, dispatch, or scheduling", async () => {
