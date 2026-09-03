@@ -3,7 +3,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { MONTHLY_RUN_CAP } from "@/lib/billing/limits";
+import { MONTHLY_MINUTE_CAP } from "@/lib/billing/limits";
 
 const repositoryRoot = new URL("../", import.meta.url);
 const repositoryPath = fileURLToPath(repositoryRoot);
@@ -577,7 +577,7 @@ test("the living subscription policy records current billing authorities", () =>
   }
 
   for (const decision of [
-    "MONTHLY_RUN_CAP = 750",
+    "MONTHLY_MINUTE_CAP = 300",
     "GRACE_PERIOD_DAYS = 3",
     "subscription_cycle",
     "At most one active subscription",
@@ -619,9 +619,9 @@ test("the subscriber offer renders the authoritative run cap without duplicating
 
   assert.match(
     source,
-    /import \{ MONTHLY_RUN_CAP \} from "@\/lib\/billing\/limits";/
+    /import \{ MONTHLY_MINUTE_CAP \} from "@\/lib\/billing\/limits";/
   );
-  assert.equal(source.includes(String(MONTHLY_RUN_CAP)), false);
+  assert.equal(source.includes(String(MONTHLY_MINUTE_CAP)), false);
 });
 
 test("the README links the living subscription policy", () => {

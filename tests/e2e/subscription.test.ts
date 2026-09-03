@@ -6,7 +6,7 @@ import {
   type Route,
   test,
 } from "@playwright/test";
-import { MONTHLY_RUN_CAP } from "@/lib/billing/limits";
+import { MONTHLY_MINUTE_CAP } from "@/lib/billing/limits";
 import { E2E_USER_ID, sessionCookies } from "./session";
 
 const CHECKOUT_ENABLED = process.env.SUBSCRIPTION_CHECKOUT_ENABLED === "on";
@@ -85,7 +85,7 @@ async function mockSubscriberConsoleDependencies(page: Page): Promise<void> {
   await page.route("**/api/usage", (route) =>
     route.fulfill({
       json: {
-        cap: MONTHLY_RUN_CAP,
+        cap: MONTHLY_MINUTE_CAP,
         resetsAt: "2099-02-01T00:00:00.000Z",
         used: 0,
       },
@@ -306,12 +306,12 @@ test.describe("Subscriber checkout", () => {
     await page.goto("/account");
     await page.getByRole("tab", { name: "Billing" }).click();
     const accountCard = page.locator(".oc-subscription-card");
-    await expect(accountCard).toContainText(`${MONTHLY_RUN_CAP} runs`);
+    await expect(accountCard).toContainText(`${MONTHLY_MINUTE_CAP} minutes`);
     await expect(
       accountCard.getByRole("img", { name: "Monthly allowance" })
     ).toHaveAttribute(
       "aria-label",
-      `Monthly allowance: ${MONTHLY_RUN_CAP} agent runs`
+      `Monthly allowance: ${MONTHLY_MINUTE_CAP} minutes of agent run time`
     );
     await expect(accountCard).toContainText("each month");
     await expect(accountCard).toContainText(
@@ -323,7 +323,7 @@ test.describe("Subscriber checkout", () => {
     await openConsoleSettings(page);
     await page.getByRole("tab", { name: "Billing" }).click();
     const consoleCard = page.locator(".oc-subscription-card");
-    await expect(consoleCard).toContainText(`${MONTHLY_RUN_CAP} runs`);
+    await expect(consoleCard).toContainText(`${MONTHLY_MINUTE_CAP} minutes`);
     await expect(checkoutButton(page)).toBeVisible();
     expect(await consoleCard.innerText()).toBe(accountOffer);
     expect(accountOffer).not.toMatch(/[$€£]|\b(?:USD|EUR|GBP)\b/);
@@ -769,7 +769,7 @@ test.describe("Subscriber checkout", () => {
     await page.route("**/api/usage", (route) =>
       route.fulfill({
         json: {
-          cap: MONTHLY_RUN_CAP,
+          cap: MONTHLY_MINUTE_CAP,
           resetsAt: "2099-02-01T00:00:00.000Z",
           used: 0,
         },
@@ -850,7 +850,7 @@ test.describe("Subscriber checkout", () => {
       await page.route("**/api/usage", (route) =>
         route.fulfill({
           json: {
-            cap: MONTHLY_RUN_CAP,
+            cap: MONTHLY_MINUTE_CAP,
             resetsAt: "2099-02-01T00:00:00.000Z",
             used: 0,
           },
@@ -979,7 +979,7 @@ test.describe("Subscriber checkout", () => {
     await page.route("**/api/usage", (route) =>
       route.fulfill({
         json: {
-          cap: 750,
+          cap: 300,
           resetsAt: "2099-02-01T00:00:00.000Z",
           used: 0,
         },
@@ -1251,7 +1251,7 @@ test.describe("Subscriber checkout", () => {
     await page.route("**/api/usage", (route) =>
       route.fulfill({
         json: {
-          cap: 750,
+          cap: 300,
           resetsAt: "2099-02-01T00:00:00.000Z",
           used: 0,
         },

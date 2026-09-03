@@ -10,7 +10,7 @@ type Usage = {
 };
 
 /**
- * Runs spent against the cap.
+ * Minutes spent against the cap.
  *
  * `/api/usage` existed from the moment the cap did, but nothing rendered it,
  * so the only way to see your own usage was a fetch typed into devtools. A cap
@@ -72,12 +72,12 @@ export function UsageMeter() {
       <div className="flex items-baseline justify-between gap-2">
         <h2 className="font-semibold text-[15px]">Usage</h2>
         <span className="text-[13px] text-muted-foreground">
-          {usage.used} of {usage.cap} runs
+          {usage.used} of {usage.cap} minutes
         </span>
       </div>
 
       <div
-        aria-label={`${usage.used} of ${usage.cap} runs used`}
+        aria-label={`${usage.used} of ${usage.cap} minutes used`}
         aria-valuemax={usage.cap}
         aria-valuemin={0}
         aria-valuenow={usage.used}
@@ -92,8 +92,8 @@ export function UsageMeter() {
 
       <p className="text-[12px] text-muted-foreground">
         {resets
-          ? `Resets ${resets}. A run is counted when an agent starts.`
-          : "A run is counted when an agent starts."}
+          ? `Resets ${resets}. A run holds its full time limit while it runs and settles to the minutes it used when it ends.`
+          : "A run holds its full time limit while it runs and settles to the minutes it used when it ends."}
       </p>
     </div>
   );

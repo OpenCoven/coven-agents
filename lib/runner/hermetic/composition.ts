@@ -82,7 +82,7 @@ export function hermeticRunnerReconciliationDependencies(
     randomToken: dependencies.randomToken,
     releaseCredentialResources: (run) =>
       releaseRunnerCredentialResources(
-        run.id,
+        run,
         dependencies.credentialDependencies
       ),
     resourceLifecycle: dependencies.resourceLifecycle,
@@ -114,7 +114,7 @@ export function hermeticRunnerCancellationDependencies(
     randomToken: dependencies.randomToken,
     releaseCredentialResources: (run) =>
       releaseRunnerCredentialResources(
-        run.id,
+        run,
         dependencies.credentialDependencies
       ),
     resourceLifecycle: dependencies.resourceLifecycle,

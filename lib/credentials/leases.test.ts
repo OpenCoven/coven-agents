@@ -38,13 +38,16 @@ function operationHash(operationId = "operation-1"): string {
 function reservation(overrides: Partial<RunReservation> = {}): RunReservation {
   return {
     consumedAt: null,
-    costUnits: 1,
+    costUnits: 15,
+    durationSeconds: null,
     expiresAt: new Date(NOW.getTime() + 300_000),
     periodDay: "2026-08-27",
     periodMonth: new Date("2026-08-01T00:00:00.000Z"),
     releasedAt: null,
     reservedAt: NOW,
+    reservedUnits: 15,
     runId: "run-1",
+    settledAt: null,
     state: "reserved",
     tenantHash: tenantHashForReservation(TENANT, SECRET),
     ...overrides,

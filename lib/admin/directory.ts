@@ -1,18 +1,19 @@
-import { count, gte, max, sql } from "drizzle-orm";
+import { count, eq, gte, max, sql } from "drizzle-orm";
 import type { DayCount } from "@/lib/billing/history";
 import { fillDays, utcDay, windowStart } from "@/lib/billing/history";
 import type { databaseFor } from "@/lib/db/access";
-import { runUsage, user } from "@/lib/db/schema";
+import { runReservation, runUsage, user } from "@/lib/db/schema";
 import { tenantForUser } from "@/lib/session";
 import { isSubscribedAt } from "@/lib/subscription";
 
 /**
  * The Warden directory: every figure here is read off a real column.
  *
- * `RunUsage` records a tenant, a run id and the instant a run was counted —
- * so fleet volume, per-account run counts and last-seen are real. Outcome,
- * duration and cost have no column behind them and are deliberately absent;
- * the screen names those gaps instead of inventing numbers for them.
+ * `RunUsage` records a tenant, a run id and the instant a run was counted,
+ * and its reservation the minutes settled against the cap — so fleet volume,
+ * per-account run counts, minutes and last-seen are real. Outcome and cost
+ * have no column behind them and are deliberately absent; the screen names
+ * those gaps instead of inventing numbers for them.
  */
 
 export type AdminAccountRow = {
@@ -64,8 +65,13 @@ export async function adminOverview(
 
   const [byDay, previous, accounts, fresh, active] = await Promise.all([
     db
-      .select({ day, runs: count() })
+      .select({
+        day,
+        minutes: sql<number>`coalesce(sum(case when ${runReservation.state} = 'consumed' then ${runReservation.costUnits} else 0 end), 0)`,
+        runs: count(runUsage.id),
+      })
       .from(runUsage)
+      .leftJoin(runReservation, eq(runReservation.runId, runUsage.runId))
       .where(gte(runUsage.countedAt, since))
       .groupBy(day),
     db
@@ -83,7 +89,11 @@ export async function adminOverview(
   ]);
 
   const series = fillDays(
-    byDay.map((row) => ({ day: row.day, runs: Number(row.runs) })),
+    byDay.map((row) => ({
+      day: row.day,
+      minutes: Number(row.minutes),
+      runs: Number(row.runs),
+    })),
     since,
     now
   );

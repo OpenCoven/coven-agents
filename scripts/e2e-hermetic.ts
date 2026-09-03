@@ -386,7 +386,7 @@ export function hermeticEnvironment(
     CREDENTIAL_KEK_V1: TEST_KEK,
     CRON_SECRET: "test-hermetic-cron",
     E2E_HERMETIC_RUNNER: "1",
-    GLOBAL_DAILY_RUN_CAP: "100",
+    GLOBAL_DAILY_RUN_CAP: "1500",
     IS_DEMO: "",
     NEXT_TELEMETRY_DISABLED: "1",
     NEXTAUTH_URL: origin,

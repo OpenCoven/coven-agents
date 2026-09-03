@@ -1,23 +1,29 @@
-import { asc, count, sql } from "drizzle-orm";
+import { asc, count, eq, sql } from "drizzle-orm";
 import { usageWhere } from "@/lib/billing/usage";
 import type { databaseFor } from "@/lib/db/access";
-import { runUsage } from "@/lib/db/schema";
+import { runReservation, runUsage } from "@/lib/db/schema";
 
 type Database = ReturnType<typeof databaseFor>;
 
-export type DayCount = { day: string; runs: number };
+export type DayCount = { day: string; minutes: number; runs: number };
 
 const MS_PER_DAY = 86_400_000;
 
 /**
- * Run volume per day, for one tenant.
+ * Run volume and settled minutes per day, for one tenant.
  *
- * `RunUsage` is the only per-run record this side of the runner: one row per
- * counted run, carrying a tenant, a run id and the instant it was counted. It
- * has no outcome, no duration and no mission, so volume over time is the only
- * series that can honestly be drawn from it. Anything richer would have to be
- * invented, and an invented number on a page headed "read off run receipts" is
- * worse than an empty panel.
+ * `RunUsage` is the per-run receipt this side of the runner: one row per
+ * counted run, carrying a tenant, a run id and the instant it was counted. Its
+ * reservation carries the minutes the cap was charged — the runner's time
+ * limit while the run is live, settled to the whole minutes it held once it
+ * ends. Neither has an outcome or a mission, so volume and minutes over time
+ * are the only series that can honestly be drawn. Anything richer would have
+ * to be invented, and an invented number on a page headed "read off run
+ * receipts" is worse than an empty panel.
+ *
+ * Minutes come from the reservation the cap is enforced against, joined by
+ * run id, so this series and the usage meter cannot disagree. Only consumed
+ * reservations count: a released one never launched.
  *
  * Grouped in the database rather than by reading every row and bucketing here,
  * because a busy tenant over ninety days is thousands of rows to move for a
@@ -32,14 +38,21 @@ export async function runsByDay(
   // server happens to be, which would silently shift the whole series.
   const day = sql<string>`to_char(date_trunc('day', ${runUsage.countedAt} at time zone 'UTC'), 'YYYY-MM-DD')`;
 
+  const minutes = sql<number>`coalesce(sum(case when ${runReservation.state} = 'consumed' then ${runReservation.costUnits} else 0 end), 0)`;
+
   const rows = await db
-    .select({ day, runs: count() })
+    .select({ day, minutes, runs: count(runUsage.id) })
     .from(runUsage)
+    .leftJoin(runReservation, eq(runReservation.runId, runUsage.runId))
     .where(usageWhere(tenant, since))
     .groupBy(day)
     .orderBy(asc(day));
 
-  return rows.map((row) => ({ day: row.day, runs: Number(row.runs) }));
+  return rows.map((row) => ({
+    day: row.day,
+    minutes: Number(row.minutes),
+    runs: Number(row.runs),
+  }));
 }
 
 /** The UTC calendar day an instant falls in, as `YYYY-MM-DD`. */
@@ -60,7 +73,7 @@ export function fillDays(
   from: Date,
   through: Date
 ): DayCount[] {
-  const counts = new Map(rows.map((row) => [row.day, row.runs]));
+  const counts = new Map(rows.map((row) => [row.day, row]));
   const filled: DayCount[] = [];
 
   const cursor = Date.UTC(
@@ -76,7 +89,12 @@ export function fillDays(
 
   for (let at = cursor; at <= end; at += MS_PER_DAY) {
     const day = utcDay(new Date(at));
-    filled.push({ day, runs: counts.get(day) ?? 0 });
+    const entry = counts.get(day);
+    filled.push({
+      day,
+      minutes: entry?.minutes ?? 0,
+      runs: entry?.runs ?? 0,
+    });
   }
 
   return filled;

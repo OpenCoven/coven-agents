@@ -22,13 +22,16 @@ function reservation(
 ): RunReservationRecord {
   return {
     consumedAt: null,
-    costUnits: 1,
+    costUnits: 15,
+    durationSeconds: null,
     expiresAt: new Date("2026-08-28T15:05:00.000Z"),
     periodDay: "2026-08-28",
     periodMonth: new Date("2026-08-01T00:00:00.000Z"),
     releasedAt: null,
     reservedAt: NOW,
+    reservedUnits: 15,
     runId: "00000000-0000-4000-8000-000000000002",
+    settledAt: null,
     state: "reserved",
     tenantHash: "a".repeat(64),
     ...overrides,
@@ -145,6 +148,18 @@ function cleanupDatabase(
             await lockPause;
           }
           return draft.reservation?.runId === runId ? draft.reservation : null;
+        },
+        settleReservation: async (runId, settlement) => {
+          calls.push("settle-reservation");
+          if (
+            draft.reservation?.runId !== runId ||
+            draft.reservation.state !== "consumed" ||
+            draft.reservation.settledAt !== null
+          ) {
+            return null;
+          }
+          draft.reservation = { ...draft.reservation, ...settlement };
+          return draft.reservation;
         },
       });
       state = draft;
@@ -371,7 +386,87 @@ test("terminal credential cleanup preserves a consumed charge", async () => {
   assert.deepEqual(cleanup.calls, ["lock-reservation", "delete-lease"]);
   assert.equal(cleanup.state().lease, null);
   assert.notEqual(cleanup.state().reservation, null);
+  // No timestamps means no measurable duration: the full reservation stands.
+  assert.equal(cleanup.state().reservation?.costUnits, 15);
+  assert.equal(cleanup.state().reservation?.settledAt, null);
   assert.equal(cleanup.state().usage, true);
+});
+
+test("terminal cleanup settles a launched run to the whole minutes it held", async () => {
+  const cleanup = cleanupDatabase();
+  const startedAt = new Date("2026-08-28T15:00:30.000Z");
+  const completedAt = new Date("2026-08-28T15:04:31.000Z");
+
+  const result = await cleanupRunnerCredentialResourcesAtomically(
+    cleanup.database,
+    {
+      completedAt,
+      mode: "terminal",
+      runId: "00000000-0000-4000-8000-000000000002",
+      startedAt,
+    }
+  );
+
+  assert.deepEqual(result, { kind: "cleaned" });
+  assert.deepEqual(cleanup.calls, [
+    "lock-reservation",
+    "delete-lease",
+    "settle-reservation",
+  ]);
+  const settled = cleanup.state().reservation;
+  assert.equal(settled?.state, "consumed");
+  // Four minutes and one second rounds up to five minutes, never down.
+  assert.equal(settled?.costUnits, 5);
+  assert.equal(settled?.durationSeconds, 241);
+  assert.equal(settled?.reservedUnits, 15);
+  assert.deepEqual(settled?.settledAt, completedAt);
+  assert.equal(cleanup.state().usage, true);
+});
+
+test("a replayed terminal cleanup never settles a reservation twice", async () => {
+  const cleanup = cleanupDatabase();
+  const cleanupInput = {
+    completedAt: new Date("2026-08-28T15:02:00.000Z"),
+    mode: "terminal" as const,
+    runId: "00000000-0000-4000-8000-000000000002",
+    startedAt: new Date("2026-08-28T15:00:00.000Z"),
+  };
+
+  await cleanupRunnerCredentialResourcesAtomically(
+    cleanup.database,
+    cleanupInput
+  );
+  const replay = await cleanupRunnerCredentialResourcesAtomically(
+    cleanup.database,
+    { ...cleanupInput, completedAt: new Date("2026-08-28T15:59:00.000Z") }
+  );
+
+  assert.deepEqual(replay, { kind: "cleaned" });
+  assert.equal(cleanup.state().reservation?.costUnits, 2);
+  assert.equal(cleanup.state().reservation?.durationSeconds, 120);
+  assert.deepEqual(
+    cleanup.state().reservation?.settledAt,
+    cleanupInput.completedAt
+  );
+});
+
+test("an unmeasurable run keeps its full reserved charge", async () => {
+  const cleanup = cleanupDatabase();
+
+  const result = await cleanupRunnerCredentialResourcesAtomically(
+    cleanup.database,
+    {
+      completedAt: new Date("2026-08-28T14:00:00.000Z"),
+      mode: "terminal",
+      runId: "00000000-0000-4000-8000-000000000002",
+      startedAt: new Date("2026-08-28T15:00:00.000Z"),
+    }
+  );
+
+  assert.deepEqual(result, { kind: "cleaned" });
+  assert.deepEqual(cleanup.calls, ["lock-reservation", "delete-lease"]);
+  assert.equal(cleanup.state().reservation?.costUnits, 15);
+  assert.equal(cleanup.state().reservation?.settledAt, null);
 });
 
 test("uncertain pre-launch cleanup remains an explicit retryable failure", async () => {
@@ -539,12 +634,31 @@ test("an existing reserved run never steals or releases another acquisition", as
 
 test("terminal cleanup releases only durable credential resources for its run", async () => {
   const calls: string[] = [];
+  const service = dependencies(calls);
+  const inputs: unknown[] = [];
+  service.cleanupResources = async (cleanupInput) => {
+    calls.push(`cleanup:${cleanupInput.mode}`);
+    inputs.push(cleanupInput);
+    return { kind: "cleaned" as const };
+  };
+  const startedAt = new Date("2026-08-28T15:00:00.000Z");
+  const completedAt = new Date("2026-08-28T15:03:00.000Z");
   await releaseRunnerCredentialResources(
-    "00000000-0000-4000-8000-000000000002",
-    dependencies(calls)
+    { completedAt, id: "00000000-0000-4000-8000-000000000002", startedAt },
+    service
   );
 
   assert.deepEqual(calls, ["cleanup:terminal"]);
+  // The run's own timestamps travel with terminal cleanup so the charge can
+  // be settled inside the same transaction that retires the lease.
+  assert.deepEqual(inputs, [
+    {
+      completedAt,
+      mode: "terminal",
+      runId: "00000000-0000-4000-8000-000000000002",
+      startedAt,
+    },
+  ]);
 });
 
 test("attached runner work consumes its existing reservation idempotently", async () => {

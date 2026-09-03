@@ -6,7 +6,7 @@ import { useSession } from "next-auth/react";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useApplicationLoginPath } from "@/hooks/use-application-login-path";
 import { browserApplicationPath } from "@/lib/application-path";
-import { MONTHLY_RUN_CAP } from "@/lib/billing/limits";
+import { MONTHLY_MINUTE_CAP } from "@/lib/billing/limits";
 import { parseRetryAfter } from "@/lib/http/retry-after";
 
 const MAX_CONFIRMATION_ATTEMPTS = 15;
@@ -1218,23 +1218,24 @@ export function SubscriptionCard({
         <p className="oc-subscription-card__eyebrow">Monthly contract</p>
         <h2 id={titleId}>Subscriber access</h2>
         <p>
-          One subscription provides {MONTHLY_RUN_CAP} runs each month. A run is
-          counted when an agent starts.
+          One subscription provides {MONTHLY_MINUTE_CAP} minutes of agent run
+          time each month. A run holds its full time limit when it starts and
+          settles to the minutes it actually used when it ends.
         </p>
       </div>
 
       <div
-        aria-label={`Monthly allowance: ${MONTHLY_RUN_CAP} agent runs`}
+        aria-label={`Monthly allowance: ${MONTHLY_MINUTE_CAP} minutes of agent run time`}
         className="oc-subscription-ledger"
         role="img"
       >
         <div className="oc-subscription-ledger__heading">
-          <span>Run allowance</span>
+          <span>Run time allowance</span>
           <span>Monthly</span>
         </div>
         <div className="oc-subscription-ledger__value">
-          <strong>{MONTHLY_RUN_CAP}</strong>
-          <span>runs</span>
+          <strong>{MONTHLY_MINUTE_CAP}</strong>
+          <span>minutes</span>
         </div>
         <div aria-hidden="true" className="oc-subscription-ledger__ticks">
           {ALLOWANCE_MARKERS.map((marker) => (

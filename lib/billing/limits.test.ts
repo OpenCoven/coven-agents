@@ -1,19 +1,35 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { GRACE_PERIOD_DAYS, MONTHLY_RUN_CAP } from "./limits";
+import { RUNNER_MID_RUN_ENTITLEMENT_POLICY } from "@/lib/runner/entitlement-policy";
+import {
+  GRACE_PERIOD_DAYS,
+  MONTHLY_MINUTE_CAP,
+  RUN_MINUTE_RESERVATION,
+} from "./limits";
 
-test("the cap is a positive whole number of runs", () => {
+test("the cap is a positive whole number of minutes", () => {
   // Quoted to the user in three places. A fractional or zero cap would be
   // shown verbatim on a pricing page.
-  assert.ok(Number.isInteger(MONTHLY_RUN_CAP));
-  assert.ok(MONTHLY_RUN_CAP > 0);
+  assert.ok(Number.isInteger(MONTHLY_MINUTE_CAP));
+  assert.ok(MONTHLY_MINUTE_CAP > 0);
 });
 
-test("the cap is the agreed 750", () => {
+test("the cap is the agreed 300 minutes", () => {
   // Pinned deliberately. The number is a commercial commitment, not an
   // implementation detail, so changing it should require changing a test that
   // says so out loud.
-  assert.equal(MONTHLY_RUN_CAP, 750);
+  assert.equal(MONTHLY_MINUTE_CAP, 300);
+});
+
+test("a run reserves exactly the runner's execution time limit", () => {
+  // Admission reserves the most a run can hold. If the runner limit moves,
+  // this reservation must move with it or the cap becomes overcommittable.
+  assert.ok(Number.isInteger(RUN_MINUTE_RESERVATION));
+  assert.equal(
+    RUN_MINUTE_RESERVATION,
+    Math.ceil(RUNNER_MID_RUN_ENTITLEMENT_POLICY.maxDurationMs / 60_000)
+  );
+  assert.ok(RUN_MINUTE_RESERVATION < MONTHLY_MINUTE_CAP);
 });
 
 test("grace is bounded", () => {
