@@ -5,24 +5,18 @@ export const DAYTONA_DEFAULT_TARGET = "us";
 export const DAYTONA_DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 export const DAYTONA_MAX_REQUEST_TIMEOUT_MS = 120_000;
 export const DAYTONA_MIN_REQUEST_TIMEOUT_MS = 1000;
-/**
- * Daytona allows at most 4 vCPU, 8 GiB of memory, and 10 GiB of disk per
- * sandbox. A policy above those maxima is not a stricter policy: the provider
- * refuses the sandbox outright, so the caps below are the provider's limits
- * rather than our preference, and the defaults stay inside them.
- */
 export const DAYTONA_SANDBOX_RESOURCE_POLICY_DEFAULTS = Object.freeze({
   autoArchiveInterval: 10_080,
   autoStopInterval: 15,
   cpu: 2,
-  disk: 10,
+  disk: 20,
   memory: 4,
 });
 export const DAYTONA_SANDBOX_RESOURCE_POLICY_CAPS = Object.freeze({
   autoArchiveInterval: 43_200,
   autoStopInterval: 60,
   cpu: 4,
-  disk: 10,
+  disk: 40,
   memory: 8,
 });
 export const DAYTONA_SANDBOX_RESOURCE_POLICY_ENVIRONMENT_KEYS = [

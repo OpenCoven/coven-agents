@@ -451,12 +451,14 @@ for removal of the superseded provider.
   tenant digests, messages, or credentials. An observation with no exact
   durable mapping, duplicate identity label, pending ownership, or policy drift
   is not adopted or deleted.
-- The same repository policy builds the pinned snapshot with 2 CPU cores,
-  4 GiB memory, and 10 GiB disk, and requests 15-minute auto-stop and
-  seven-day auto-archive defaults on each sandbox, bounded by 4 cores, 8 GiB,
-  10 GiB, 60 minutes, and 30 days respectively. The CPU, memory, and disk
-  bounds are Daytona per-sandbox maxima; sandboxes inherit those values from
-  the snapshot because a sandbox create that names resources is refused.
+- The same repository policy declares 2 CPU cores, 4 GiB memory, and 20 GiB
+  disk, and requests 15-minute auto-stop and seven-day auto-archive defaults on
+  each sandbox, bounded by 4 cores, 8 GiB, 40 GiB, 60 minutes, and 30 days
+  respectively. A sandbox create never names CPU, memory, or disk, because a
+  create that does is refused; those values reach a sandbox only through the
+  snapshot it was built from, so the snapshot in use governs them until a new
+  one is built. Daytona itself allows at most 4 vCPU, 8 GiB, and 10 GiB per
+  sandbox, so the declared disk exceeds what the provider will build.
   Persistent sandbox TTL is fixed at zero and auto-delete at negative one;
   public previews, volumes, linked/forked resources, and warm pools are not
   configured.
