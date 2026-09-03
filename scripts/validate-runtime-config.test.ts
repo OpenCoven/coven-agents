@@ -30,7 +30,7 @@ const VALID_ENV: Partial<NodeJS.ProcessEnv> = {
   DAYTONA_AUTO_STOP_MINUTES: "15",
   DAYTONA_DOMAIN_ALLOW_LIST: "github.com,api.github.com,app.example",
   DAYTONA_SANDBOX_CPU_CORES: "2",
-  DAYTONA_SANDBOX_DISK_GIB: "20",
+  DAYTONA_SANDBOX_DISK_GIB: "10",
   DAYTONA_SANDBOX_MEMORY_GIB: "4",
   DAYTONA_SNAPSHOT: "coven-agents-copilot-1",
   DAYTONA_TARGET: "us",
@@ -822,7 +822,7 @@ test("rejects malformed and over-cap Daytona resource policy settings", () => {
     ["DAYTONA_AUTO_STOP_MINUTES", "61"],
     ["DAYTONA_SANDBOX_CPU_CORES", "5"],
     ["DAYTONA_SANDBOX_MEMORY_GIB", "9"],
-    ["DAYTONA_SANDBOX_DISK_GIB", "41"],
+    ["DAYTONA_SANDBOX_DISK_GIB", "11"],
   ] as const) {
     const result = runValidator({ [variableName]: invalidValue });
     assert.notEqual(result.status, 0);

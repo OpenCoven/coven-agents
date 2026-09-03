@@ -10,7 +10,11 @@ import {
   harnessInstallSpecifier,
   SUPPORTED_HARNESS_SPECS,
 } from "@opencoven/harness";
-import type { DaytonaSnapshotConfiguration } from "./config";
+import {
+  type DaytonaSandboxResourcePolicy,
+  type DaytonaSnapshotConfiguration,
+  daytonaSandboxResourcePolicy,
+} from "./config";
 
 export {
   DAYTONA_DEFAULT_API_URL,
@@ -76,7 +80,11 @@ export type DaytonaSnapshot = Readonly<{
 
 export type DaytonaSnapshotService = Readonly<{
   create: (
-    parameters: Readonly<{ image: Image; name: string }>,
+    parameters: Readonly<{
+      image: Image;
+      name: string;
+      resources: DaytonaSandboxResourcePolicy["resources"];
+    }>,
     options: Readonly<{ onLogs: (chunk: string) => void }>
   ) => Promise<DaytonaSnapshot>;
   get: (name: string) => Promise<DaytonaSnapshot>;
@@ -127,12 +135,26 @@ export function createDaytonaCopilotImage(): Image {
     .workdir(WORKSPACE_DIRECTORY);
 }
 
+/**
+ * Resources belong to the snapshot, not to the sandboxes created from it:
+ * Daytona refuses a snapshot create that names resources, so this definition
+ * is the only place the policy can reach a sandbox. Snapshots are immutable,
+ * which makes the policy part of the pin — changing it requires a new
+ * snapshot name and a matching `DAYTONA_SNAPSHOT`.
+ */
 export function createDaytonaSnapshotDefinition(
-  configuration: Pick<DaytonaSnapshotConfiguration, "snapshotName">
-): Readonly<{ image: Image; name: string }> {
+  configuration: Pick<DaytonaSnapshotConfiguration, "snapshotName">,
+  resources: DaytonaSandboxResourcePolicy["resources"] = daytonaSandboxResourcePolicy()
+    .resources
+): Readonly<{
+  image: Image;
+  name: string;
+  resources: DaytonaSandboxResourcePolicy["resources"];
+}> {
   return {
     image: createDaytonaCopilotImage(),
     name: configuration.snapshotName,
+    resources,
   };
 }
 
@@ -382,10 +404,12 @@ export async function provisionDaytonaSnapshot(
 
   const logSanitizer = createDaytonaBuildLogSanitizer(configuration.apiKey);
   try {
+    const definition = createDaytonaSnapshotDefinition(configuration);
     await dependencies.snapshot.create(
       {
-        image: dependencies.image ?? createDaytonaCopilotImage(),
-        name: configuration.snapshotName,
+        image: dependencies.image ?? definition.image,
+        name: definition.name,
+        resources: definition.resources,
       },
       {
         onLogs: (chunk) => {

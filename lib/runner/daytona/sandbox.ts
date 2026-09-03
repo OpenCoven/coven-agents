@@ -17,7 +17,6 @@ import {
   DaytonaServiceUnavailableError,
   DaytonaTimeoutError,
   DaytonaUnprocessableEntityError,
-  type Resources,
   type Sandbox,
   SandboxState,
 } from "@daytona/sdk";
@@ -25,6 +24,7 @@ import { compareAscii } from "@/lib/ascii";
 import {
   observeRunnerResourceOperation,
   type RunnerResourceOperationObserver,
+  runnerResourceProviderSignal,
 } from "../resource-observability";
 import type { RunnerStore } from "../store";
 import type {
@@ -61,14 +61,13 @@ export type DaytonaProviderErrorKind =
 export type DaytonaSandboxCreateErrorKind = "ambiguous" | "definite_rejection";
 
 /**
- * Daytona 0.207's snapshot-create declaration omits `resources`, but its
- * runtime intentionally forwards the field. Keep the narrow SDK mismatch
- * explicit: this is still assignable to the declared snapshot parameters.
+ * A snapshot carries its own resources, and Daytona refuses a snapshot create
+ * that also names them: the SDK declares `resources` only for image creates
+ * but forwards the field regardless, so sending it turns every create into a
+ * definite provider rejection. The resource policy reaches a sandbox through
+ * the snapshot it was built from, never through this call.
  */
-export type DaytonaSandboxCreateParameters = CreateSandboxFromSnapshotParams &
-  Readonly<{
-    resources: Readonly<Required<Pick<Resources, "cpu" | "disk" | "memory">>>;
-  }>;
+export type DaytonaSandboxCreateParameters = CreateSandboxFromSnapshotParams;
 
 export type DaytonaSandboxService = Readonly<{
   create: (
@@ -256,7 +255,6 @@ function sandboxCreateParameters(
     language: DAYTONA_SANDBOX_LANGUAGE,
     name: daytonaSandboxName(agent.tenant, agent.id),
     public: false,
-    resources: configuration.resources,
     snapshot: configuration.snapshotName,
     ttlMinutes: configuration.ttlMinutes,
   };
@@ -796,6 +794,7 @@ async function createSandbox(
           createOutcome === "definite_rejection"
             ? "provider_rejected"
             : "ambiguous",
+        ...runnerResourceProviderSignal(createError),
       });
       if (createOutcome === "definite_rejection") {
         await failSandboxReservation(reserved.value, persistence);

@@ -10,6 +10,10 @@ import {
 import type { RunnerStore } from "../store";
 import type { RunnerAgentRecord, RunnerPrincipal } from "../types";
 import {
+  DAYTONA_SANDBOX_RESOURCE_POLICY_CAPS,
+  DAYTONA_SANDBOX_RESOURCE_POLICY_DEFAULTS,
+} from "./config";
+import {
   daytonaProbeSessionName,
   daytonaSandboxLabels,
   daytonaSandboxName,
@@ -1006,7 +1010,6 @@ test("a provider-not-found stored ID fences a replacement before persisting it",
     language: "python",
     name: daytonaSandboxName(principal.tenant, reserved.id),
     public: false,
-    resources: config.resources,
     snapshot: config.snapshotName,
     ttlMinutes: 0,
   });
@@ -2132,7 +2135,7 @@ test("sandbox policy supplies bounded resource limits and persistent lifecycle s
       autoStopInterval: 15,
       configurationId: undefined,
       domainAllowList: "github.com",
-      resources: { cpu: 2, disk: 20, memory: 4 },
+      resources: { cpu: 2, disk: 10, memory: 4 },
       snapshotName: "coven-agents-copilot-1",
       target: "us",
       ttlMinutes: 0,
@@ -2148,8 +2151,8 @@ test("sandbox policy supplies bounded resource limits and persistent lifecycle s
     ["DAYTONA_SANDBOX_CPU_CORES", "5"],
     ["DAYTONA_SANDBOX_MEMORY_GIB", "0"],
     ["DAYTONA_SANDBOX_MEMORY_GIB", "9"],
-    ["DAYTONA_SANDBOX_DISK_GIB", "9"],
-    ["DAYTONA_SANDBOX_DISK_GIB", "41"],
+    ["DAYTONA_SANDBOX_DISK_GIB", "2"],
+    ["DAYTONA_SANDBOX_DISK_GIB", "11"],
     ["DAYTONA_SANDBOX_CPU_CORES", "1.5"],
   ] as const) {
     assert.throws(
@@ -2526,4 +2529,26 @@ test("decommissioning an ambiguously created sandbox retains its row when reconc
   });
   assert.deepEqual(result, { error: "retryable", kind: "failed" });
   assert.equal(deleted, 0);
+});
+
+test("the resource policy stays inside Daytona per-sandbox maxima", () => {
+  // Daytona allows at most 4 vCPU, 8 GiB of memory, and 10 GiB of disk per
+  // sandbox. A policy above those is not stricter: the provider refuses the
+  // sandbox, which is why these caps are the provider limits themselves.
+  assert.deepEqual(
+    {
+      cpu: DAYTONA_SANDBOX_RESOURCE_POLICY_CAPS.cpu,
+      disk: DAYTONA_SANDBOX_RESOURCE_POLICY_CAPS.disk,
+      memory: DAYTONA_SANDBOX_RESOURCE_POLICY_CAPS.memory,
+    },
+    { cpu: 4, disk: 10, memory: 8 }
+  );
+
+  for (const field of ["cpu", "disk", "memory"] as const) {
+    assert.ok(
+      DAYTONA_SANDBOX_RESOURCE_POLICY_DEFAULTS[field] <=
+        DAYTONA_SANDBOX_RESOURCE_POLICY_CAPS[field],
+      `${field} default must stay inside the provider maximum`
+    );
+  }
 });
