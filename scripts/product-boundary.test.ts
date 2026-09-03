@@ -92,6 +92,7 @@ const applicationRouteFiles = [
   "app/api/team-runs/[id]/approve/route.ts",
   "app/api/team-runs/[id]/route.ts",
   "app/api/team-runs/[id]/stop/route.ts",
+  "app/api/teams/[id]/mission/route.ts",
   "app/api/teams/[id]/route.ts",
   "app/api/teams/[id]/runs/route.ts",
   "app/api/teams/route.ts",

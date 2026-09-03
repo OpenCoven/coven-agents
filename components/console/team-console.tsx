@@ -234,6 +234,7 @@ export function TeamConsole({
   >(null);
   const [projectAuthorityCheckedAt, setProjectAuthorityCheckedAt] = useState(0);
   const [mission, setMission] = useState("");
+  const [drafting, setDrafting] = useState(false);
   const [skillName, setSkillName] = useState("");
   const [skillDescription, setSkillDescription] = useState("");
   const [skillInstructions, setSkillInstructions] = useState("");
@@ -708,6 +709,40 @@ export function TeamConsole({
       });
     } finally {
       setBusy(false);
+    }
+  };
+
+  /**
+   * Fills the mission field from the team's own roster. Whatever is already
+   * typed is passed as a steer, so a half-written note becomes a full
+   * mission rather than being thrown away. The result is editable and still
+   * requires the person to start the run.
+   */
+  const draftMission = async () => {
+    if (!selectedTeam || drafting) {
+      return;
+    }
+    const teamId = selectedTeam.id;
+    setDrafting(true);
+    try {
+      const drafted = await client.draftTeamMission(
+        teamId,
+        { hint: mission.trim() },
+        lifecycleControllerRef.current?.signal
+      );
+      if (selectedTeamIdRef.current !== teamId) {
+        return;
+      }
+      setMission(drafted);
+    } catch (error) {
+      if (lifecycleControllerRef.current?.signal.aborted) {
+        return;
+      }
+      toast.error("Could not draft a mission.", {
+        description: readableError(error),
+      });
+    } finally {
+      setDrafting(false);
     }
   };
 
@@ -1348,18 +1383,27 @@ export function TeamConsole({
                   value={mission}
                 />
               </Field>
-              <Btn
-                disabled={busy || loadingRuns || !mission.trim()}
-                onClick={startRun}
-                variant="primary"
-              >
-                {busy || loadingRuns ? (
-                  <Spinner size={12} />
-                ) : (
-                  <ChevronRight size={13} />
-                )}
-                Start coordinated run
-              </Btn>
+              <div className="oc-team-mission__actions">
+                <Btn
+                  disabled={busy || loadingRuns || drafting}
+                  onClick={draftMission}
+                >
+                  {drafting ? <Spinner size={12} /> : <Sparkles size={13} />}
+                  {mission.trim() ? "Rewrite as a mission" : "Draft a mission"}
+                </Btn>
+                <Btn
+                  disabled={busy || loadingRuns || drafting || !mission.trim()}
+                  onClick={startRun}
+                  variant="primary"
+                >
+                  {busy || loadingRuns ? (
+                    <Spinner size={12} />
+                  ) : (
+                    <ChevronRight size={13} />
+                  )}
+                  Start coordinated run
+                </Btn>
+              </div>
             </div>
             <div className="oc-team-run-layout">
               <aside className="oc-team-run-list">

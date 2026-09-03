@@ -62,6 +62,7 @@ const EXPECTED_ROUTES = [
   "team_run_start",
   "team_run_stop",
   "team_run_approve",
+  "team_mission_draft",
 ] as const satisfies readonly AbuseRoute[];
 
 const EXPECTED_POLICIES = {
@@ -126,6 +127,7 @@ const EXPECTED_POLICIES = {
   subscription_read_ip: expectedPolicy(["ip"], 0, 600, 60, 10_000, 3600),
   suggestions_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
   team_delete: expectedPolicy(["ip", "tenant"], 0, 5, 60, 20, 3600),
+  team_mission_draft: expectedPolicy(["ip", "tenant"], 2048, 10, 60, 60, 3600),
   team_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
   team_run_approve: expectedPolicy(["ip", "tenant"], 4096, 10, 60, 40, 3600),
   team_run_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),

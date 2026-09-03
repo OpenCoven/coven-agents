@@ -989,6 +989,17 @@ export const githubToolResultSchema = z.discriminatedUnion("kind", [
     .strict(),
 ]);
 
+export const draftTeamMissionInputSchema = z
+  .object({
+    /** Optional steer from the person. Empty means "read the team and decide". */
+    hint: z.string().max(TEAM_LIMITS.maxMissionLength).default(""),
+  })
+  .strict();
+
+export const teamMissionEnvelopeSchema = z
+  .object({ mission: boundedString(TEAM_LIMITS.maxMissionLength) })
+  .strict();
+
 export const createTeamRunInputSchema = z
   .object({
     operationId: canonicalUuidSchema,
@@ -1565,6 +1576,7 @@ export type RunSnapshotEnvelope = z.infer<typeof runSnapshotEnvelopeSchema>;
 export type CreateSkillInput = z.input<typeof createSkillInputSchema>;
 export type CreateTeamInput = z.input<typeof createTeamInputSchema>;
 export type CreateTeamRunInput = z.input<typeof createTeamRunInputSchema>;
+export type DraftTeamMissionInput = z.input<typeof draftTeamMissionInputSchema>;
 export type ApproveTeamRunInput = z.input<typeof approveTeamRunInputSchema>;
 export type ExpectedVersionInput = z.input<typeof expectedVersionInputSchema>;
 export type GitHubOperationKind = z.infer<typeof githubOperationKindSchema>;
