@@ -19,6 +19,12 @@ import {
 } from "./checkout-lease";
 import { graceExtension } from "./grace";
 import {
+  MINUTE_PACK_CHECKOUT_KIND,
+  MINUTE_PACK_FLOW_VERSION,
+  type MinutePack,
+  minutePackForPrice,
+} from "./minute-packs";
+import {
   type PaidInvoiceDecision,
   type PaidInvoiceMutation,
   type PaidInvoiceUser,
@@ -44,6 +50,24 @@ export type StripeManualReconciliationWriteResult = Exclude<
   StripeEventWriteResult,
   "applied"
 >;
+
+/** A paid top-up to credit. Minutes come from configuration, not Stripe. */
+export type MinutePackCreditInput = {
+  customerId: string;
+  eventId: string;
+  minutes: number;
+  paymentIntentId: string | null;
+  priceId: string;
+  sessionId: string;
+  userId: string;
+};
+
+/**
+ * `owner_mismatch` means the session named a user whose stored Customer is
+ * not the paying one. The event is claimed so it is not retried; the money
+ * and the mismatch are visible in Stripe and worth a human look.
+ */
+export type MinutePackCreditResult = "applied" | "duplicate" | "owner_mismatch";
 
 type StripeEventUpdateBase = {
   customerId: string;
@@ -100,11 +124,21 @@ export type StripeWebhookProvider = {
   ) => Promise<Stripe.Customer | Stripe.DeletedCustomer>;
 };
 
+export type StripeWebhookConfig = {
+  apiKey: string;
+  minutePacks: readonly MinutePack[];
+  priceId: string;
+  webhookSecret: string;
+};
+
 export type StripeWebhookDependencies = {
   applyEventUpdate: (
     input: StripeEventUpdateInput
   ) => Promise<StripeEventWriteResult>;
   createProvider: (apiKey: string) => StripeWebhookProvider;
+  creditMinutePack: (
+    input: MinutePackCreditInput
+  ) => Promise<MinutePackCreditResult>;
   enforceAbuse: typeof enforceAbusePolicy;
   findCheckoutAttemptState: (input: {
     attemptId: string;
@@ -113,11 +147,7 @@ export type StripeWebhookDependencies = {
   findUserByStripeCustomerId: (
     customerId: string
   ) => Promise<WebhookUser | null>;
-  getConfig: () => {
-    apiKey: string;
-    priceId: string;
-    webhookSecret: string;
-  } | null;
+  getConfig: () => StripeWebhookConfig | null;
   recordManualReconciliation: (
     record: StripeWebhookManualReconciliationRecord
   ) => Promise<StripeManualReconciliationWriteResult>;
@@ -284,10 +314,20 @@ export async function stripeWebhookResponse(
       event,
       provider,
       dependencies,
-      config.priceId
+      config
     );
     if (result.kind === "ignored") {
       return Response.json({ ignored: true, reason: result.reason });
+    }
+    if (result.kind === "credited") {
+      return result.write === "duplicate"
+        ? Response.json({ deduped: true })
+        : result.write === "owner_mismatch"
+          ? Response.json({
+              ignored: true,
+              reason: "minute_pack_owner_mismatch",
+            })
+          : Response.json({ received: true });
     }
     if (result.kind === "manual_reconciliation") {
       const write = await dependencies.recordManualReconciliation({
@@ -314,6 +354,7 @@ export async function stripeWebhookResponse(
 }
 
 type WebhookEventResult =
+  | { kind: "credited"; write: MinutePackCreditResult }
   | {
       kind: "ignored";
       reason:
@@ -321,6 +362,8 @@ type WebhookEventResult =
         | "invoice_no_entitlement"
         | "invoice_unrelated_customer"
         | "invoice_unsupported_billing_reason"
+        | "minute_pack_unconfigured"
+        | "minute_pack_unrelated"
         | "unsupported";
     }
   | {
@@ -333,18 +376,83 @@ async function applyWebhookEvent(
   event: Stripe.Event,
   provider: StripeWebhookProvider,
   dependencies: StripeWebhookDependencies,
-  priceId: string
+  config: Pick<StripeWebhookConfig, "minutePacks" | "priceId">
 ): Promise<WebhookEventResult> {
   switch (event.type) {
     case "checkout.session.async_payment_succeeded":
     case "checkout.session.completed":
-      return await applyCheckoutEvent(event, dependencies, priceId);
+      return event.data.object.metadata?.kind === MINUTE_PACK_CHECKOUT_KIND
+        ? await applyMinutePackEvent(event, dependencies, config.minutePacks)
+        : await applyCheckoutEvent(event, dependencies, config.priceId);
     case "invoice.paid":
     case "invoice.payment_failed":
-      return await applyInvoiceEvent(event, provider, dependencies, priceId);
+      return await applyInvoiceEvent(
+        event,
+        provider,
+        dependencies,
+        config.priceId
+      );
     default:
       return { kind: "ignored", reason: "unsupported" };
   }
+}
+
+/**
+ * Credits a paid top-up. Every app-owned marker must be present, exactly as
+ * for subscription Checkout, and the minutes credited are the configured
+ * minutes for the Price, never the number Stripe echoes back in metadata.
+ */
+async function applyMinutePackEvent(
+  event:
+    | Stripe.CheckoutSessionAsyncPaymentSucceededEvent
+    | Stripe.CheckoutSessionCompletedEvent,
+  dependencies: StripeWebhookDependencies,
+  minutePacks: readonly MinutePack[]
+): Promise<WebhookEventResult> {
+  const session = event.data.object;
+  const userId = checkoutUserId(session);
+  const customerId = stripeResourceId(session.customer, "customer", "cus_");
+  const priceId = session.metadata?.priceId ?? "";
+  if (
+    session.mode !== "payment" ||
+    session.payment_status !== "paid" ||
+    session.metadata?.kind !== MINUTE_PACK_CHECKOUT_KIND ||
+    session.metadata?.minutePackFlowVersion !== MINUTE_PACK_FLOW_VERSION ||
+    !userId ||
+    !customerId ||
+    !validStripeCheckoutSessionId(session.id) ||
+    !/^price_[A-Za-z0-9]{1,60}$/u.test(priceId)
+  ) {
+    return { kind: "ignored", reason: "minute_pack_unrelated" };
+  }
+  const pack = minutePackForPrice(minutePacks, priceId);
+  if (!pack || String(pack.minutes) !== session.metadata?.minutes) {
+    return { kind: "ignored", reason: "minute_pack_unconfigured" };
+  }
+  const paymentIntent = session.payment_intent;
+  const paymentIntentId =
+    typeof paymentIntent === "string"
+      ? paymentIntent
+      : (paymentIntent?.id ?? null);
+  return {
+    kind: "credited",
+    write: await dependencies.creditMinutePack({
+      customerId,
+      eventId: event.id,
+      minutes: pack.minutes,
+      paymentIntentId:
+        paymentIntentId && /^pi_[A-Za-z0-9]{1,60}$/u.test(paymentIntentId)
+          ? paymentIntentId
+          : null,
+      priceId,
+      sessionId: session.id,
+      userId,
+    }),
+  };
+}
+
+function validStripeCheckoutSessionId(value: unknown): value is string {
+  return typeof value === "string" && /^cs_[A-Za-z0-9_]{1,120}$/u.test(value);
 }
 
 async function applyCheckoutEvent(

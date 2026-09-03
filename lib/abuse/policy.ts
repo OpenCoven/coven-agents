@@ -79,6 +79,12 @@ const POLICIES = Object.freeze({
     rateClass(10, 60, 60, 3600)
   ),
   messages_read: closedPolicy(["ip", "user"], 0, STANDARD_READ),
+  // A top-up is a one-time payment; a few per hour is generous for a person.
+  minute_pack_checkout: closedPolicy(
+    ["ip", "user"],
+    1024,
+    rateClass(3, 300, 6, 3600)
+  ),
   model_list: closedPolicy(["ip"], 0, PUBLIC_READ),
   run_start: closedPolicy(
     ["ip", "tenant"],

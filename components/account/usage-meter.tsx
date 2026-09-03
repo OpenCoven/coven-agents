@@ -4,7 +4,9 @@ import { useEffect, useState } from "react";
 import { browserApplicationPath } from "@/lib/application-path";
 
 type Usage = {
+  allowance?: number;
   cap: number;
+  packMinutes?: number;
   resetsAt: string | null;
   used: number;
 };
@@ -59,7 +61,8 @@ export function UsageMeter() {
     return null;
   }
 
-  const pct = Math.min(100, Math.round((usage.used / usage.cap) * 100));
+  const allowance = usage.allowance ?? usage.cap;
+  const pct = Math.min(100, Math.round((usage.used / allowance) * 100));
   const resets = usage.resetsAt
     ? new Intl.DateTimeFormat(undefined, {
         day: "numeric",
@@ -72,13 +75,14 @@ export function UsageMeter() {
       <div className="flex items-baseline justify-between gap-2">
         <h2 className="font-semibold text-[15px]">Usage</h2>
         <span className="text-[13px] text-muted-foreground">
-          {usage.used} of {usage.cap} minutes
+          {usage.used} of {allowance} minutes
+          {usage.packMinutes ? ` (${usage.packMinutes} from top-ups)` : ""}
         </span>
       </div>
 
       <div
-        aria-label={`${usage.used} of ${usage.cap} minutes used`}
-        aria-valuemax={usage.cap}
+        aria-label={`${usage.used} of ${allowance} minutes used`}
+        aria-valuemax={allowance}
         aria-valuemin={0}
         aria-valuenow={usage.used}
         className="h-1.5 w-full overflow-hidden rounded-full bg-secondary"

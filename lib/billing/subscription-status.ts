@@ -9,10 +9,13 @@ import {
 import type { VerifiedJwtIdentity } from "@/lib/auth/verified-jwt";
 import { isCanonicalUuid } from "@/lib/session";
 import { isSubscribedAt } from "@/lib/subscription";
+import type { MinutePack } from "./minute-packs";
 
 export type SubscriptionStatusResponse = {
   active: boolean;
   checkoutEnabled: boolean;
+  /** Top-up packs on offer, smallest first; empty when none are configured. */
+  minutePacks: MinutePack[];
   subscribedUntil: string | null;
 };
 
@@ -23,6 +26,7 @@ export type SubscriptionStatusDependencies = {
   findUser: (
     userId: string
   ) => Promise<{ authVersion: number; subscribedUntil: Date | null } | null>;
+  minutePacks?: () => readonly MinutePack[];
   now: () => Date;
 };
 
@@ -79,23 +83,32 @@ export async function subscriptionResponse(
 
   const now = dependencies.now();
   let checkoutEnabled: boolean;
+  let minutePacks: readonly MinutePack[];
   try {
     checkoutEnabled = dependencies.checkoutEnabled();
+    minutePacks = checkoutEnabled ? (dependencies.minutePacks?.() ?? []) : [];
   } catch {
     return noStoreJson({ error: "billing_configuration_invalid" }, 500);
   }
 
-  return noStoreJson(subscriptionStatusFor(owner, checkoutEnabled, now));
+  return noStoreJson(
+    subscriptionStatusFor(owner, checkoutEnabled, now, minutePacks)
+  );
 }
 
 export function subscriptionStatusFor(
   user: { subscribedUntil: Date | null },
   checkoutEnabled: boolean,
-  now: Date
+  now: Date,
+  minutePacks: readonly MinutePack[] = []
 ): SubscriptionStatusResponse {
   return {
     active: isSubscribedAt(user, now),
     checkoutEnabled,
+    minutePacks: minutePacks.map(({ minutes, priceId }) => ({
+      minutes,
+      priceId,
+    })),
     subscribedUntil: user.subscribedUntil?.toISOString() ?? null,
   };
 }

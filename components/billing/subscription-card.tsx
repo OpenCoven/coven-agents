@@ -18,12 +18,17 @@ const ALLOWANCE_MARKERS = Array.from(
 );
 
 type CheckoutResult = "cancelled" | "success" | null;
+export type MinutePackResult = "added" | "cancelled" | null;
+export type MinutePackOffer = { minutes: number; priceId: string };
 
 export type SubscriptionCardProps = {
   checkoutEnabled: boolean;
   checkoutResult?: CheckoutResult;
   confirmationOwner?: string | null;
   isSubscriber: boolean;
+  /** Top-up packs on offer, smallest first. Empty hides the section. */
+  minutePacks?: readonly MinutePackOffer[];
+  minutePackResult?: MinutePackResult;
   onCheckoutConfirmed?: () => void;
   onConfirmationOwnerEstablished?: (userId: string) => void;
   subscribedUntil?: string | null;
@@ -168,6 +173,8 @@ export function SubscriptionCard({
   checkoutResult = null,
   confirmationOwner,
   isSubscriber,
+  minutePacks = [],
+  minutePackResult = null,
   onCheckoutConfirmed,
   onConfirmationOwnerEstablished,
   subscribedUntil = null,
@@ -196,6 +203,7 @@ export function SubscriptionCard({
   const [needsSignIn, setNeedsSignIn] = useState(false);
   const [checkoutSuppressed, setCheckoutSuppressed] = useState(false);
   const [checkoutPending, setCheckoutPending] = useState(false);
+  const [packPending, setPackPending] = useState<string | null>(null);
 
   const noticeRef = useRef<HTMLDivElement>(null);
   const checkoutAttemptRef = useRef<CheckoutAttempt | null>(null);
@@ -905,6 +913,102 @@ export function SubscriptionCard({
     [stopPolling]
   );
 
+  /**
+   * A top-up is a one-time payment, so unlike the subscription flow it needs
+   * no idempotency key or confirmation polling: a duplicate session is
+   * harmless, only a paid one credits, and the usage meter shows the credit.
+   */
+  const buyMinutePack = useCallback(
+    async (pack: MinutePackOffer) => {
+      if (packPending) {
+        return;
+      }
+      setPackPending(pack.priceId);
+      publishNotice({
+        detail: "Stripe will show the amount before purchase.",
+        title: `Opening secure checkout for ${pack.minutes} minutes`,
+        tone: "pending",
+      });
+      let response: Response;
+      try {
+        response = await fetch(
+          browserApplicationPath("/api/minute-packs/checkout"),
+          {
+            body: JSON.stringify({ priceId: pack.priceId }),
+            credentials: "same-origin",
+            headers: { "content-type": "application/json" },
+            method: "POST",
+          }
+        );
+      } catch {
+        publishNotice(
+          {
+            detail: "Check your connection, then choose the pack again.",
+            title: "Could not reach billing.",
+            tone: "error",
+          },
+          { focus: true }
+        );
+        setPackPending(null);
+        return;
+      }
+      let decoded: unknown;
+      try {
+        decoded = await response.json();
+      } catch {
+        decoded = null;
+      }
+      const body = responseBody(decoded);
+      if (response.ok) {
+        const destination = secureCheckoutDestination(body.url);
+        if (destination.kind === "valid") {
+          window.location.assign(destination.href);
+          return;
+        }
+        publishNotice(
+          {
+            detail: "No navigation occurred. Choose the pack again.",
+            title:
+              destination.kind === "unsafe"
+                ? "Checkout returned an unsafe destination."
+                : "Checkout returned no secure destination.",
+            tone: "error",
+          },
+          { focus: true }
+        );
+        setPackPending(null);
+        return;
+      }
+      const error = checkoutError(body);
+      publishNotice(
+        {
+          detail:
+            error === "customer_required"
+              ? "Top-ups are available on subscriptions purchased through Stripe."
+              : error === "subscription_required"
+                ? "An active subscription is needed before adding minutes."
+                : "Try again in a moment.",
+          title: "Could not open checkout for this pack.",
+          tone: "error",
+        },
+        { focus: true }
+      );
+      setPackPending(null);
+    },
+    [packPending, publishNotice]
+  );
+
+  const chooseMinutePack = useCallback(
+    (event: { currentTarget: HTMLButtonElement }) => {
+      const { priceId } = event.currentTarget.dataset;
+      const pack = minutePacks.find((entry) => entry.priceId === priceId);
+      if (pack) {
+        buyMinutePack(pack).catch(() => undefined);
+      }
+    },
+    [buyMinutePack, minutePacks]
+  );
+
   const beginCheckout = useCallback(async () => {
     if (checkoutAttemptRef.current) {
       return;
@@ -1207,6 +1311,10 @@ export function SubscriptionCard({
     !activeConfirmed &&
     !confirmationInFlight &&
     !checkoutSuppressed;
+  const showMinutePacks =
+    checkoutEnabled &&
+    minutePacks.length > 0 &&
+    (isSubscriber || activeConfirmed);
 
   return (
     <section
@@ -1258,6 +1366,43 @@ export function SubscriptionCard({
           Stripe shows the configured amount before purchase. OpenCoven does not
           display or infer the amount here.
         </p>
+      ) : null}
+
+      {showMinutePacks ? (
+        <div className="oc-subscription-packs" data-testid="minute-packs">
+          <div className="oc-subscription-ledger__heading">
+            <span>Add minutes</span>
+            <span>One-time</span>
+          </div>
+          <p className="oc-subscription-card__provider-note">
+            Top-up minutes never expire and are used after the monthly{" "}
+            {MONTHLY_MINUTE_CAP}. Stripe shows the amount before purchase.
+          </p>
+          <div className="oc-subscription-card__actions">
+            {minutePacks.map((pack) => (
+              <button
+                aria-busy={packPending === pack.priceId}
+                className="oc-subscription-action"
+                data-price-id={pack.priceId}
+                disabled={packPending !== null}
+                key={pack.priceId}
+                onClick={chooseMinutePack}
+                type="button"
+              >
+                {packPending === pack.priceId
+                  ? "Opening secure checkout…"
+                  : `Add ${pack.minutes} minutes`}
+              </button>
+            ))}
+          </div>
+          {minutePackResult ? (
+            <p className="oc-subscription-card__provider-note" role="status">
+              {minutePackResult === "added"
+                ? "Top-up received. The minutes are credited as soon as Stripe records the payment, usually within a minute, and appear in Usage."
+                : "Top-up cancelled. Nothing was charged."}
+            </p>
+          ) : null}
+        </div>
       ) : null}
 
       {notice ? (
