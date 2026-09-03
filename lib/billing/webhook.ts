@@ -132,6 +132,8 @@ export type StripeWebhookConfig = {
 };
 
 export type StripeWebhookDependencies = {
+  /** Injectable so a retry window can be exercised without waiting for it. */
+  now?: () => Date;
   applyEventUpdate: (
     input: StripeEventUpdateInput
   ) => Promise<StripeEventWriteResult>;
@@ -444,12 +446,20 @@ async function applyMinutePackEvent(
   if (!pack) {
     /**
      * The customer has paid and this instance cannot price what they bought,
-     * because the Price is absent from MINUTE_PACK_PRICES. That is usually an
-     * instance whose environment lags a deploy, so it resolves itself: answer
-     * 503 and let Stripe redeliver rather than 200, which would end the
-     * retries and strand the payment with nothing credited.
+     * because the Price is absent from MINUTE_PACK_PRICES. An instance whose
+     * environment lags a deploy resolves itself, so a young event is worth
+     * redelivering rather than answering 200 and stranding the payment. A
+     * Price retired while a checkout was in flight never resolves, and
+     * retrying it for Stripe's whole schedule would end in the same silent
+     * loss while risking the endpoint being disabled, so an event that has
+     * stayed unpriceable becomes evidence instead.
      */
-    return { kind: "retry", reason: "minute_pack_unconfigured" };
+    return unconfiguredPackIsStillYoung(event, dependencies)
+      ? { kind: "retry", reason: "minute_pack_unconfigured" }
+      : {
+          kind: "manual_reconciliation",
+          reason: "minute_pack_unconfigured",
+        };
   }
   if (String(pack.minutes) !== session.metadata?.minutes) {
     /**
@@ -484,6 +494,22 @@ async function applyMinutePackEvent(
       userId,
     }),
   };
+}
+
+/**
+ * How long a top-up whose Price is missing keeps being retried before it is
+ * recorded instead. A configuration deploy reaches every instance in minutes;
+ * an hour is generous for that and short enough that the payment is surfaced
+ * long before Stripe stops trying.
+ */
+const UNCONFIGURED_PACK_RETRY_WINDOW_SECONDS = 3600;
+
+function unconfiguredPackIsStillYoung(
+  event: Stripe.Event,
+  dependencies: StripeWebhookDependencies
+): boolean {
+  const now = Math.floor((dependencies.now?.() ?? new Date()).getTime() / 1000);
+  return now - event.created < UNCONFIGURED_PACK_RETRY_WINDOW_SECONDS;
 }
 
 function validStripeCheckoutSessionId(value: unknown): value is string {

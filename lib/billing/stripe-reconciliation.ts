@@ -13,6 +13,7 @@ export const STRIPE_RECONCILIATION_REASONS = [
   "invoice_invalid_reference",
   "minute_pack_minutes_mismatch",
   "minute_pack_owner_mismatch",
+  "minute_pack_unconfigured",
 ] as const;
 
 export const STRIPE_RECONCILIATION_STATUSES = [

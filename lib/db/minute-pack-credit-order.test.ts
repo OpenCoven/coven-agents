@@ -17,7 +17,7 @@ test("crediting a pack checks ownership before it claims the Stripe event", asyn
   assert.ok(start > 0, "creditMinutePack must exist");
   const body = source.slice(start, source.indexOf("\nexport ", start + 1));
 
-  const duplicateProbe = body.indexOf(".from(stripeEvent)");
+  const duplicateProbe = body.indexOf(".from(minutePack)");
   const ownership = body.indexOf(".from(user)");
   const claim = body.indexOf(".insert(stripeEvent)");
   const credit = body.indexOf(".insert(minutePack)");
@@ -33,8 +33,9 @@ test("crediting a pack checks ownership before it claims the Stripe event", asyn
 
   // Claiming before the ownership check consumes the only key Stripe has for
   // the payment, so a corrected redelivery reads as a duplicate and credits
-  // nothing. The duplicate probe must precede both, or an already-credited
-  // event whose customer id later changed reports a mismatch forever.
+  // nothing. The duplicate probe asks the checkout session rather than the
+  // event marker, because any handler that records evidence about an event
+  // writes that marker for its foreign key.
   assert.ok(
     duplicateProbe < ownership,
     "the duplicate probe must run before the ownership check"

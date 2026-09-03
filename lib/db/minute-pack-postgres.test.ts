@@ -59,6 +59,34 @@ test("an owner mismatch leaves the Stripe event unclaimed so the credit survives
       `;
     assert.equal(packs.n, 1);
     assert.equal(await credit("cus_correct"), "duplicate");
+
+    /**
+     * Evidence about an event writes the event marker for its foreign key. A
+     * payment that was recorded but never credited must still be creditable
+     * when it is redelivered, so the marker alone cannot mean "already paid".
+     */
+    const recordedOnly = "evt_recorded_not_credited";
+    await sql`DELETE FROM "StripeReconciliation" WHERE "eventId" = ${recordedOnly}`;
+    await sql`DELETE FROM "StripeEvent" WHERE id = ${recordedOnly}`;
+    await sql`INSERT INTO "StripeEvent" (id) VALUES (${recordedOnly})`;
+    await sql`
+      INSERT INTO "StripeReconciliation" ("eventId", "eventType", reason, status)
+      VALUES (${recordedOnly}, 'checkout.session.completed', 'minute_pack_owner_mismatch', 'pending')
+    `;
+    assert.equal(
+      await creditMinutePack({
+        customerId: "cus_correct",
+        eventId: recordedOnly,
+        minutes: 50,
+        paymentIntentId: null,
+        priceId: "price_probe",
+        sessionId: "cs_recorded_not_credited",
+        userId,
+      }),
+      "applied"
+    );
+    await sql`DELETE FROM "StripeReconciliation" WHERE "eventId" = ${recordedOnly}`;
+    await sql`DELETE FROM "StripeEvent" WHERE id = ${recordedOnly}`;
   } finally {
     await sql`DELETE FROM "MinutePack" WHERE "userId" = ${userId}`;
     await sql`DELETE FROM "StripeEvent" WHERE id = ${eventId}`;

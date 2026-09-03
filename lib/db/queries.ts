@@ -451,18 +451,20 @@ export async function creditMinutePack(
   try {
     return await db.transaction(async (transaction) => {
       /**
-       * An already-handled event is recognised before anything else. The
-       * ownership check below can start failing after a credit has landed —
-       * a re-subscribe or customer migration changes the id — and without
-       * this probe such a redelivery would report a mismatch instead of a
-       * duplicate, which the webhook would keep asking Stripe to repeat.
+       * Whether these minutes already landed is asked of the checkout
+       * session, not of the event marker. The marker is written by any
+       * handler that records evidence about an event — a manual
+       * reconciliation row needs one for its foreign key — so treating its
+       * presence as "already credited" would let an evidence write consume a
+       * payment that was never credited. The session is unique per purchase
+       * and is what the credit is keyed on.
        */
-      const [seen] = await transaction
-        .select({ id: stripeEvent.id })
-        .from(stripeEvent)
-        .where(eq(stripeEvent.id, input.eventId))
+      const [credited] = await transaction
+        .select({ id: minutePack.id })
+        .from(minutePack)
+        .where(eq(minutePack.stripeCheckoutSessionId, input.sessionId))
         .limit(1);
-      if (seen) {
+      if (credited) {
         return "duplicate";
       }
 
@@ -484,14 +486,12 @@ export async function creditMinutePack(
         return "owner_mismatch";
       }
 
-      const claimed = await transaction
+      // Recording that the event was seen is idempotent: an earlier evidence
+      // write may already hold the marker, and that must not stop the credit.
+      await transaction
         .insert(stripeEvent)
         .values({ id: input.eventId })
-        .onConflictDoNothing()
-        .returning({ id: stripeEvent.id });
-      if (claimed.length === 0) {
-        return "duplicate";
-      }
+        .onConflictDoNothing();
 
       const inserted = await transaction
         .insert(minutePack)

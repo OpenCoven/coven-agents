@@ -484,7 +484,8 @@ export const stripeReconciliation = pgTable(
       .references(() => stripeEvent.id, { onDelete: "restrict" }),
     eventType: varchar("eventType", {
       enum: STRIPE_RECONCILIATION_EVENT_TYPES,
-      length: 32,
+      // "checkout.session.async_payment_succeeded" is 40 characters.
+      length: 48,
     }).notNull(),
     reason: varchar("reason", {
       enum: STRIPE_RECONCILIATION_REASONS,
@@ -504,7 +505,7 @@ export const stripeReconciliation = pgTable(
     ),
     check(
       "StripeReconciliation_reason_check",
-      sql`${table.reason} in ('invoice_ambiguous_entitlement', 'invoice_conflicting_paid_interval', 'invoice_contradictory_subscription', 'invoice_invalid_period', 'invoice_invalid_reference', 'minute_pack_minutes_mismatch', 'minute_pack_owner_mismatch')`
+      sql`${table.reason} in ('invoice_ambiguous_entitlement', 'invoice_conflicting_paid_interval', 'invoice_contradictory_subscription', 'invoice_invalid_period', 'invoice_invalid_reference', 'minute_pack_minutes_mismatch', 'minute_pack_owner_mismatch', 'minute_pack_unconfigured')`
     ),
     check(
       "StripeReconciliation_status_check",

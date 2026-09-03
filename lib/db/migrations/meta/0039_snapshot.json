@@ -1,5 +1,5 @@
 {
-  "id": "de6c5888-3ea1-4550-b147-958c8be53dcd",
+  "id": "e3af1833-1f70-4e5b-b92b-a4280951e7d8",
   "prevId": "c59a4d71-e592-43c5-96c8-59d3ccb2da45",
   "version": "7",
   "dialect": "postgresql",
@@ -3914,7 +3914,7 @@
         },
         "eventType": {
           "name": "eventType",
-          "type": "varchar(32)",
+          "type": "varchar(48)",
           "primaryKey": false,
           "notNull": true
         },
@@ -3954,7 +3954,7 @@
         },
         "StripeReconciliation_reason_check": {
           "name": "StripeReconciliation_reason_check",
-          "value": "\"StripeReconciliation\".\"reason\" in ('invoice_ambiguous_entitlement', 'invoice_conflicting_paid_interval', 'invoice_contradictory_subscription', 'invoice_invalid_period', 'invoice_invalid_reference', 'minute_pack_minutes_mismatch', 'minute_pack_owner_mismatch')"
+          "value": "\"StripeReconciliation\".\"reason\" in ('invoice_ambiguous_entitlement', 'invoice_conflicting_paid_interval', 'invoice_contradictory_subscription', 'invoice_invalid_period', 'invoice_invalid_reference', 'minute_pack_minutes_mismatch', 'minute_pack_owner_mismatch', 'minute_pack_unconfigured')"
         },
         "StripeReconciliation_status_check": {
           "name": "StripeReconciliation_status_check",
