@@ -29,13 +29,15 @@ release does not expose plan changes, payment-method management, invoice
 history, or cancellation controls. Operators must not imply that those
 features are available.
 
-The included monthly allowance is `MONTHLY_MINUTE_CAP = 1500` minutes of
+The included monthly allowance is `MONTHLY_MINUTE_CAP = 300` minutes of
 agent run time, defined in `lib/billing/limits.ts`. That constant is the
 current source read by admission, usage responses, and analytics. Any
 subscription offer must disclose the cap before purchase; the account usage
 surfaces must continue to report the same value rather than maintain a
-separate copy. The intended price is USD 30 per month, but the repository does
-not encode it; see the Stripe verification note above.
+separate copy. The intended price is USD 30 per month, a prepaid bucket at
+ten cents a minute with nothing billed per run or beyond the price, but the
+repository does not encode the amount; see the Stripe verification note
+above.
 
 Each admitted run reserves `RUN_MINUTE_RESERVATION = 15` minutes, the runner's
 execution time limit, and is settled to the whole minutes it actually held

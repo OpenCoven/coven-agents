@@ -940,7 +940,7 @@ test("global capacity configuration accepts only positive integers", () => {
 });
 
 test("the tenant daily cap is conservative, usable, and below the monthly cap", () => {
-  assert.equal(TENANT_DAILY_MINUTE_CAP, 200);
+  assert.equal(TENANT_DAILY_MINUTE_CAP, 100);
   assert.ok(TENANT_DAILY_MINUTE_CAP > 0);
   assert.ok(TENANT_DAILY_MINUTE_CAP < MONTHLY_MINUTE_CAP);
   // A day must admit more than one full-length run or the cap is a lockout.

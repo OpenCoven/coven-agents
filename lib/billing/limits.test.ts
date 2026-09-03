@@ -14,11 +14,11 @@ test("the cap is a positive whole number of minutes", () => {
   assert.ok(MONTHLY_MINUTE_CAP > 0);
 });
 
-test("the cap is the agreed 1500 minutes", () => {
+test("the cap is the agreed 300 minutes", () => {
   // Pinned deliberately. The number is a commercial commitment, not an
   // implementation detail, so changing it should require changing a test that
   // says so out loud.
-  assert.equal(MONTHLY_MINUTE_CAP, 1500);
+  assert.equal(MONTHLY_MINUTE_CAP, 300);
 });
 
 test("a run reserves exactly the runner's execution time limit", () => {

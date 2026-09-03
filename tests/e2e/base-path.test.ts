@@ -24,7 +24,7 @@ test.describe("Demo base path", () => {
     await page.route("**/demo/api/usage", (route) =>
       route.fulfill({
         json: {
-          cap: 1500,
+          cap: 300,
           resetsAt: "2099-02-01T00:00:00.000Z",
           used: 0,
         },

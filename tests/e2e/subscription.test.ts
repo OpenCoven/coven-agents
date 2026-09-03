@@ -979,7 +979,7 @@ test.describe("Subscriber checkout", () => {
     await page.route("**/api/usage", (route) =>
       route.fulfill({
         json: {
-          cap: 1500,
+          cap: 300,
           resetsAt: "2099-02-01T00:00:00.000Z",
           used: 0,
         },
@@ -1251,7 +1251,7 @@ test.describe("Subscriber checkout", () => {
     await page.route("**/api/usage", (route) =>
       route.fulfill({
         json: {
-          cap: 1500,
+          cap: 300,
           resetsAt: "2099-02-01T00:00:00.000Z",
           used: 0,
         },

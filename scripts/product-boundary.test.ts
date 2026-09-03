@@ -577,7 +577,7 @@ test("the living subscription policy records current billing authorities", () =>
   }
 
   for (const decision of [
-    "MONTHLY_MINUTE_CAP = 1500",
+    "MONTHLY_MINUTE_CAP = 300",
     "GRACE_PERIOD_DAYS = 3",
     "subscription_cycle",
     "At most one active subscription",

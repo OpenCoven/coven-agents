@@ -23,12 +23,11 @@ export { globalDailyRunCapFromEnv } from "@/lib/abuse/config";
 
 /**
  * Minutes one tenant may hold across a UTC day. It bounds how fast a single
- * account can burn through its monthly allowance and how many full-length runs
- * it can have reserved at once, without being so tight that a busy day of
- * ordinary use hits it: roughly four times the daily average of the monthly
- * cap.
+ * account can burn through its bucket and how many full-length runs it can
+ * have reserved at once, without being so tight that a busy day of ordinary
+ * use hits it: a third of the monthly bucket, ten times its daily average.
  */
-export const TENANT_DAILY_MINUTE_CAP = 200;
+export const TENANT_DAILY_MINUTE_CAP = 100;
 export const RUN_RESERVATION_TTL_MS = 5 * 60 * 1000;
 
 const SERIALIZABLE = { isolationLevel: "serializable" } as const;
