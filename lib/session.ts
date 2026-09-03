@@ -65,6 +65,22 @@ export function tenantForUser(userId: string): string {
   return `u_${packUuid(userId)}`;
 }
 
+/**
+ * Inverts `tenantForUser`. Only subscriber tenants map back to an account;
+ * demo tenants and anything unexpected return null rather than a guess, so a
+ * caller can never attribute purchases or charges to the wrong owner.
+ */
+export function userIdForTenant(
+  tenant: string | null | undefined
+): string | null {
+  if (!tenant || !/^u_[0-9a-f]{32}$/u.test(tenant)) {
+    return null;
+  }
+  const hex = tenant.slice(2);
+  const userId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  return isCanonicalUuid(userId) ? userId : null;
+}
+
 export const DEMO_COOKIE_NAME = "coven-demo";
 
 /**

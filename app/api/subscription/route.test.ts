@@ -231,6 +231,7 @@ test("active and inactive status come from the database, not token type", async 
       assert.deepEqual(await response.json(), {
         active: expectedActive,
         checkoutEnabled: false,
+        minutePacks: [],
         subscribedUntil: storedUntil?.toISOString() ?? null,
       });
       assertNoStore(response);
@@ -385,6 +386,7 @@ test("browser-supplied identity cannot select the database user", async () => {
   assert.deepEqual(Object.keys(payload).sort(), [
     "active",
     "checkoutEnabled",
+    "minutePacks",
     "subscribedUntil",
   ]);
   for (const field of [

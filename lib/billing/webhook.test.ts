@@ -4,6 +4,8 @@ import type Stripe from "stripe";
 import type { CheckoutAttemptState } from "./checkout-lease";
 import { GRACE_PERIOD_DAYS } from "./limits";
 import {
+  type MinutePackCreditInput,
+  type MinutePackCreditResult,
   stripeWebhookResponse as productionWebhookResponse,
   type StripeEventUpdateInput,
   type StripeEventWriteResult,
@@ -847,6 +849,7 @@ test("webhook admission precedes body parsing and Stripe work", async () => {
           calls.push("configuration");
           return {
             apiKey: "sk_test_webhook",
+            minutePacks: [],
             priceId: PRICE_ID,
             webhookSecret: "whsec_test",
           };
@@ -2772,8 +2775,12 @@ type WebhookDependencies = {
   findUserByStripeCustomerId: (
     customerId: string
   ) => Promise<WebhookUser | null>;
+  creditMinutePack: (
+    input: MinutePackCreditInput
+  ) => Promise<MinutePackCreditResult>;
   getConfig: () => {
     apiKey: string;
+    minutePacks: readonly { minutes: number; priceId: string }[];
     priceId: string;
     webhookSecret: string;
   } | null;
@@ -2834,6 +2841,189 @@ function request(input: {
   return value;
 }
 
+const PACK_PRICE_ID = "price_pack300";
+
+function minutePackEvent(input: {
+  id: string;
+  metadata?: Record<string, string>;
+  paymentStatus?: Stripe.Checkout.Session.PaymentStatus;
+  session?: Partial<Stripe.Checkout.Session>;
+}): Stripe.Event {
+  return checkoutEvent({
+    id: input.id,
+    paymentStatus: input.paymentStatus ?? "paid",
+    session: {
+      id: "cs_pack",
+      metadata: input.metadata ?? {
+        kind: "minute_pack",
+        minutePackFlowVersion: "1",
+        minutes: "300",
+        priceId: PACK_PRICE_ID,
+        userId: USER_ID,
+      },
+      mode: "payment",
+      payment_intent: "pi_pack",
+      subscription: null,
+      ...input.session,
+    },
+  });
+}
+
+test("a paid top-up credits the configured minutes for its Price exactly once", async () => {
+  const credits: unknown[] = [];
+  const event = minutePackEvent({ id: "evt_pack" });
+  const dependencies = dependenciesFor(event, {
+    applyEventUpdate: () => {
+      throw new Error("subscription writer must not run for a pack");
+    },
+    creditMinutePack: (input) => {
+      credits.push(input);
+      return Promise.resolve(credits.length === 1 ? "applied" : "duplicate");
+    },
+  });
+
+  const first = await webhookResponse(
+    request({ signature: "valid" }),
+    dependencies,
+    null
+  );
+  assert.equal(first.status, 200);
+  assert.deepEqual(await first.json(), { received: true });
+  assert.deepEqual(credits, [
+    {
+      customerId: "cus_webhook",
+      eventId: "evt_pack",
+      minutes: 300,
+      paymentIntentId: "pi_pack",
+      priceId: PACK_PRICE_ID,
+      sessionId: "cs_pack",
+      userId: USER_ID,
+    },
+  ]);
+
+  const replay = await webhookResponse(
+    request({ signature: "valid" }),
+    dependencies,
+    null
+  );
+  assert.deepEqual(await replay.json(), { deduped: true });
+});
+
+test("a top-up for an unconfigured Price or mismatched minutes is not credited", async (t) => {
+  for (const [name, metadata] of [
+    [
+      "unknown price",
+      {
+        kind: "minute_pack",
+        minutePackFlowVersion: "1",
+        minutes: "300",
+        priceId: "price_other",
+        userId: USER_ID,
+      },
+    ],
+    [
+      "minutes drifted",
+      {
+        kind: "minute_pack",
+        minutePackFlowVersion: "1",
+        minutes: "3000",
+        priceId: PACK_PRICE_ID,
+        userId: USER_ID,
+      },
+    ],
+  ] as const) {
+    // biome-ignore lint/performance/noAwaitInLoops: Sub-tests run in order so a failure names its case.
+    await t.test(name, async () => {
+      let credited = 0;
+      const response = await webhookResponse(
+        request({ signature: "valid" }),
+        dependenciesFor(minutePackEvent({ id: "evt_pack_bad", metadata }), {
+          creditMinutePack: () => {
+            credited += 1;
+            return Promise.resolve("applied");
+          },
+        }),
+        null
+      );
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), {
+        ignored: true,
+        reason: "minute_pack_unconfigured",
+      });
+      assert.equal(credited, 0);
+    });
+  }
+});
+
+test("a top-up needs every app-owned marker and a paid status", async (t) => {
+  const cases: Array<{
+    name: string;
+    paymentStatus?: Stripe.Checkout.Session.PaymentStatus;
+    session?: Partial<Stripe.Checkout.Session>;
+    metadata?: Record<string, string>;
+  }> = [
+    { name: "unpaid", paymentStatus: "unpaid" },
+    {
+      metadata: {
+        kind: "minute_pack",
+        minutePackFlowVersion: "0",
+        minutes: "300",
+        priceId: PACK_PRICE_ID,
+        userId: USER_ID,
+      },
+      name: "wrong flow version",
+    },
+    {
+      metadata: {
+        kind: "minute_pack",
+        minutePackFlowVersion: "1",
+        minutes: "300",
+        priceId: PACK_PRICE_ID,
+        userId: "7ba7b810-9dad-11d1-80b4-00c04fd430c8",
+      },
+      name: "user markers disagree",
+    },
+    { name: "no customer", session: { customer: null } },
+    { name: "subscription mode", session: { mode: "subscription" } },
+  ];
+  for (const entry of cases) {
+    // biome-ignore lint/performance/noAwaitInLoops: Sub-tests run in order so a failure names its case.
+    await t.test(entry.name, async () => {
+      let credited = 0;
+      const response = await webhookResponse(
+        request({ signature: "valid" }),
+        dependenciesFor(minutePackEvent({ id: "evt_pack_marker", ...entry }), {
+          creditMinutePack: () => {
+            credited += 1;
+            return Promise.resolve("applied");
+          },
+        }),
+        null
+      );
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), {
+        ignored: true,
+        reason: "minute_pack_unrelated",
+      });
+      assert.equal(credited, 0);
+    });
+  }
+});
+
+test("a top-up whose payer is not the account's Customer is claimed but not credited", async () => {
+  const response = await webhookResponse(
+    request({ signature: "valid" }),
+    dependenciesFor(minutePackEvent({ id: "evt_pack_owner" }), {
+      creditMinutePack: () => Promise.resolve("owner_mismatch"),
+    }),
+    null
+  );
+  assert.deepEqual(await response.json(), {
+    ignored: true,
+    reason: "minute_pack_owner_mismatch",
+  });
+});
+
 function dependenciesFor(
   event: Stripe.Event,
   overrides: Partial<WebhookDependencies> = {}
@@ -2841,6 +3031,7 @@ function dependenciesFor(
   const dependencies: WebhookDependencies = {
     applyEventUpdate: () => Promise.resolve("applied"),
     createProvider: () => providerForEvent(event, dependencies),
+    creditMinutePack: () => Promise.resolve("applied"),
     enforceAbuse: () => Promise.resolve({ kind: "allowed" }),
     findCheckoutAttemptState: () =>
       Promise.resolve({
@@ -2851,6 +3042,7 @@ function dependenciesFor(
     findUserByStripeCustomerId: () => Promise.resolve(paidUser()),
     getConfig: () => ({
       apiKey: "sk_test_webhook",
+      minutePacks: [{ minutes: 300, priceId: PACK_PRICE_ID }],
       priceId: PRICE_ID,
       webhookSecret: "whsec_test",
     }),

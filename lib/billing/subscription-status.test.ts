@@ -11,8 +11,15 @@ test("subscription status is active only for a stored future timestamp", () => {
     {
       active: true,
       checkoutEnabled: true,
+      minutePacks: [],
       subscribedUntil: FUTURE.toISOString(),
     }
+  );
+  assert.deepEqual(
+    subscriptionStatusFor({ subscribedUntil: FUTURE }, true, NOW, [
+      { minutes: 100, priceId: "price_small" },
+    ]).minutePacks,
+    [{ minutes: 100, priceId: "price_small" }]
   );
 
   for (const subscribedUntil of [NOW, null]) {
@@ -29,6 +36,7 @@ test("subscription status exposes only the public billing shape", () => {
   assert.deepEqual(Object.keys(status).sort(), [
     "active",
     "checkoutEnabled",
+    "minutePacks",
     "subscribedUntil",
   ]);
   assert.equal("stripeCustomerId" in status, false);
