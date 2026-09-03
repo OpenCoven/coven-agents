@@ -634,77 +634,285 @@ textarea:focus-visible {
   text-wrap: pretty;
 }
 
-.oc-subscription-ledger {
-  align-self: start;
-  min-width: 0;
-  padding: 12px;
-  background: var(--subscription-sunken);
-  border: 1px solid var(--subscription-border);
-  border-radius: var(--radius-control, 8px);
-}
-
-.oc-subscription-ledger__heading,
 .oc-subscription-paid-through {
   display: flex;
-  align-items: center;
+  flex-wrap: wrap;
+  grid-column: 1 / -1;
+  gap: 6px 12px;
+  align-items: baseline;
   justify-content: space-between;
+  padding-top: 14px;
   font: 500 10px / 1 var(--font-mono, ui-monospace, monospace);
   color: var(--subscription-text-3);
   text-transform: uppercase;
   letter-spacing: 0.08em;
+  border-top: 1px solid var(--subscription-border);
 }
 
-.oc-subscription-ledger__value {
+.oc-subscription-paid-through time {
+  font: 500 13px / 1 var(--font-ui, inherit);
+  font-variant-numeric: tabular-nums;
+  color: var(--subscription-text);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.oc-subscription-paid-through small {
+  font: 400 11px / 1 var(--font-ui, inherit);
+  color: var(--subscription-text-2);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/*
+ * Usage ledger.
+ *
+ * One component for the billing card and both Usage tabs. The bar is the
+ * signature: the monthly bucket fills from the left, and when top-up minutes
+ * exist a divider marks where the bucket ends and paid minutes begin, so a
+ * person can see at a glance which pool a run will draw from next.
+ */
+.oc-usage-ledger {
+  --ledger-warning: var(--color-warning, oklch(0.78 0.15 75));
+  align-self: start;
+  min-width: 0;
+  padding: 12px 14px;
+  color: var(--subscription-text, var(--text-primary, var(--foreground)));
+  background: var(--subscription-sunken, var(--bg-sunken, var(--secondary)));
+  border: 1px solid
+    var(--subscription-border, var(--border-hairline, var(--border)));
+  border-radius: var(--radius-control, 8px);
+}
+
+.oc-usage-ledger[data-variant="panel"] {
+  padding: 16px 18px;
+  background: var(--subscription-bg, var(--bg-raised, var(--card)));
+  border-radius: var(--radius-card, var(--radius));
+}
+
+.oc-usage-ledger__heading {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  justify-content: space-between;
+  font: 500 10px / 1.2 var(--font-mono, ui-monospace, monospace);
+  color: var(--subscription-text-3, var(--text-muted, var(--muted-foreground)));
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.oc-usage-ledger__heading time {
+  font-variant-numeric: tabular-nums;
+  color: var(--subscription-text-2, var(--text-secondary));
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.oc-usage-ledger__value {
   display: flex;
   gap: 6px;
   align-items: baseline;
   margin-top: 10px;
 }
 
-.oc-subscription-ledger__value strong {
+.oc-usage-ledger__value strong {
   font: 600 27px / 1 var(--font-ui, inherit);
   font-variant-numeric: tabular-nums;
-  color: var(--subscription-text);
+  color: var(--subscription-text, var(--text-primary));
   letter-spacing: -0.04em;
 }
 
-.oc-subscription-ledger__value span {
+.oc-usage-ledger[data-variant="panel"] .oc-usage-ledger__value strong {
+  font-size: 34px;
+}
+
+.oc-usage-ledger__value span {
+  font: 500 11px / 1 var(--font-mono, ui-monospace, monospace);
+  color: var(--subscription-text-2, var(--text-secondary));
+}
+
+.oc-usage-ledger__placeholder {
+  color: var(--subscription-text-3, var(--text-muted)) !important;
+}
+
+.oc-usage-ledger__bar {
+  position: relative;
+  height: 8px;
+  margin-top: 12px;
+  overflow: hidden;
+  background: color-mix(
+    in oklch,
+    var(--subscription-text-3, var(--text-muted)) 22%,
+    transparent
+  );
+  border-radius: 999px;
+}
+
+.oc-usage-ledger__bar > span {
+  display: block;
+  height: 100%;
+  background: var(
+    --subscription-accent,
+    var(--accent-presence, var(--oc-accent))
+  );
+  border-radius: 999px;
+  transition: width 420ms cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+.oc-usage-ledger__bar[data-state="warning"] > span {
+  background: var(--ledger-warning);
+}
+
+.oc-usage-ledger__bar[data-state="full"] > span {
+  background: var(--subscription-danger, var(--destructive));
+}
+
+.oc-usage-ledger__bar[data-state="paused"] > span {
+  background: var(--subscription-text-3, var(--text-muted));
+}
+
+.oc-usage-ledger__bar-divider {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  background: var(--subscription-bg, var(--bg-raised, var(--card)));
+  box-shadow: 0 0 0 1px
+    color-mix(
+      in oklch,
+      var(--subscription-text-2, var(--text-secondary)) 60%,
+      transparent
+    );
+}
+
+.oc-usage-ledger__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 0;
+  margin: 8px 0 0;
+  font: 400 11px / 1.5 var(--font-ui, inherit);
+  font-variant-numeric: tabular-nums;
+  color: var(--subscription-text-2, var(--text-secondary));
+}
+
+.oc-usage-ledger__meta > span + span::before {
+  margin: 0 6px;
+  color: var(--subscription-text-3, var(--text-muted));
+  content: "·";
+}
+
+.oc-usage-ledger__message {
+  margin: 8px 0 0;
+  font: 500 12px / 1.45 var(--font-ui, inherit);
+  color: var(--subscription-text, var(--text-primary));
+  text-wrap: pretty;
+}
+
+.oc-usage-ledger[data-state="warning"] .oc-usage-ledger__message {
+  color: var(--ledger-warning);
+}
+
+.oc-usage-ledger[data-state="full"] .oc-usage-ledger__message {
+  color: var(--subscription-danger, var(--destructive));
+}
+
+.oc-usage-ledger__stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  padding-top: 12px;
+  margin: 14px 0 0;
+  border-top: 1px solid
+    var(--subscription-border, var(--border-hairline, var(--border)));
+}
+
+.oc-usage-ledger__stats div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.oc-usage-ledger__stats dt {
+  font: 500 10px / 1 var(--font-mono, ui-monospace, monospace);
+  color: var(--subscription-text-3, var(--text-muted));
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.oc-usage-ledger__stats dd {
+  margin: 0;
+  font: 500 14px / 1 var(--font-ui, inherit);
+  font-variant-numeric: tabular-nums;
+  color: var(--subscription-text, var(--text-primary));
+}
+
+/* Top-up offer: the pack size is the figure, everything else is meta. */
+.oc-subscription-offer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-column: 1 / -1;
+  gap: 10px 16px;
+  align-items: center;
+  padding: 14px;
+  background: var(--subscription-sunken);
+  border: 1px solid var(--subscription-border);
+  border-radius: var(--radius-control, 8px);
+}
+
+.oc-subscription-offer__eyebrow {
+  grid-column: 1 / -1;
+  margin: 0;
+  font: 500 10px / 1 var(--font-mono, ui-monospace, monospace);
+  color: var(--subscription-text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.oc-subscription-offer__figure {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  min-width: 0;
+}
+
+.oc-subscription-offer__figure strong {
+  font: 600 22px / 1 var(--font-ui, inherit);
+  font-variant-numeric: tabular-nums;
+  color: var(--subscription-text);
+  letter-spacing: -0.03em;
+}
+
+.oc-subscription-offer__figure span {
   font: 500 11px / 1 var(--font-mono, ui-monospace, monospace);
   color: var(--subscription-text-2);
 }
 
-.oc-subscription-ledger__ticks {
-  display: grid;
-  grid-template-columns: repeat(15, minmax(0, 1fr));
-  gap: 3px;
-  align-items: end;
-  height: 14px;
-  margin-top: 12px;
-}
-
-.oc-subscription-ledger__ticks span {
-  height: 5px;
-  background: var(--subscription-accent);
-  border-radius: 1px;
-  opacity: 0.45;
-}
-
-.oc-subscription-ledger__ticks span:nth-child(5n) {
-  height: 12px;
-  opacity: 1;
-}
-
-.oc-subscription-paid-through {
+.oc-subscription-offer__terms {
   grid-column: 1 / -1;
-  padding-top: 14px;
-  border-top: 1px solid var(--subscription-border);
+  margin: 0;
+  font: 400 12px / 1.55 var(--font-ui, inherit);
+  color: var(--subscription-text-2);
+  text-wrap: pretty;
 }
 
-.oc-subscription-paid-through time {
-  font-variant-numeric: tabular-nums;
+.oc-subscription-offer__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-self: end;
+}
+
+.oc-subscription-offer__status {
+  grid-column: 1 / -1;
+  margin: 0;
+  font: 500 12px / 1.45 var(--font-ui, inherit);
   color: var(--subscription-text);
-  text-transform: none;
-  letter-spacing: 0;
+}
+
+.oc-subscription-offer[data-result="added"] .oc-subscription-offer__status,
+.oc-subscription-offer[data-result="credited"] .oc-subscription-offer__status {
+  color: var(--subscription-success);
 }
 
 .oc-subscription-card__provider-note {
@@ -825,8 +1033,20 @@ textarea:focus-visible {
     padding: 16px;
   }
 
-  .oc-subscription-ledger {
+  .oc-usage-ledger {
     grid-column: 1;
+  }
+
+  .oc-subscription-offer {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .oc-subscription-offer__actions {
+    justify-self: stretch;
+  }
+
+  .oc-usage-ledger__stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .oc-subscription-action {
@@ -835,7 +1055,8 @@ textarea:focus-visible {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .oc-subscription-action {
+  .oc-subscription-action,
+  .oc-usage-ledger__bar > span {
     transition: none;
   }
 }

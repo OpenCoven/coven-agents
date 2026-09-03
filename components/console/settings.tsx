@@ -14,11 +14,11 @@ import {
 } from "react";
 import { toast } from "sonner";
 import { SubscriptionCard } from "@/components/billing/subscription-card";
+import { UsageLedger } from "@/components/billing/usage-ledger";
 import { Btn, Caret, Eyebrow } from "@/components/console/primitives";
 import {
   hairline,
   pill,
-  tabular,
   truncate,
   type as type_,
   well,
@@ -26,6 +26,7 @@ import {
 import { useApplicationLoginPath } from "@/hooks/use-application-login-path";
 import { useResponsiveTabOrientation } from "@/hooks/use-responsive-tab-orientation";
 import { browserApplicationPath } from "@/lib/application-path";
+import { RUN_MINUTE_RESERVATION } from "@/lib/billing/limits";
 import { glyphFor } from "@/lib/console/format";
 import {
   isSessionOperationCurrent,
@@ -65,7 +66,6 @@ const RUNNABLE = HARNESS_SPECS.filter((spec) => spec.supported);
 const REFUSED = HARNESS_SPECS.filter((spec) => !spec.supported);
 
 const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
-const MS_PER_DAY = 86_400_000;
 const HORIZONTAL_SETTINGS_QUERY = "(max-width: 720px)";
 
 function settingsPanelId(tab: Tab): string {
@@ -75,14 +75,6 @@ function settingsPanelId(tab: Tab): string {
 function settingsTabId(tab: Tab): string {
   return `console-settings-tab-${tab}`;
 }
-
-type Usage = {
-  allowance?: number;
-  cap: number;
-  packMinutes?: number;
-  resetsAt: string | null;
-  used: number;
-};
 
 const inputStyle: React.CSSProperties = {
   background: "var(--bg-sunken)",
@@ -270,7 +262,6 @@ export function Settings({
   const [busy, setBusy] = useState(false);
   const [refusedOpen, setRefusedOpen] = useState(false);
 
-  const [usage, setUsage] = useState<Usage | null>(null);
   const [confirmWipe, setConfirmWipe] = useState(false);
   const refreshFence = useRef(createCredentialRefreshFence()).current;
   const operationContextRef = useRef(operationContext);
@@ -452,7 +443,6 @@ export function Settings({
     setDrafts({});
     setBusy(false);
     setRefusedOpen(false);
-    setUsage(null);
     setConfirmWipe(false);
     if (!(account && isSubscriber && operationContext)) {
       return () => refreshFence.deactivate();
@@ -518,30 +508,6 @@ export function Settings({
     },
     [horizontalTabs, tabs]
   );
-
-  useEffect(() => {
-    const context = operationContext;
-    if (!account || !context || !isCurrentOperation(context)) {
-      return;
-    }
-    const load = async () => {
-      try {
-        const response = await fetch(`${BASE_PATH}/api/usage`, {
-          signal: context.signal,
-        });
-        if (!isCurrentOperation(context) || !response.ok) {
-          return;
-        }
-        const next = (await response.json()) as Usage;
-        if (isCurrentOperation(context)) {
-          setUsage(next);
-        }
-      } catch {
-        // Session transitions abort this best-effort summary.
-      }
-    };
-    load().catch(() => undefined);
-  }, [account, isCurrentOperation, operationContext]);
 
   const visibleConfigured = credentialsLocked ? [] : configured;
   const visibleDrafts = credentialsLocked ? {} : drafts;
@@ -746,19 +712,6 @@ export function Settings({
       }
     }
   };
-
-  const daysToReset = usage?.resetsAt
-    ? Math.max(
-        0,
-        Math.ceil((Date.parse(usage.resetsAt) - Date.now()) / MS_PER_DAY)
-      )
-    : null;
-  const pct = usage
-    ? Math.min(
-        100,
-        Math.round((usage.used / (usage.allowance ?? usage.cap)) * 100)
-      )
-    : 0;
 
   if (!account) {
     return (
@@ -1007,153 +960,10 @@ export function Settings({
             {selectedTab === "usage" ? (
               <>
                 <Heading
-                  blurb="Minutes of agent run time. A run holds its full time limit when it starts and settles to what it used when it ends, whether it succeeds or not."
+                  blurb={`Each run counts the minutes it actually runs, rounded up to the next minute. While a run is in progress, up to ${RUN_MINUTE_RESERVATION} minutes are set aside and released when it ends.`}
                   title="Usage"
                 />
-                {usage ? (
-                  <div
-                    style={{
-                      background: "var(--bg-raised)",
-                      border: hairline,
-                      borderRadius: "var(--radius-card)",
-                      display: "flex",
-                      flexDirection: "column",
-                      gap: 12,
-                      padding: 16,
-                    }}
-                  >
-                    <div
-                      style={{
-                        alignItems: "baseline",
-                        display: "flex",
-                        flexWrap: "wrap",
-                        gap: 8,
-                      }}
-                    >
-                      <span
-                        style={{
-                          color: "var(--text-primary)",
-                          font: "600 26px/1 var(--font-ui)",
-                          ...tabular,
-                        }}
-                      >
-                        {usage.used}
-                      </span>
-                      <span
-                        style={{
-                          color: "var(--text-secondary)",
-                          font: "400 13px/1 var(--font-ui)",
-                          ...tabular,
-                        }}
-                      >
-                        of {usage.allowance ?? usage.cap} minutes
-                      </span>
-                      {daysToReset === null ? null : (
-                        <span style={type_.meta}>
-                          · {daysToReset} days to reset
-                        </span>
-                      )}
-                    </div>
-
-                    <div
-                      style={{
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: 6,
-                      }}
-                    >
-                      <div
-                        aria-label="Minutes used this month"
-                        aria-valuemax={usage.allowance ?? usage.cap}
-                        aria-valuemin={0}
-                        aria-valuenow={usage.used}
-                        aria-valuetext={`${usage.used} of ${usage.allowance ?? usage.cap} minutes, ${pct} percent of the monthly cap`}
-                        role="progressbar"
-                        style={{
-                          background: "var(--bg-sunken)",
-                          border: hairline,
-                          borderRadius: 999,
-                          height: 6,
-                          overflow: "hidden",
-                        }}
-                      >
-                        <div
-                          style={{
-                            background: "var(--accent-presence)",
-                            borderRadius: 999,
-                            height: "100%",
-                            width: `${pct}%`,
-                          }}
-                        />
-                      </div>
-                      <span style={{ ...type_.meta, ...tabular }}>
-                        {pct}% of the monthly cap ·{" "}
-                        {Math.max(
-                          0,
-                          (usage.allowance ?? usage.cap) - usage.used
-                        )}{" "}
-                        minutes left
-                        {usage.packMinutes
-                          ? ` · includes ${usage.packMinutes} top-up minutes`
-                          : ""}
-                      </span>
-                    </div>
-
-                    <div
-                      style={{
-                        borderTop: hairline,
-                        display: "grid",
-                        gap: 12,
-                        gridTemplateColumns: "repeat(3, 1fr)",
-                        paddingTop: 12,
-                      }}
-                    >
-                      {[
-                        { label: "Used", value: String(usage.used) },
-                        {
-                          label: "Remaining",
-                          value: String(
-                            Math.max(
-                              0,
-                              (usage.allowance ?? usage.cap) - usage.used
-                            )
-                          ),
-                        },
-                        {
-                          label: usage.packMinutes ? "Allowance" : "Cap",
-                          value: String(usage.allowance ?? usage.cap),
-                        },
-                      ].map((stat) => (
-                        <div
-                          key={stat.label}
-                          style={{
-                            display: "flex",
-                            flexDirection: "column",
-                            gap: 4,
-                          }}
-                        >
-                          <Eyebrow style={{ color: "var(--text-muted)" }}>
-                            {stat.label}
-                          </Eyebrow>
-                          <span
-                            style={{
-                              color: "var(--text-primary)",
-                              font: "500 13px/1 var(--font-ui)",
-                              ...tabular,
-                            }}
-                          >
-                            {stat.value}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ) : (
-                  <p style={type_.body}>
-                    Usage is not readable on this session. The cap applies to a
-                    subscriber account.
-                  </p>
-                )}
+                <UsageLedger enabled={Boolean(account)} variant="panel" />
               </>
             ) : null}
 
