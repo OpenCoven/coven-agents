@@ -29,7 +29,7 @@ export const DAYTONA_COPILOT_IMAGE_BASE = "node:22-bookworm-slim";
  * this generation counter is part of the pin: bumping any harness
  * `installVersion` without bumping this leaves the old CLI running.
  */
-export const DAYTONA_COPILOT_SNAPSHOT_NAME = "coven-agents-copilot-1";
+export const DAYTONA_COPILOT_SNAPSHOT_NAME = "coven-agents-copilot-2";
 export const PNPM_VERSION = "10.32.1";
 export const WORKSPACE_DIRECTORY = "/workspace";
 
@@ -91,8 +91,10 @@ export type DaytonaSnapshotService = Readonly<{
 }>;
 
 export type DaytonaSnapshotProvisioningDependencies = Readonly<{
+  environment?: NodeJS.ProcessEnv;
   image?: Image;
   log: (message: string) => void;
+  resources?: DaytonaSandboxResourcePolicy["resources"];
   snapshot: DaytonaSnapshotService;
 }>;
 
@@ -136,16 +138,16 @@ export function createDaytonaCopilotImage(): Image {
 }
 
 /**
- * Resources belong to the snapshot, not to the sandboxes created from it:
- * Daytona refuses a snapshot create that names resources, so this definition
- * is the only place the policy can reach a sandbox. Snapshots are immutable,
- * which makes the policy part of the pin — changing it requires a new
- * snapshot name and a matching `DAYTONA_SNAPSHOT`.
+ * Resources belong to the snapshot, not to the sandboxes built from it: a
+ * sandbox create that names them is refused, so declaring them here is the
+ * only way the policy reaches a sandbox. Snapshots are immutable, which makes
+ * the policy part of the pin — changing any resource value requires bumping
+ * `DAYTONA_COPILOT_SNAPSHOT_NAME`, building that snapshot, and pointing
+ * `DAYTONA_SNAPSHOT` at it.
  */
 export function createDaytonaSnapshotDefinition(
   configuration: Pick<DaytonaSnapshotConfiguration, "snapshotName">,
-  resources: DaytonaSandboxResourcePolicy["resources"] = daytonaSandboxResourcePolicy()
-    .resources
+  resources: DaytonaSandboxResourcePolicy["resources"]
 ): Readonly<{
   image: Image;
   name: string;
@@ -402,9 +404,13 @@ export async function provisionDaytonaSnapshot(
     );
   }
 
+  const definition = createDaytonaSnapshotDefinition(
+    configuration,
+    dependencies.resources ??
+      daytonaSandboxResourcePolicy(dependencies.environment).resources
+  );
   const logSanitizer = createDaytonaBuildLogSanitizer(configuration.apiKey);
   try {
-    const definition = createDaytonaSnapshotDefinition(configuration);
     await dependencies.snapshot.create(
       {
         image: dependencies.image ?? definition.image,

@@ -49,7 +49,11 @@ function activeSnapshot(): DaytonaSnapshot {
 
 test("defines the pinned Copilot CLI snapshot image exactly", () => {
   const image = createDaytonaCopilotImage();
-  const definition = createDaytonaSnapshotDefinition(configuration);
+  const definition = createDaytonaSnapshotDefinition(configuration, {
+    cpu: 2,
+    disk: 10,
+    memory: 4,
+  });
 
   assert.equal(
     image.dockerfile,
@@ -82,7 +86,7 @@ test("pins the harness versions to the snapshot generation", () => {
     },
     {
       harnesses: ["@github/copilot@1.0.80"],
-      snapshot: "coven-agents-copilot-1",
+      snapshot: "coven-agents-copilot-2",
     }
   );
 });
@@ -510,13 +514,16 @@ test("provisioning sends the declared resources to Daytona", async () => {
   };
 
   await provisionDaytonaSnapshot(configuration, {
+    environment: {
+      DAYTONA_SANDBOX_CPU_CORES: "2",
+      DAYTONA_SANDBOX_DISK_GIB: "10",
+      DAYTONA_SANDBOX_MEMORY_GIB: "4",
+      NODE_ENV: "test",
+    },
     log: () => undefined,
     snapshot,
   });
 
   assert.equal(created?.name, configuration.snapshotName);
-  assert.deepEqual(
-    created?.resources,
-    createDaytonaSnapshotDefinition(configuration).resources
-  );
+  assert.deepEqual(created?.resources, { cpu: 2, disk: 10, memory: 4 });
 });

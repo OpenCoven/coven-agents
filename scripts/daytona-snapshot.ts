@@ -14,6 +14,7 @@ export async function runDaytonaSnapshot(
     const configuration = daytonaSnapshotConfiguration(environment);
     const daytona = new Daytona(daytonaClientConfiguration(configuration));
     const snapshot = await provisionDaytonaSnapshot(configuration, {
+      environment,
       log: output.log,
       snapshot: daytona.snapshot,
     });
