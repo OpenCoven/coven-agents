@@ -14,7 +14,7 @@ export const MINUTE_PACK_FLOW_VERSION = "1";
 export const MAX_MINUTE_PACKS = 8;
 export const MAX_MINUTE_PACK_MINUTES = 100_000;
 
-const PACK_ENTRY = /^(price_[A-Za-z0-9]{1,58}):([1-9]\d{0,5})$/u;
+const PACK_ENTRY = /^(price_[A-Za-z0-9]{1,60}):([1-9]\d{0,5})$/u;
 const INVALID_MINUTE_PACKS =
   "MINUTE_PACK_PRICES must be a comma-separated list of price_<id>:<minutes> entries with unique prices and positive whole minutes.";
 
@@ -71,6 +71,9 @@ export function offerableMinutePacksFromEnv(
   try {
     return minutePacksFromEnv(env);
   } catch {
+    // The setting itself is never logged: it is operator configuration, and
+    // the name alone is enough to find it.
+    console.error("MINUTE_PACK_PRICES is malformed; top-ups are hidden.");
     return [];
   }
 }

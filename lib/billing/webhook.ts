@@ -323,14 +323,26 @@ export async function stripeWebhookResponse(
       return Response.json({ ignored: true, reason: result.reason });
     }
     if (result.kind === "credited") {
-      return result.write === "duplicate"
-        ? Response.json({ deduped: true })
-        : result.write === "owner_mismatch"
-          ? Response.json({
-              ignored: true,
-              reason: "minute_pack_owner_mismatch",
-            })
-          : Response.json({ received: true });
+      if (result.write === "duplicate") {
+        return Response.json({ deduped: true });
+      }
+      if (result.write === "owner_mismatch") {
+        /**
+         * The payer is not the account's Stripe Customer. The credit path
+         * leaves the event unclaimed so a corrected redelivery can still be
+         * credited, but Stripe only redelivers what it is asked to, and a 200
+         * here would end the matter with the payment stranded. Record it so a
+         * human sees a paid top-up that no account could receive.
+         */
+        const mismatch = await dependencies.recordManualReconciliation({
+          eventId: event.id,
+          eventType: reconciliationEventType(event.type),
+          reason: "minute_pack_owner_mismatch",
+          status: "pending",
+        });
+        return manualReconciliationResponse(mismatch, dependencies);
+      }
+      return Response.json({ received: true });
     }
     if (result.kind === "manual_reconciliation") {
       const write = await dependencies.recordManualReconciliation({
@@ -424,20 +436,33 @@ async function applyMinutePackEvent(
     !userId ||
     !customerId ||
     !validStripeCheckoutSessionId(session.id) ||
-    !/^price_[A-Za-z0-9]{1,58}$/u.test(priceId)
+    !/^price_[A-Za-z0-9]{1,60}$/u.test(priceId)
   ) {
     return { kind: "ignored", reason: "minute_pack_unrelated" };
   }
   const pack = minutePackForPrice(minutePacks, priceId);
-  if (!pack || String(pack.minutes) !== session.metadata?.minutes) {
+  if (!pack) {
     /**
-     * The customer has paid and this instance cannot say what they bought:
-     * the Price left MINUTE_PACK_PRICES, or its minutes no longer match the
-     * ones Stripe echoed back. Answering 200 would end Stripe's retries and
-     * strand the payment with nothing credited and no record. Ask for a retry
-     * instead, so the credit lands once the configuration agrees again.
+     * The customer has paid and this instance cannot price what they bought,
+     * because the Price is absent from MINUTE_PACK_PRICES. That is usually an
+     * instance whose environment lags a deploy, so it resolves itself: answer
+     * 503 and let Stripe redeliver rather than 200, which would end the
+     * retries and strand the payment with nothing credited.
      */
     return { kind: "retry", reason: "minute_pack_unconfigured" };
+  }
+  if (String(pack.minutes) !== session.metadata?.minutes) {
+    /**
+     * The Price is configured but sells a different number of minutes than
+     * the session recorded, so the customer paid for one thing and the
+     * configuration describes another. Retrying cannot fix it — the session's
+     * metadata is immutable — and only a human can decide which figure is
+     * owed, so this is durable evidence rather than a retry loop.
+     */
+    return {
+      kind: "manual_reconciliation",
+      reason: "minute_pack_minutes_mismatch",
+    };
   }
   const paymentIntent = session.payment_intent;
   const paymentIntentId =
@@ -981,8 +1006,17 @@ function dateFromStripeSeconds(seconds: number): Date | null {
 
 function reconciliationEventType(
   eventType: Stripe.Event["type"]
-): "invoice.paid" | "invoice.payment_failed" {
-  if (eventType === "invoice.paid" || eventType === "invoice.payment_failed") {
+):
+  | "checkout.session.async_payment_succeeded"
+  | "checkout.session.completed"
+  | "invoice.paid"
+  | "invoice.payment_failed" {
+  if (
+    eventType === "checkout.session.async_payment_succeeded" ||
+    eventType === "checkout.session.completed" ||
+    eventType === "invoice.paid" ||
+    eventType === "invoice.payment_failed"
+  ) {
     return eventType;
   }
   throw new Error("Unsupported reconciliation event type.");

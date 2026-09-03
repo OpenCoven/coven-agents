@@ -451,6 +451,22 @@ export async function creditMinutePack(
   try {
     return await db.transaction(async (transaction) => {
       /**
+       * An already-handled event is recognised before anything else. The
+       * ownership check below can start failing after a credit has landed —
+       * a re-subscribe or customer migration changes the id — and without
+       * this probe such a redelivery would report a mismatch instead of a
+       * duplicate, which the webhook would keep asking Stripe to repeat.
+       */
+      const [seen] = await transaction
+        .select({ id: stripeEvent.id })
+        .from(stripeEvent)
+        .where(eq(stripeEvent.id, input.eventId))
+        .limit(1);
+      if (seen) {
+        return "duplicate";
+      }
+
+      /**
        * Ownership is checked before the event is claimed. Claiming first
        * would consume the only key Stripe has for this payment: the mismatch
        * returns normally, so the claim commits, and a redelivery after the

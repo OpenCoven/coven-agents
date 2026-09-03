@@ -87,8 +87,10 @@ test("a malformed pack configuration hides the offer instead of throwing", () =>
 });
 
 test("a price id can never exceed the column that stores it", () => {
-  const longest = `price_${"a".repeat(58)}`;
-  assert.equal(longest.length, 64);
+  const longest = `price_${"a".repeat(60)}`;
+  // MinutePack.priceId is varchar(66); accepting more would fail the insert,
+  // which leaves Stripe retrying an event that can never be written.
+  assert.equal(longest.length, 66);
   assert.deepEqual(
     minutePacksFromEnv({
       MINUTE_PACK_PRICES: `${longest}:100`,
@@ -98,7 +100,7 @@ test("a price id can never exceed the column that stores it", () => {
   );
   assert.throws(() =>
     minutePacksFromEnv({
-      MINUTE_PACK_PRICES: `price_${"a".repeat(59)}:100`,
+      MINUTE_PACK_PRICES: `price_${"a".repeat(61)}:100`,
       NODE_ENV: "test",
     } as NodeJS.ProcessEnv)
   );

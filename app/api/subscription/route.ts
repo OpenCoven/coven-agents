@@ -2,7 +2,7 @@ import { ipAddress } from "@vercel/functions";
 import { enforceAbusePolicy } from "@/lib/abuse/enforce";
 import { verifiedJwtIdentity } from "@/lib/auth/verified-jwt";
 import { subscriptionCheckoutEnabled } from "@/lib/billing/config";
-import { minutePacksFromEnv } from "@/lib/billing/minute-packs";
+import { offerableMinutePacksFromEnv } from "@/lib/billing/minute-packs";
 import {
   type SubscriptionStatusDependencies,
   subscriptionResponse as subscriptionResponseWithDependencies,
@@ -20,7 +20,7 @@ const subscriptionStatusDependencies: SubscriptionStatusDependencies = {
     ),
   enforceAbuse: enforceAbusePolicy,
   findUser: findUserById,
-  minutePacks: () => minutePacksFromEnv(process.env),
+  minutePacks: () => offerableMinutePacksFromEnv(process.env),
   now: () => new Date(),
 };
 
