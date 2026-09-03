@@ -2841,7 +2841,7 @@ function request(input: {
   return value;
 }
 
-const PACK_PRICE_ID = "price_pack_300";
+const PACK_PRICE_ID = "price_pack300";
 
 function minutePackEvent(input: {
   id: string;
