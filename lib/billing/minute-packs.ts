@@ -14,7 +14,7 @@ export const MINUTE_PACK_FLOW_VERSION = "1";
 export const MAX_MINUTE_PACKS = 8;
 export const MAX_MINUTE_PACK_MINUTES = 100_000;
 
-const PACK_ENTRY = /^(price_[A-Za-z0-9]{1,60}):([1-9]\d{0,5})$/u;
+const PACK_ENTRY = /^(price_[A-Za-z0-9]{1,58}):([1-9]\d{0,5})$/u;
 const INVALID_MINUTE_PACKS =
   "MINUTE_PACK_PRICES must be a comma-separated list of price_<id>:<minutes> entries with unique prices and positive whole minutes.";
 
@@ -56,6 +56,23 @@ export function parseMinutePacks(configured: string | undefined): MinutePack[] {
 
 export function minutePacksFromEnv(env: NodeJS.ProcessEnv): MinutePack[] {
   return parseMinutePacks(env.MINUTE_PACK_PRICES);
+}
+
+/**
+ * The packs a page may offer, for callers that render rather than transact.
+ * A malformed setting hides the top-up instead of failing the render: every
+ * transacting caller still uses `minutePacksFromEnv` and turns the throw into
+ * an explicit error, because selling from a configuration nobody can parse is
+ * the one outcome worse than not offering it.
+ */
+export function offerableMinutePacksFromEnv(
+  env: NodeJS.ProcessEnv
+): MinutePack[] {
+  try {
+    return minutePacksFromEnv(env);
+  } catch {
+    return [];
+  }
 }
 
 export function minutePackForPrice(

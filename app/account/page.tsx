@@ -2,7 +2,7 @@ import { connection } from "next/server";
 import { subscriptionPageAuthority } from "@/app/(auth)/auth";
 import { AccountSettings } from "@/components/account/account-settings";
 import { subscriptionCheckoutEnabled } from "@/lib/billing/config";
-import { minutePacksFromEnv } from "@/lib/billing/minute-packs";
+import { offerableMinutePacksFromEnv } from "@/lib/billing/minute-packs";
 
 type AccountPageProps = {
   searchParams: Promise<{
@@ -35,7 +35,7 @@ export default async function AccountPage({ searchParams }: AccountPageProps) {
       })}
       checkoutResult={checkoutResult}
       minutePackResult={minutePackResult}
-      minutePacks={minutePacksFromEnv(process.env)}
+      minutePacks={offerableMinutePacksFromEnv(process.env)}
       subscriptionAuthority={subscriptionAuthority}
     />
   );

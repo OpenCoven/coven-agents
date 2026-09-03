@@ -316,6 +316,9 @@ export async function stripeWebhookResponse(
       dependencies,
       config
     );
+    if (result.kind === "retry") {
+      return retryableWebhookResponse();
+    }
     if (result.kind === "ignored") {
       return Response.json({ ignored: true, reason: result.reason });
     }
@@ -355,6 +358,7 @@ export async function stripeWebhookResponse(
 
 type WebhookEventResult =
   | { kind: "credited"; write: MinutePackCreditResult }
+  | { kind: "retry"; reason: "minute_pack_unconfigured" }
   | {
       kind: "ignored";
       reason:
@@ -362,7 +366,6 @@ type WebhookEventResult =
         | "invoice_no_entitlement"
         | "invoice_unrelated_customer"
         | "invoice_unsupported_billing_reason"
-        | "minute_pack_unconfigured"
         | "minute_pack_unrelated"
         | "unsupported";
     }
@@ -421,13 +424,20 @@ async function applyMinutePackEvent(
     !userId ||
     !customerId ||
     !validStripeCheckoutSessionId(session.id) ||
-    !/^price_[A-Za-z0-9]{1,60}$/u.test(priceId)
+    !/^price_[A-Za-z0-9]{1,58}$/u.test(priceId)
   ) {
     return { kind: "ignored", reason: "minute_pack_unrelated" };
   }
   const pack = minutePackForPrice(minutePacks, priceId);
   if (!pack || String(pack.minutes) !== session.metadata?.minutes) {
-    return { kind: "ignored", reason: "minute_pack_unconfigured" };
+    /**
+     * The customer has paid and this instance cannot say what they bought:
+     * the Price left MINUTE_PACK_PRICES, or its minutes no longer match the
+     * ones Stripe echoed back. Answering 200 would end Stripe's retries and
+     * strand the payment with nothing credited and no record. Ask for a retry
+     * instead, so the credit lands once the configuration agrees again.
+     */
+    return { kind: "retry", reason: "minute_pack_unconfigured" };
   }
   const paymentIntent = session.payment_intent;
   const paymentIntentId =

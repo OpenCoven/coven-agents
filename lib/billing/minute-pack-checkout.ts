@@ -22,7 +22,7 @@ import {
 
 const MAX_BODY_BYTES = 1024;
 const bodySchema = z.object({
-  priceId: z.string().regex(/^price_[A-Za-z0-9]{1,60}$/u),
+  priceId: z.string().regex(/^price_[A-Za-z0-9]{1,58}$/u),
 });
 
 export type MinutePackCheckoutDependencies = {

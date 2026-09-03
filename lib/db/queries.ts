@@ -450,15 +450,14 @@ export async function creditMinutePack(
 ): Promise<MinutePackCreditResult> {
   try {
     return await db.transaction(async (transaction) => {
-      const claimed = await transaction
-        .insert(stripeEvent)
-        .values({ id: input.eventId })
-        .onConflictDoNothing()
-        .returning({ id: stripeEvent.id });
-      if (claimed.length === 0) {
-        return "duplicate";
-      }
-
+      /**
+       * Ownership is checked before the event is claimed. Claiming first
+       * would consume the only key Stripe has for this payment: the mismatch
+       * returns normally, so the claim commits, and a redelivery after the
+       * customer id is repaired reads as a duplicate and credits nothing. The
+       * account can be wrong transiently — a customer id being backfilled or
+       * corrected — so the event must stay redeliverable.
+       */
       const [owner] = await transaction
         .select({ stripeCustomerId: user.stripeCustomerId })
         .from(user)
@@ -467,6 +466,15 @@ export async function creditMinutePack(
         .limit(1);
       if (!owner || owner.stripeCustomerId !== input.customerId) {
         return "owner_mismatch";
+      }
+
+      const claimed = await transaction
+        .insert(stripeEvent)
+        .values({ id: input.eventId })
+        .onConflictDoNothing()
+        .returning({ id: stripeEvent.id });
+      if (claimed.length === 0) {
+        return "duplicate";
       }
 
       const inserted = await transaction

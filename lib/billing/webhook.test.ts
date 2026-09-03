@@ -2909,7 +2909,7 @@ test("a paid top-up credits the configured minutes for its Price exactly once", 
   assert.deepEqual(await replay.json(), { deduped: true });
 });
 
-test("a top-up for an unconfigured Price or mismatched minutes is not credited", async (t) => {
+test("a top-up for an unconfigured Price or mismatched minutes is retried, not dropped", async (t) => {
   for (const [name, metadata] of [
     [
       "unknown price",
@@ -2945,11 +2945,10 @@ test("a top-up for an unconfigured Price or mismatched minutes is not credited",
         }),
         null
       );
-      assert.equal(response.status, 200);
-      assert.deepEqual(await response.json(), {
-        ignored: true,
-        reason: "minute_pack_unconfigured",
-      });
+      // The customer has paid: a 200 would end Stripe's retries and strand
+      // the payment, so this asks to be retried until the config agrees.
+      assert.equal(response.status, 503);
+      assert.deepEqual(await response.json(), { error: "webhook_retry" });
       assert.equal(credited, 0);
     });
   }
