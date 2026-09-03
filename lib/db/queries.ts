@@ -441,24 +441,43 @@ export async function applyStripeEventUpdate(
 }
 
 /**
- * Credits a paid top-up exactly once. The event claim and the unique session
- * index are both idempotency guards: a redelivery with a fresh event id still
- * finds the session already credited.
+ * Credits a paid top-up exactly once. The unique session index is the only
+ * idempotency guard: the event marker records that Stripe was heard, which
+ * any handler may write — evidence about a failure included — so treating it
+ * as proof of payment would strand a top-up that was recorded but never
+ * credited.
  */
 export async function creditMinutePack(
   input: MinutePackCreditInput
 ): Promise<MinutePackCreditResult> {
   try {
     return await db.transaction(async (transaction) => {
-      const claimed = await transaction
-        .insert(stripeEvent)
-        .values({ id: input.eventId })
-        .onConflictDoNothing()
-        .returning({ id: stripeEvent.id });
-      if (claimed.length === 0) {
+      /**
+       * Whether these minutes already landed is asked of the checkout
+       * session, not of the event marker. The marker is written by any
+       * handler that records evidence about an event — a manual
+       * reconciliation row needs one for its foreign key — so treating its
+       * presence as "already credited" would let an evidence write consume a
+       * payment that was never credited. The session is unique per purchase
+       * and is what the credit is keyed on.
+       */
+      const [credited] = await transaction
+        .select({ id: minutePack.id })
+        .from(minutePack)
+        .where(eq(minutePack.stripeCheckoutSessionId, input.sessionId))
+        .limit(1);
+      if (credited) {
         return "duplicate";
       }
 
+      /**
+       * Ownership is checked before the event is claimed. Claiming first
+       * would consume the only key Stripe has for this payment: the mismatch
+       * returns normally, so the claim commits, and a redelivery after the
+       * customer id is repaired reads as a duplicate and credits nothing. The
+       * account can be wrong transiently — a customer id being backfilled or
+       * corrected — so the event must stay redeliverable.
+       */
       const [owner] = await transaction
         .select({ stripeCustomerId: user.stripeCustomerId })
         .from(user)
@@ -468,6 +487,13 @@ export async function creditMinutePack(
       if (!owner || owner.stripeCustomerId !== input.customerId) {
         return "owner_mismatch";
       }
+
+      // Recording that the event was seen is idempotent: an earlier evidence
+      // write may already hold the marker, and that must not stop the credit.
+      await transaction
+        .insert(stripeEvent)
+        .values({ id: input.eventId })
+        .onConflictDoNothing();
 
       const inserted = await transaction
         .insert(minutePack)

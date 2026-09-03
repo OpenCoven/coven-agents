@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   minutePackForPrice,
+  minutePacksFromEnv,
+  offerableMinutePacksFromEnv,
   parseMinutePacks,
   remainingPackMinutes,
 } from "./minute-packs";
@@ -62,5 +64,44 @@ test("remaining pack minutes are purchases less what past periods drew down", ()
   );
   assert.throws(() =>
     remainingPackMinutes({ priorPeriodOverflow: -1, purchased: 300 })
+  );
+});
+
+test("a malformed pack configuration hides the offer instead of throwing", () => {
+  const malformed = {
+    MINUTE_PACK_PRICES: "price_bonus100;100",
+    NODE_ENV: "test",
+  } as NodeJS.ProcessEnv;
+
+  // Transacting callers still see the error and refuse to sell.
+  assert.throws(() => minutePacksFromEnv(malformed));
+  // Rendering callers show no top-up rather than failing the page.
+  assert.deepEqual(offerableMinutePacksFromEnv(malformed), []);
+  assert.deepEqual(
+    offerableMinutePacksFromEnv({
+      MINUTE_PACK_PRICES: "price_bonus100:100",
+      NODE_ENV: "test",
+    } as NodeJS.ProcessEnv),
+    [{ minutes: 100, priceId: "price_bonus100" }]
+  );
+});
+
+test("a price id can never exceed the column that stores it", () => {
+  const longest = `price_${"a".repeat(60)}`;
+  // MinutePack.priceId is varchar(66); accepting more would fail the insert,
+  // which leaves Stripe retrying an event that can never be written.
+  assert.equal(longest.length, 66);
+  assert.deepEqual(
+    minutePacksFromEnv({
+      MINUTE_PACK_PRICES: `${longest}:100`,
+      NODE_ENV: "test",
+    } as NodeJS.ProcessEnv),
+    [{ minutes: 100, priceId: longest }]
+  );
+  assert.throws(() =>
+    minutePacksFromEnv({
+      MINUTE_PACK_PRICES: `price_${"a".repeat(61)}:100`,
+      NODE_ENV: "test",
+    } as NodeJS.ProcessEnv)
   );
 });

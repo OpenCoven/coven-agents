@@ -1,0 +1,6 @@
+ALTER TABLE "StripeReconciliation" DROP CONSTRAINT "StripeReconciliation_eventType_check";--> statement-breakpoint
+ALTER TABLE "StripeReconciliation" DROP CONSTRAINT "StripeReconciliation_reason_check";--> statement-breakpoint
+ALTER TABLE "MinutePack" ALTER COLUMN "priceId" SET DATA TYPE varchar(66);--> statement-breakpoint
+ALTER TABLE "StripeReconciliation" ALTER COLUMN "eventType" SET DATA TYPE varchar(48);--> statement-breakpoint
+ALTER TABLE "StripeReconciliation" ADD CONSTRAINT "StripeReconciliation_eventType_check" CHECK ("StripeReconciliation"."eventType" in ('checkout.session.async_payment_succeeded', 'checkout.session.completed', 'invoice.paid', 'invoice.payment_failed'));--> statement-breakpoint
+ALTER TABLE "StripeReconciliation" ADD CONSTRAINT "StripeReconciliation_reason_check" CHECK ("StripeReconciliation"."reason" in ('invoice_ambiguous_entitlement', 'invoice_conflicting_paid_interval', 'invoice_contradictory_subscription', 'invoice_invalid_period', 'invoice_invalid_reference', 'minute_pack_minutes_mismatch', 'minute_pack_owner_mismatch', 'minute_pack_unconfigured'));

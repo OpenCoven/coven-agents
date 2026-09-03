@@ -1,4 +1,6 @@
 export const STRIPE_RECONCILIATION_EVENT_TYPES = [
+  "checkout.session.async_payment_succeeded",
+  "checkout.session.completed",
   "invoice.paid",
   "invoice.payment_failed",
 ] as const;
@@ -9,6 +11,9 @@ export const STRIPE_RECONCILIATION_REASONS = [
   "invoice_contradictory_subscription",
   "invoice_invalid_period",
   "invoice_invalid_reference",
+  "minute_pack_minutes_mismatch",
+  "minute_pack_owner_mismatch",
+  "minute_pack_unconfigured",
 ] as const;
 
 export const STRIPE_RECONCILIATION_STATUSES = [

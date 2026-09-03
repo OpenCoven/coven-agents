@@ -58,6 +58,26 @@ export function minutePacksFromEnv(env: NodeJS.ProcessEnv): MinutePack[] {
   return parseMinutePacks(env.MINUTE_PACK_PRICES);
 }
 
+/**
+ * The packs a page may offer, for callers that render rather than transact.
+ * A malformed setting hides the top-up instead of failing the render: every
+ * transacting caller still uses `minutePacksFromEnv` and turns the throw into
+ * an explicit error, because selling from a configuration nobody can parse is
+ * the one outcome worse than not offering it.
+ */
+export function offerableMinutePacksFromEnv(
+  env: NodeJS.ProcessEnv
+): MinutePack[] {
+  try {
+    return minutePacksFromEnv(env);
+  } catch {
+    // The setting itself is never logged: it is operator configuration, and
+    // the name alone is enough to find it.
+    console.error("MINUTE_PACK_PRICES is malformed; top-ups are hidden.");
+    return [];
+  }
+}
+
 export function minutePackForPrice(
   packs: readonly MinutePack[],
   priceId: string

@@ -3,6 +3,7 @@ import test from "node:test";
 import type Stripe from "stripe";
 import type { CheckoutAttemptState } from "./checkout-lease";
 import { GRACE_PERIOD_DAYS } from "./limits";
+import type { StripeReconciliationRecord } from "./stripe-reconciliation";
 import {
   type MinutePackCreditInput,
   type MinutePackCreditResult,
@@ -2740,6 +2741,7 @@ function onlyInvoiceWrite(
 }
 
 type WebhookDependencies = {
+  now?: () => Date;
   applyEventUpdate: (
     input: StripeEventUpdateInput
   ) => Promise<StripeEventWriteResult>;
@@ -2909,7 +2911,7 @@ test("a paid top-up credits the configured minutes for its Price exactly once", 
   assert.deepEqual(await replay.json(), { deduped: true });
 });
 
-test("a top-up for an unconfigured Price or mismatched minutes is not credited", async (t) => {
+test("a top-up for an unconfigured Price is retried, not dropped", async (t) => {
   for (const [name, metadata] of [
     [
       "unknown price",
@@ -2918,16 +2920,6 @@ test("a top-up for an unconfigured Price or mismatched minutes is not credited",
         minutePackFlowVersion: "1",
         minutes: "300",
         priceId: "price_other",
-        userId: USER_ID,
-      },
-    ],
-    [
-      "minutes drifted",
-      {
-        kind: "minute_pack",
-        minutePackFlowVersion: "1",
-        minutes: "3000",
-        priceId: PACK_PRICE_ID,
         userId: USER_ID,
       },
     ],
@@ -2945,11 +2937,10 @@ test("a top-up for an unconfigured Price or mismatched minutes is not credited",
         }),
         null
       );
-      assert.equal(response.status, 200);
-      assert.deepEqual(await response.json(), {
-        ignored: true,
-        reason: "minute_pack_unconfigured",
-      });
+      // The customer has paid: a 200 would end Stripe's retries and strand
+      // the payment, so this asks to be retried until the config agrees.
+      assert.equal(response.status, 503);
+      assert.deepEqual(await response.json(), { error: "webhook_retry" });
       assert.equal(credited, 0);
     });
   }
@@ -3010,18 +3001,30 @@ test("a top-up needs every app-owned marker and a paid status", async (t) => {
   }
 });
 
-test("a top-up whose payer is not the account's Customer is claimed but not credited", async () => {
+test("a top-up whose payer is not the account's Customer is recorded, not claimed", async () => {
+  const recorded: StripeReconciliationRecord[] = [];
   const response = await webhookResponse(
     request({ signature: "valid" }),
     dependenciesFor(minutePackEvent({ id: "evt_pack_owner" }), {
       creditMinutePack: () => Promise.resolve("owner_mismatch"),
+      recordManualReconciliation: (record) => {
+        recorded.push(record);
+        return Promise.resolve({ kind: "manual_reconciliation", record });
+      },
     }),
     null
   );
-  assert.deepEqual(await response.json(), {
-    ignored: true,
-    reason: "minute_pack_owner_mismatch",
-  });
+
+  // A paid top-up no account can receive has to leave a trace a human finds.
+  assert.equal(response.status, 200);
+  assert.deepEqual(recorded, [
+    {
+      eventId: "evt_pack_owner",
+      eventType: "checkout.session.completed",
+      reason: "minute_pack_owner_mismatch",
+      status: "pending",
+    },
+  ]);
 });
 
 function dependenciesFor(
@@ -3438,3 +3441,112 @@ class MemoryStripeEventWriter {
     return "applied";
   }
 }
+
+test("a top-up whose minutes no longer match the configured pack is recorded once the deploy window passes", async () => {
+  const recorded: StripeReconciliationRecord[] = [];
+  let credited = 0;
+  const drifted = minutePackEvent({
+    id: "evt_pack_drift",
+    metadata: {
+      kind: "minute_pack",
+      minutePackFlowVersion: "1",
+      minutes: "3000",
+      priceId: PACK_PRICE_ID,
+      userId: USER_ID,
+    },
+  });
+
+  // A rolling deploy can leave an old instance disagreeing with a session a
+  // new one created, so a young mismatch is retried rather than recorded.
+  const young = await webhookResponse(
+    request({ signature: "valid" }),
+    dependenciesFor(drifted, {
+      now: () => new Date((drifted.created + 60) * 1000),
+    }),
+    null
+  );
+  assert.equal(young.status, 503);
+
+  const response = await webhookResponse(
+    request({ signature: "valid" }),
+    dependenciesFor(
+      minutePackEvent({
+        id: "evt_pack_drift",
+        metadata: {
+          kind: "minute_pack",
+          minutePackFlowVersion: "1",
+          minutes: "3000",
+          priceId: PACK_PRICE_ID,
+          userId: USER_ID,
+        },
+      }),
+      {
+        creditMinutePack: () => {
+          credited += 1;
+          return Promise.resolve("applied");
+        },
+        now: () => new Date((drifted.created + 7200) * 1000),
+        recordManualReconciliation: (record) => {
+          recorded.push(record);
+          return Promise.resolve({ kind: "manual_reconciliation", record });
+        },
+      }
+    ),
+    null
+  );
+
+  // Two hours on it is a real disagreement, and only a human can say which
+  // figure is owed, so it must not keep retrying.
+  assert.equal(response.status, 200);
+  assert.equal(credited, 0);
+  assert.deepEqual(recorded, [
+    {
+      eventId: "evt_pack_drift",
+      eventType: "checkout.session.completed",
+      reason: "minute_pack_minutes_mismatch",
+      status: "pending",
+    },
+  ]);
+});
+
+test("an unpriceable top-up stops being retried once it can no longer be a deploy lag", async () => {
+  const stale = minutePackEvent({
+    id: "evt_pack_stale",
+    metadata: {
+      kind: "minute_pack",
+      minutePackFlowVersion: "1",
+      minutes: "300",
+      priceId: "price_other",
+      userId: USER_ID,
+    },
+  });
+  const recorded: StripeReconciliationRecord[] = [];
+  const response = await webhookResponse(
+    request({ signature: "valid" }),
+    dependenciesFor(stale, {
+      now: () => new Date((stale.created + 7200) * 1000),
+      recordManualReconciliation: (record) => {
+        recorded.push(record);
+        return Promise.resolve({ kind: "manual_reconciliation", record });
+      },
+    }),
+    null
+  );
+
+  // Two hours on, no deploy is still catching up: retrying to the end of
+  // Stripe's schedule would strand the payment and risk the endpoint.
+  assert.equal(response.status, 200);
+  assert.deepEqual(
+    recorded.map((record) => record.reason),
+    ["minute_pack_unconfigured"]
+  );
+
+  const fresh = await webhookResponse(
+    request({ signature: "valid" }),
+    dependenciesFor(stale, {
+      now: () => new Date((stale.created + 60) * 1000),
+    }),
+    null
+  );
+  assert.equal(fresh.status, 503);
+});

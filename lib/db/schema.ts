@@ -394,7 +394,8 @@ export const minutePack = pgTable(
   {
     id: uuid("id").primaryKey().notNull().defaultRandom(),
     minutes: integer("minutes").notNull(),
-    priceId: varchar("priceId", { length: 64 }).notNull(),
+    // "price_" plus the 60 characters every validator accepts.
+    priceId: varchar("priceId", { length: 66 }).notNull(),
     purchasedAt: timestamp("purchasedAt").notNull().defaultNow(),
     stripeCheckoutSessionId: varchar("stripeCheckoutSessionId", {
       length: 128,
@@ -483,7 +484,8 @@ export const stripeReconciliation = pgTable(
       .references(() => stripeEvent.id, { onDelete: "restrict" }),
     eventType: varchar("eventType", {
       enum: STRIPE_RECONCILIATION_EVENT_TYPES,
-      length: 32,
+      // "checkout.session.async_payment_succeeded" is 40 characters.
+      length: 48,
     }).notNull(),
     reason: varchar("reason", {
       enum: STRIPE_RECONCILIATION_REASONS,
@@ -499,11 +501,11 @@ export const stripeReconciliation = pgTable(
   (table) => [
     check(
       "StripeReconciliation_eventType_check",
-      sql`${table.eventType} in ('invoice.paid', 'invoice.payment_failed')`
+      sql`${table.eventType} in ('checkout.session.async_payment_succeeded', 'checkout.session.completed', 'invoice.paid', 'invoice.payment_failed')`
     ),
     check(
       "StripeReconciliation_reason_check",
-      sql`${table.reason} in ('invoice_ambiguous_entitlement', 'invoice_conflicting_paid_interval', 'invoice_contradictory_subscription', 'invoice_invalid_period', 'invoice_invalid_reference')`
+      sql`${table.reason} in ('invoice_ambiguous_entitlement', 'invoice_conflicting_paid_interval', 'invoice_contradictory_subscription', 'invoice_invalid_period', 'invoice_invalid_reference', 'minute_pack_minutes_mismatch', 'minute_pack_owner_mismatch', 'minute_pack_unconfigured')`
     ),
     check(
       "StripeReconciliation_status_check",

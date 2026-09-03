@@ -132,6 +132,8 @@ export type StripeWebhookConfig = {
 };
 
 export type StripeWebhookDependencies = {
+  /** Injectable so a retry window can be exercised without waiting for it. */
+  now?: () => Date;
   applyEventUpdate: (
     input: StripeEventUpdateInput
   ) => Promise<StripeEventWriteResult>;
@@ -316,18 +318,33 @@ export async function stripeWebhookResponse(
       dependencies,
       config
     );
+    if (result.kind === "retry") {
+      return retryableWebhookResponse();
+    }
     if (result.kind === "ignored") {
       return Response.json({ ignored: true, reason: result.reason });
     }
     if (result.kind === "credited") {
-      return result.write === "duplicate"
-        ? Response.json({ deduped: true })
-        : result.write === "owner_mismatch"
-          ? Response.json({
-              ignored: true,
-              reason: "minute_pack_owner_mismatch",
-            })
-          : Response.json({ received: true });
+      if (result.write === "duplicate") {
+        return Response.json({ deduped: true });
+      }
+      if (result.write === "owner_mismatch") {
+        /**
+         * The payer is not the account's Stripe Customer. The credit path
+         * leaves the event unclaimed so a corrected redelivery can still be
+         * credited, but Stripe only redelivers what it is asked to, and a 200
+         * here would end the matter with the payment stranded. Record it so a
+         * human sees a paid top-up that no account could receive.
+         */
+        const mismatch = await dependencies.recordManualReconciliation({
+          eventId: event.id,
+          eventType: reconciliationEventType(event.type),
+          reason: "minute_pack_owner_mismatch",
+          status: "pending",
+        });
+        return manualReconciliationResponse(mismatch, dependencies);
+      }
+      return Response.json({ received: true });
     }
     if (result.kind === "manual_reconciliation") {
       const write = await dependencies.recordManualReconciliation({
@@ -355,6 +372,7 @@ export async function stripeWebhookResponse(
 
 type WebhookEventResult =
   | { kind: "credited"; write: MinutePackCreditResult }
+  | { kind: "retry"; reason: "minute_pack_unconfigured" }
   | {
       kind: "ignored";
       reason:
@@ -362,7 +380,6 @@ type WebhookEventResult =
         | "invoice_no_entitlement"
         | "invoice_unrelated_customer"
         | "invoice_unsupported_billing_reason"
-        | "minute_pack_unconfigured"
         | "minute_pack_unrelated"
         | "unsupported";
     }
@@ -426,8 +443,40 @@ async function applyMinutePackEvent(
     return { kind: "ignored", reason: "minute_pack_unrelated" };
   }
   const pack = minutePackForPrice(minutePacks, priceId);
-  if (!pack || String(pack.minutes) !== session.metadata?.minutes) {
-    return { kind: "ignored", reason: "minute_pack_unconfigured" };
+  if (!pack) {
+    /**
+     * The customer has paid and this instance cannot price what they bought,
+     * because the Price is absent from MINUTE_PACK_PRICES. An instance whose
+     * environment lags a deploy resolves itself, so a young event is worth
+     * redelivering rather than answering 200 and stranding the payment. A
+     * Price retired while a checkout was in flight never resolves, and
+     * retrying it for Stripe's whole schedule would end in the same silent
+     * loss while risking the endpoint being disabled, so an event that has
+     * stayed unpriceable becomes evidence instead.
+     */
+    return unconfiguredPackIsStillYoung(event, dependencies)
+      ? { kind: "retry", reason: "minute_pack_unconfigured" }
+      : {
+          kind: "manual_reconciliation",
+          reason: "minute_pack_unconfigured",
+        };
+  }
+  if (String(pack.minutes) !== session.metadata?.minutes) {
+    /**
+     * The Price is configured but sells a different number of minutes than
+     * the session recorded. The session's metadata is immutable, but the
+     * configuration is not: a rolling deploy that changes a pack's minutes
+     * leaves old instances disagreeing with sessions the new ones created,
+     * and that resolves itself. Only a disagreement that outlives the deploy
+     * window is a real one, and then only a human can decide which figure is
+     * owed.
+     */
+    return unconfiguredPackIsStillYoung(event, dependencies)
+      ? { kind: "retry", reason: "minute_pack_unconfigured" }
+      : {
+          kind: "manual_reconciliation",
+          reason: "minute_pack_minutes_mismatch",
+        };
   }
   const paymentIntent = session.payment_intent;
   const paymentIntentId =
@@ -449,6 +498,22 @@ async function applyMinutePackEvent(
       userId,
     }),
   };
+}
+
+/**
+ * How long a top-up whose Price is missing keeps being retried before it is
+ * recorded instead. A configuration deploy reaches every instance in minutes;
+ * an hour is generous for that and short enough that the payment is surfaced
+ * long before Stripe stops trying.
+ */
+const UNCONFIGURED_PACK_RETRY_WINDOW_SECONDS = 3600;
+
+function unconfiguredPackIsStillYoung(
+  event: Stripe.Event,
+  dependencies: StripeWebhookDependencies
+): boolean {
+  const now = Math.floor((dependencies.now?.() ?? new Date()).getTime() / 1000);
+  return now - event.created < UNCONFIGURED_PACK_RETRY_WINDOW_SECONDS;
 }
 
 function validStripeCheckoutSessionId(value: unknown): value is string {
@@ -971,8 +1036,17 @@ function dateFromStripeSeconds(seconds: number): Date | null {
 
 function reconciliationEventType(
   eventType: Stripe.Event["type"]
-): "invoice.paid" | "invoice.payment_failed" {
-  if (eventType === "invoice.paid" || eventType === "invoice.payment_failed") {
+):
+  | "checkout.session.async_payment_succeeded"
+  | "checkout.session.completed"
+  | "invoice.paid"
+  | "invoice.payment_failed" {
+  if (
+    eventType === "checkout.session.async_payment_succeeded" ||
+    eventType === "checkout.session.completed" ||
+    eventType === "invoice.paid" ||
+    eventType === "invoice.payment_failed"
+  ) {
     return eventType;
   }
   throw new Error("Unsupported reconciliation event type.");
