@@ -70,7 +70,9 @@ remains in PostgreSQL.
     always requests bounded auto-stop and auto-archive values. CPU, memory,
     and disk come from the immutable pinned snapshot instead, because Daytona
     refuses a sandbox create that names them, so the declared policy governs a
-    sandbox only once a snapshot is built from it. Public previews are false;
+    sandbox only once a snapshot is built from it. The pinned snapshot declares
+    none today, so those three are the provider's defaults and unbounded by
+    this invariant until such a snapshot exists. Public previews are false;
     volumes, linked/forked sandboxes, and
     warm pools are not configured. TTL is explicitly disabled and automatic
     deletion remains disabled so valid persistent work cannot disappear

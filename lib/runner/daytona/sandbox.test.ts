@@ -38,7 +38,7 @@ const config: DaytonaSandboxConfiguration = {
   autoArchiveInterval: 10_080,
   autoDeleteInterval: -1,
   autoStopInterval: 15,
-  resources: { cpu: 2, disk: 10, memory: 4 },
+  resources: { cpu: 2, disk: 20, memory: 4 },
   snapshotName: "coven-agents-copilot-1",
   target: "us",
   ttlMinutes: 0,
