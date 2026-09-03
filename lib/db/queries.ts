@@ -46,6 +46,8 @@ import type {
 } from "../billing/subscription-override";
 import { countRun, usageFor } from "../billing/usage";
 import {
+  type MinutePackCreditInput,
+  type MinutePackCreditResult,
   type StripeEventUpdateInput,
   type StripeEventWriteResult,
   type StripeManualReconciliationWriteResult,
@@ -65,6 +67,7 @@ import {
   document,
   idempotencyRecord,
   message,
+  minutePack,
   type Suggestion,
   stream,
   stripeEvent,
@@ -431,6 +434,53 @@ export async function applyStripeEventUpdate(
         throw new Error("Stripe webhook owner update failed.");
       }
       return "applied";
+    });
+  } catch (error) {
+    throw new ChatbotError("bad_request:database", { cause: error });
+  }
+}
+
+/**
+ * Credits a paid top-up exactly once. The event claim and the unique session
+ * index are both idempotency guards: a redelivery with a fresh event id still
+ * finds the session already credited.
+ */
+export async function creditMinutePack(
+  input: MinutePackCreditInput
+): Promise<MinutePackCreditResult> {
+  try {
+    return await db.transaction(async (transaction) => {
+      const claimed = await transaction
+        .insert(stripeEvent)
+        .values({ id: input.eventId })
+        .onConflictDoNothing()
+        .returning({ id: stripeEvent.id });
+      if (claimed.length === 0) {
+        return "duplicate";
+      }
+
+      const [owner] = await transaction
+        .select({ stripeCustomerId: user.stripeCustomerId })
+        .from(user)
+        .where(eq(user.id, input.userId))
+        .for("update")
+        .limit(1);
+      if (!owner || owner.stripeCustomerId !== input.customerId) {
+        return "owner_mismatch";
+      }
+
+      const inserted = await transaction
+        .insert(minutePack)
+        .values({
+          minutes: input.minutes,
+          priceId: input.priceId,
+          stripeCheckoutSessionId: input.sessionId,
+          stripePaymentIntentId: input.paymentIntentId,
+          userId: input.userId,
+        })
+        .onConflictDoNothing({ target: minutePack.stripeCheckoutSessionId })
+        .returning({ id: minutePack.id });
+      return inserted.length === 1 ? "applied" : "duplicate";
     });
   } catch (error) {
     throw new ChatbotError("bad_request:database", { cause: error });

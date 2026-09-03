@@ -20,8 +20,9 @@ Stripe before promotion.
 
 There is no application-granted free trial. A failed initial invoice grants no
 authority. Guest replay is the non-paying evaluation path. Metered overage,
-seats, plan changes, add-ons, automatic tax collection, and proration are not
-implemented here.
+seats, plan changes, automatic tax collection, and proration are not
+implemented here. The only add-on is the prepaid minute pack described under
+"Minute packs".
 
 Customer Portal and self-service cancellation are also deferred. An active
 subscriber can see current status and the paid-through boundary, but this
@@ -501,6 +502,43 @@ one-unit charge and are never settled.
 remaining, and reset information from the same reservation accounting used by
 admission. If account period state is absent, remaining allowance is zero. If
 the accounting read fails, the endpoint returns `capacity_unavailable`.
+
+## Minute packs
+
+A minute pack is a one-time Stripe payment that adds minutes to the account.
+Packs are configured in `MINUTE_PACK_PRICES` as `price_<id>:<minutes>`
+entries, parsed and validated by `lib/billing/minute-packs.ts`; the app
+knows only the minutes each Price grants and, as with the plan, never the
+amount. Blank configuration offers no packs. Packs are offered only while
+`SUBSCRIPTION_CHECKOUT_ENABLED=on`.
+
+`POST /api/minute-packs/checkout` accepts `{ "priceId" }` from a signed-in,
+revalidated active subscriber whose account already holds the Stripe Customer
+that subscription Checkout created; a complimentary grant has no Customer and
+receives `customer_required`. It creates a `mode: "payment"` Checkout Session
+for that Customer with app-owned markers (`kind`, `minutePackFlowVersion`,
+`minutes`, `priceId`, `userId`, and `client_reference_id`). It has no attempt
+lease: a duplicate session is harmless because only a paid session credits,
+and it credits once.
+
+The webhook routes `checkout.session.completed` and
+`checkout.session.async_payment_succeeded` sessions carrying the pack marker
+to `applyMinutePackEvent`. It requires a paid status, matching user markers,
+a Customer, and a configured Price whose configured minutes equal the
+session's `minutes` marker; anything else is ignored with a reason and never
+credited. `creditMinutePack` claims the `StripeEvent`, locks the owner, checks
+the paying Customer is the account's Customer (`owner_mismatch` otherwise,
+claimed and reported as ignored), and inserts one `MinutePack` row. The row
+copies the configured minutes and is unique per Checkout Session, so a
+redelivery under a new event id still credits once.
+
+Pack minutes never expire. Admission draws on the monthly bucket first and on
+packs only once the period's bucket is empty: the allowance for a period is
+`MONTHLY_MINUTE_CAP` plus every pack minute ever purchased less the minutes
+earlier periods used beyond their bucket. That remainder is computed from the
+reservation ledger at admission and in `GET /api/usage`, which reports it as
+`packMinutes` and the total as `allowance`. Demo tenants own no account and
+never draw on packs. The tenant daily cap applies unchanged.
 
 ## Failure and recovery
 

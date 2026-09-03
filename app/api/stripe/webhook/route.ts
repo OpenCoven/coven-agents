@@ -1,5 +1,6 @@
 import { ipAddress } from "@vercel/functions";
 import { enforceAbusePolicy } from "@/lib/abuse/enforce";
+import { minutePacksFromEnv } from "@/lib/billing/minute-packs";
 import { createStripeClient } from "@/lib/billing/stripe-client";
 import {
   type StripeWebhookDependencies,
@@ -7,6 +8,7 @@ import {
 } from "@/lib/billing/webhook";
 import {
   applyStripeEventUpdate,
+  creditMinutePack,
   findCheckoutAttemptState,
   findUserByStripeCustomerId,
   recordStripeReconciliation,
@@ -35,6 +37,7 @@ const webhookDependencies: StripeWebhookDependencies = {
       },
     };
   },
+  creditMinutePack,
   enforceAbuse: enforceAbusePolicy,
   findCheckoutAttemptState,
   findUserByStripeCustomerId,
@@ -43,7 +46,12 @@ const webhookDependencies: StripeWebhookDependencies = {
     const priceId = process.env.STRIPE_PRICE_ID?.trim();
     const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET?.trim();
     return apiKey && priceId && webhookSecret
-      ? { apiKey, priceId, webhookSecret }
+      ? {
+          apiKey,
+          minutePacks: minutePacksFromEnv(process.env),
+          priceId,
+          webhookSecret,
+        }
       : null;
   },
   recordManualReconciliation: recordStripeReconciliation,

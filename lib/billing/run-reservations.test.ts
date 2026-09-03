@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { getTableConfig } from "drizzle-orm/pg-core";
 import { runReservation, runUsage } from "@/lib/db/schema";
+import { tenantForUser } from "@/lib/session";
 import { MONTHLY_MINUTE_CAP, RUN_MINUTE_RESERVATION } from "./limits";
 import { periodStart } from "./period";
 import {
@@ -33,6 +34,7 @@ class MemoryReservationDatabase
     runId: string;
     tenant: string;
   }> = [];
+  readonly packs = new Map<string, number>();
   readonly reservations = new Map<string, RunReservationRecord>();
   readonly usage = new Set<string>();
   readonly transactionIsolationLevels: string[] = [];
@@ -63,6 +65,33 @@ class MemoryReservationDatabase
 
   findByRunId(runId: string): Promise<RunReservationRecord | null> {
     return Promise.resolve(this.reservations.get(runId) ?? null);
+  }
+
+  purchasedPackMinutes(userId: string): Promise<number> {
+    return Promise.resolve(this.packs.get(userId) ?? 0);
+  }
+
+  priorPeriodOverflow(input: {
+    cap: number;
+    periodMonth: Date;
+    tenantHash: string;
+  }): Promise<number> {
+    const perPeriod = new Map<number, number>();
+    for (const reservation of this.reservations.values()) {
+      if (
+        reservation.tenantHash === input.tenantHash &&
+        reservation.state === "consumed" &&
+        reservation.periodMonth.getTime() < input.periodMonth.getTime()
+      ) {
+        const key = reservation.periodMonth.getTime();
+        perPeriod.set(key, (perPeriod.get(key) ?? 0) + reservation.costUnits);
+      }
+    }
+    let overflow = 0;
+    for (const units of perPeriod.values()) {
+      overflow += Math.max(0, units - input.cap);
+    }
+    return Promise.resolve(overflow);
   }
 
   hasUsageRunId(runId: string): Promise<boolean> {
@@ -280,6 +309,145 @@ test("the default caps are the monthly minute cap and the tenant daily minute ca
     reason: "tenant_daily_cap",
     used: 0,
   });
+});
+
+const PACK_USER_ID = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
+const PACK_TENANT = tenantForUser(PACK_USER_ID);
+
+async function consumedRun(
+  db: MemoryReservationDatabase,
+  runId: string,
+  overrides: Partial<Parameters<typeof reserveRun>[1]>
+) {
+  const reserved = await reserveRun(
+    db,
+    reservationInput(runId, { tenant: PACK_TENANT, ...overrides })
+  );
+  assert.equal(reserved.kind, "reserved", runId);
+  await consumeRunReservation(db, {
+    consumedAt: overrides.now ?? NOW,
+    runId,
+    tenant: PACK_TENANT,
+  });
+}
+
+test("purchased pack minutes extend the bucket and are reported in usage", async () => {
+  const db = new MemoryReservationDatabase();
+  await consumedRun(db, "bucket-run", {
+    costUnits: 3,
+    tenantDailyCap: 100,
+    tenantMonthlyCap: 3,
+  });
+
+  const refused = await reserveRun(
+    db,
+    reservationInput("over-bucket", {
+      costUnits: 2,
+      tenant: PACK_TENANT,
+      tenantDailyCap: 100,
+      tenantMonthlyCap: 3,
+    })
+  );
+  assert.deepEqual(refused, {
+    cap: 3,
+    kind: "refused",
+    reason: "tenant_monthly_cap",
+    used: 3,
+  });
+
+  db.packs.set(PACK_USER_ID, 5);
+  const admitted = await reserveRun(
+    db,
+    reservationInput("pack-run", {
+      costUnits: 2,
+      tenant: PACK_TENANT,
+      tenantDailyCap: 100,
+      tenantMonthlyCap: 3,
+    })
+  );
+  assert.equal(admitted.kind, "reserved");
+
+  const usage = await reservationUsage(db, {
+    globalDailyCap: 500,
+    keySecret: SECRET,
+    now: NOW,
+    periodStart: PERIOD_START,
+    tenant: PACK_TENANT,
+    tenantDailyCap: 100,
+    tenantMonthlyCap: 3,
+  });
+  assert.equal(usage.tenantPackMinutes, 5);
+  assert.equal(usage.tenantMonthlyRemaining, 3);
+
+  const beyond = await reserveRun(
+    db,
+    reservationInput("beyond-packs", {
+      costUnits: 4,
+      tenant: PACK_TENANT,
+      tenantDailyCap: 100,
+      tenantMonthlyCap: 3,
+    })
+  );
+  assert.deepEqual(beyond, {
+    cap: 8,
+    kind: "refused",
+    reason: "tenant_monthly_cap",
+    used: 5,
+  });
+});
+
+test("pack minutes carry over, less what earlier periods drew beyond their bucket", async () => {
+  const db = new MemoryReservationDatabase();
+  db.packs.set(PACK_USER_ID, 10);
+  const earlier = new Date("2026-07-20T12:00:00.000Z");
+  // Last period used 7 against a bucket of 3: four pack minutes are gone.
+  await consumedRun(db, "july-a", {
+    costUnits: 4,
+    now: new Date("2026-07-25T12:00:00.000Z"),
+    periodStart: earlier,
+    tenantDailyCap: 100,
+    tenantMonthlyCap: 3,
+  });
+  await consumedRun(db, "july-b", {
+    costUnits: 3,
+    now: new Date("2026-07-26T12:00:00.000Z"),
+    periodStart: earlier,
+    tenantDailyCap: 100,
+    tenantMonthlyCap: 3,
+  });
+
+  const usage = await reservationUsage(db, {
+    globalDailyCap: 500,
+    keySecret: SECRET,
+    now: NOW,
+    periodStart: PERIOD_START,
+    tenant: PACK_TENANT,
+    tenantDailyCap: 100,
+    tenantMonthlyCap: 3,
+  });
+  assert.equal(usage.tenantPackMinutes, 6);
+  assert.equal(usage.tenantMonthlyRemaining, 9);
+});
+
+test("a demo tenant never draws on packs", async () => {
+  const db = new MemoryReservationDatabase();
+  db.packs.set(PACK_USER_ID, 100);
+  const refused = await reserveRun(
+    db,
+    reservationInput("demo-run", {
+      costUnits: 2,
+      tenant: "d_6ba7b8109dad11d180b400c04fd430c8",
+      tenantDailyCap: 100,
+      tenantMonthlyCap: 1,
+    })
+  );
+  assert.equal(refused.kind, "refused");
+  assert.equal(
+    refused.kind === "refused" && refused.reason === "tenant_monthly_cap"
+      ? refused.cap
+      : null,
+    1
+  );
 });
 
 test("settlement charges whole minutes, rounded up, within the reservation", () => {
@@ -888,6 +1056,7 @@ test("released reservations do not consume tenant or global capacity", async () 
     globalAdmissionClosed: false,
     tenantDailyRemaining: 1,
     tenantMonthlyRemaining: 1,
+    tenantPackMinutes: 0,
   });
 });
 

@@ -382,6 +382,38 @@ export const runReservation = pgTable(
 export type RunReservation = InferSelectModel<typeof runReservation>;
 
 /**
+ * One paid top-up of minutes.
+ *
+ * The Checkout Session id is unique so a redelivered `checkout.session.completed`
+ * credits once, independently of the `StripeEvent` claim. Minutes are copied
+ * from the pack configuration at credit time, never from Stripe metadata, so a
+ * later change to the configured packs cannot re-price a past purchase.
+ */
+export const minutePack = pgTable(
+  "MinutePack",
+  {
+    id: uuid("id").primaryKey().notNull().defaultRandom(),
+    minutes: integer("minutes").notNull(),
+    priceId: varchar("priceId", { length: 64 }).notNull(),
+    purchasedAt: timestamp("purchasedAt").notNull().defaultNow(),
+    stripeCheckoutSessionId: varchar("stripeCheckoutSessionId", {
+      length: 128,
+    }).notNull(),
+    stripePaymentIntentId: varchar("stripePaymentIntentId", { length: 64 }),
+    userId: uuid("userId")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+  },
+  (table) => [
+    uniqueIndex("MinutePack_session_idx").on(table.stripeCheckoutSessionId),
+    index("MinutePack_user_idx").on(table.userId),
+    check("MinutePack_minutes_positive", sql`${table.minutes} > 0`),
+  ]
+);
+
+export type MinutePack = InferSelectModel<typeof minutePack>;
+
+/**
  * One short-lived, one-use capability to decrypt a credential for one run.
  *
  * Raw tenant and request identifiers are never stored. `runId` is unique so a

@@ -118,9 +118,11 @@ type View =
  */
 export function RunConsole({
   checkoutEnabled,
+  minutePacks = [],
   subscriptionAuthority,
 }: {
   checkoutEnabled: boolean;
+  minutePacks?: readonly { minutes: number; priceId: string }[];
   subscriptionAuthority: SubscriptionAuthority;
 }) {
   const session = useSession();
@@ -1581,6 +1583,7 @@ export function RunConsole({
             checkoutEnabled={checkoutEnabled}
             invalidateSubscriptionAuthority={invalidateAndRefresh}
             isSubscriber={isSubscriber}
+            minutePacks={minutePacks}
             onCredentialsChange={onCredentialsChange}
             operationContext={settingsOperationContext}
             subscribedUntil={subscribedUntil}

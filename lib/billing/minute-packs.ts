@@ -1,0 +1,89 @@
+/**
+ * Prepaid top-up packs: a fixed number of minutes for a one-time Stripe
+ * payment. Packs extend the monthly bucket and never expire — a run drains
+ * the bucket first and packs only once the bucket for the period is empty,
+ * so paid minutes are never lost to a quiet month.
+ *
+ * The repository knows how many minutes each Price grants and nothing about
+ * its amount; Stripe discloses the amount at Checkout, as with the plan.
+ */
+export type MinutePack = Readonly<{ minutes: number; priceId: string }>;
+
+export const MINUTE_PACK_CHECKOUT_KIND = "minute_pack";
+export const MINUTE_PACK_FLOW_VERSION = "1";
+export const MAX_MINUTE_PACKS = 8;
+export const MAX_MINUTE_PACK_MINUTES = 100_000;
+
+const PACK_ENTRY = /^(price_[A-Za-z0-9]{1,60}):([1-9]\d{0,5})$/u;
+const INVALID_MINUTE_PACKS =
+  "MINUTE_PACK_PRICES must be a comma-separated list of price_<id>:<minutes> entries with unique prices and positive whole minutes.";
+
+/**
+ * Parses `MINUTE_PACK_PRICES`, e.g. `price_a:100,price_b:300,price_c:1000`.
+ * Blank means packs are not offered. Anything malformed throws, because a
+ * pack that credits the wrong minutes is a billing error, not a fallback.
+ */
+export function parseMinutePacks(configured: string | undefined): MinutePack[] {
+  const value = configured?.trim() ?? "";
+  if (!value) {
+    return [];
+  }
+  const packs: MinutePack[] = [];
+  const seen = new Set<string>();
+  for (const entry of value.split(",")) {
+    const match = PACK_ENTRY.exec(entry.trim());
+    if (!match) {
+      throw new Error(INVALID_MINUTE_PACKS);
+    }
+    const priceId = match[1] as string;
+    const minutes = Number(match[2]);
+    if (
+      seen.has(priceId) ||
+      !Number.isSafeInteger(minutes) ||
+      minutes <= 0 ||
+      minutes > MAX_MINUTE_PACK_MINUTES
+    ) {
+      throw new Error(INVALID_MINUTE_PACKS);
+    }
+    seen.add(priceId);
+    packs.push({ minutes, priceId });
+  }
+  if (packs.length > MAX_MINUTE_PACKS) {
+    throw new Error(INVALID_MINUTE_PACKS);
+  }
+  return packs.sort((a, b) => a.minutes - b.minutes);
+}
+
+export function minutePacksFromEnv(env: NodeJS.ProcessEnv): MinutePack[] {
+  return parseMinutePacks(env.MINUTE_PACK_PRICES);
+}
+
+export function minutePackForPrice(
+  packs: readonly MinutePack[],
+  priceId: string
+): MinutePack | null {
+  return packs.find((pack) => pack.priceId === priceId) ?? null;
+}
+
+/**
+ * Pack minutes still available to a tenant right now.
+ *
+ * Every minute a past period used beyond its bucket was paid from packs, so
+ * what remains is everything ever purchased less that historical overflow.
+ * The current period's overflow is not subtracted here: admission compares
+ * this period's usage against the bucket plus this remainder directly.
+ */
+export function remainingPackMinutes(input: {
+  priorPeriodOverflow: number;
+  purchased: number;
+}): number {
+  if (
+    !Number.isSafeInteger(input.purchased) ||
+    !Number.isSafeInteger(input.priorPeriodOverflow) ||
+    input.purchased < 0 ||
+    input.priorPeriodOverflow < 0
+  ) {
+    throw new Error("Pack minute totals must be non-negative integers.");
+  }
+  return Math.max(0, input.purchased - input.priorPeriodOverflow);
+}

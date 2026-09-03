@@ -16,7 +16,11 @@ import { DeleteAllChats } from "@/components/account/delete-all-chats";
 import { HarnessCredentials } from "@/components/account/harness-credentials";
 import { UsageMeter } from "@/components/account/usage-meter";
 import { AccountMenu } from "@/components/agents/account-menu";
-import { SubscriptionCard } from "@/components/billing/subscription-card";
+import {
+  type MinutePackOffer,
+  type MinutePackResult,
+  SubscriptionCard,
+} from "@/components/billing/subscription-card";
 import { BrandMark } from "@/components/brand/brand-mark";
 import { useApplicationLoginPath } from "@/hooks/use-application-login-path";
 import { useResponsiveTabOrientation } from "@/hooks/use-responsive-tab-orientation";
@@ -29,6 +33,8 @@ type CheckoutResult = "cancelled" | "success" | null;
 type AccountSettingsProps = {
   checkoutEnabled: boolean;
   checkoutResult?: CheckoutResult;
+  minutePackResult?: MinutePackResult;
+  minutePacks?: readonly MinutePackOffer[];
   subscriptionAuthority: SubscriptionAuthority;
 };
 
@@ -69,6 +75,8 @@ function accountTabId(tab: TabId): string {
 export function AccountSettings({
   checkoutEnabled,
   checkoutResult = null,
+  minutePackResult = null,
+  minutePacks = [],
   subscriptionAuthority,
 }: AccountSettingsProps) {
   const [effectiveCheckoutResult, setEffectiveCheckoutResult] =
@@ -78,6 +86,7 @@ export function AccountSettings({
   );
   const [tab, setTab] = useState<TabId>(() =>
     checkoutResult === "success" ||
+    minutePackResult !== null ||
     (checkoutResult === "cancelled" && checkoutEnabled)
       ? "billing"
       : "copilot"
@@ -386,6 +395,8 @@ export function AccountSettings({
                     checkoutResult={effectiveCheckoutResult}
                     confirmationOwner={confirmationOwner}
                     isSubscriber={isSubscriber}
+                    minutePackResult={minutePackResult}
+                    minutePacks={minutePacks}
                     onCheckoutConfirmed={checkoutConfirmed}
                     onConfirmationOwnerEstablished={establishConfirmationOwner}
                     subscribedUntil={subscribedUntil}

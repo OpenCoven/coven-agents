@@ -267,6 +267,13 @@
       "when": 1788386257611,
       "tag": "0037_minute_reservations",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1788394179733,
+      "tag": "0038_minute_packs",
+      "breakpoints": true
     }
   ]
 }

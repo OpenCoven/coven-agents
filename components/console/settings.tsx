@@ -76,7 +76,13 @@ function settingsTabId(tab: Tab): string {
   return `console-settings-tab-${tab}`;
 }
 
-type Usage = { cap: number; resetsAt: string | null; used: number };
+type Usage = {
+  allowance?: number;
+  cap: number;
+  packMinutes?: number;
+  resetsAt: string | null;
+  used: number;
+};
 
 const inputStyle: React.CSSProperties = {
   background: "var(--bg-sunken)",
@@ -220,6 +226,7 @@ export function Settings({
   checkoutEnabled,
   invalidateSubscriptionAuthority,
   isSubscriber,
+  minutePacks = [],
   onCredentialsChange,
   operationContext,
   subscribedUntil,
@@ -232,6 +239,7 @@ export function Settings({
   checkoutEnabled: boolean;
   invalidateSubscriptionAuthority: () => void;
   isSubscriber: boolean;
+  minutePacks?: readonly { minutes: number; priceId: string }[];
   onCredentialsChange: (harnessIds: readonly string[]) => void;
   operationContext: SessionOperationContext | null;
   subscribedUntil: string | null;
@@ -746,7 +754,10 @@ export function Settings({
       )
     : null;
   const pct = usage
-    ? Math.min(100, Math.round((usage.used / usage.cap) * 100))
+    ? Math.min(
+        100,
+        Math.round((usage.used / (usage.allowance ?? usage.cap)) * 100)
+      )
     : 0;
 
   if (!account) {
@@ -1035,7 +1046,7 @@ export function Settings({
                           ...tabular,
                         }}
                       >
-                        of {usage.cap} minutes
+                        of {usage.allowance ?? usage.cap} minutes
                       </span>
                       {daysToReset === null ? null : (
                         <span style={type_.meta}>
@@ -1053,10 +1064,10 @@ export function Settings({
                     >
                       <div
                         aria-label="Minutes used this month"
-                        aria-valuemax={usage.cap}
+                        aria-valuemax={usage.allowance ?? usage.cap}
                         aria-valuemin={0}
                         aria-valuenow={usage.used}
-                        aria-valuetext={`${usage.used} of ${usage.cap} minutes, ${pct} percent of the monthly cap`}
+                        aria-valuetext={`${usage.used} of ${usage.allowance ?? usage.cap} minutes, ${pct} percent of the monthly cap`}
                         role="progressbar"
                         style={{
                           background: "var(--bg-sunken)",
@@ -1077,7 +1088,14 @@ export function Settings({
                       </div>
                       <span style={{ ...type_.meta, ...tabular }}>
                         {pct}% of the monthly cap ·{" "}
-                        {Math.max(0, usage.cap - usage.used)} minutes left
+                        {Math.max(
+                          0,
+                          (usage.allowance ?? usage.cap) - usage.used
+                        )}{" "}
+                        minutes left
+                        {usage.packMinutes
+                          ? ` · includes ${usage.packMinutes} top-up minutes`
+                          : ""}
                       </span>
                     </div>
 
@@ -1094,11 +1112,16 @@ export function Settings({
                         { label: "Used", value: String(usage.used) },
                         {
                           label: "Remaining",
-                          value: String(Math.max(0, usage.cap - usage.used)),
+                          value: String(
+                            Math.max(
+                              0,
+                              (usage.allowance ?? usage.cap) - usage.used
+                            )
+                          ),
                         },
                         {
-                          label: "Cap",
-                          value: String(usage.cap),
+                          label: usage.packMinutes ? "Allowance" : "Cap",
+                          value: String(usage.allowance ?? usage.cap),
                         },
                       ].map((stat) => (
                         <div
@@ -1139,6 +1162,7 @@ export function Settings({
                 <SubscriptionCard
                   checkoutEnabled={checkoutEnabled}
                   isSubscriber={isSubscriber}
+                  minutePacks={minutePacks}
                   subscribedUntil={subscribedUntil}
                 />
               </div>
