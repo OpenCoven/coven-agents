@@ -996,7 +996,6 @@ test("a provider-not-found stored ID fences a replacement before persisting it",
   assert.deepEqual(createParameters, {
     autoArchiveInterval: config.autoArchiveInterval,
     autoDeleteInterval: -1,
-    autoPauseInterval: 0,
     autoStopInterval: config.autoStopInterval,
     ephemeral: false,
     labels: {
@@ -1007,7 +1006,6 @@ test("a provider-not-found stored ID fences a replacement before persisting it",
     name: daytonaSandboxName(principal.tenant, reserved.id),
     public: false,
     snapshot: config.snapshotName,
-    ttlMinutes: 0,
   });
   assert.equal(
     JSON.stringify(createParameters).includes(principal.tenant),

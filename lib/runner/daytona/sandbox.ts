@@ -239,7 +239,14 @@ function sandboxCreateParameters(
   return {
     autoArchiveInterval: configuration.autoArchiveInterval,
     autoDeleteInterval: configuration.autoDeleteInterval,
-    autoPauseInterval: 0,
+    /**
+     * Pausing is asked for only when it is wanted. Daytona supports it on some
+     * sandbox classes and not others, and sending a zero to say "no pausing"
+     * asks a question of classes that have no answer, where omitting the field
+     * says the same thing without asking. Auto-delete keeps its explicit
+     * negative: that one is the invariant that persistent work is never
+     * removed by the provider, and it has to be stated rather than defaulted.
+     */
     autoStopInterval: configuration.autoStopInterval,
     ...(configuration.domainAllowList
       ? { domainAllowList: configuration.domainAllowList }
@@ -256,7 +263,10 @@ function sandboxCreateParameters(
     name: daytonaSandboxName(agent.tenant, agent.id),
     public: false,
     snapshot: configuration.snapshotName,
-    ttlMinutes: configuration.ttlMinutes,
+    // A zero time-to-live means "no expiry", which is what omitting it means.
+    ...(configuration.ttlMinutes > 0
+      ? { ttlMinutes: configuration.ttlMinutes }
+      : {}),
   };
 }
 
