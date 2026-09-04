@@ -145,6 +145,19 @@ export async function reapWorktrees(
   for (const row of reapable) {
     const label = row.state.branch ?? row.state.path;
 
+    // The guard is repeated here on purpose. Every safety decision lives in
+    // `isReapable`, and the caller filters on it — but this function is
+    // exported and deletes the operator's only copy of unpushed work, so it
+    // refuses an unsafe row itself rather than trusting caller convention.
+    if (!row.verdict.safe) {
+      results.push({
+        detail: `refused: ${row.verdict.reasons.join(", ")}`,
+        kind: "kept",
+        label,
+      });
+      continue;
+    }
+
     try {
       // biome-ignore lint/performance/noAwaitInLoops: sequential by design, see above.
       await deps.removeWorktree(row.state.path);
@@ -178,44 +191,81 @@ export async function reapWorktrees(
   return results;
 }
 
-/** Prints the per-worktree outcome and returns the process exit code. */
-export function reportReap(results: ReapStepResult[]): number {
+/** The operator-visible result of a reap: what to print, and the exit code. */
+export type ReapReport = {
+  readonly code: number;
+  readonly err: readonly string[];
+  readonly out: readonly string[];
+};
+
+/**
+ * Turns per-worktree outcomes into the exact lines the operator sees.
+ *
+ * Split from printing so the reporting contract — which this change exists to
+ * fix — can be asserted directly instead of inferred from an exit code.
+ */
+export function formatReap(results: readonly ReapStepResult[]): ReapReport {
   const worktreesRemoved = results.filter((r) => r.kind !== "kept");
   const branchesLeft = results.filter((r) => r.kind === "branch_left");
   const kept = results.filter((r) => r.kind === "kept");
+  const out: string[] = [];
+  const err: string[] = [];
 
   for (const result of results) {
     if (result.kind === "removed") {
-      console.log(`Removed ${result.label}`);
+      out.push(`Removed ${result.label}`);
     } else if (result.kind === "branch_left") {
-      console.log(
+      out.push(
         `Removed worktree ${result.label}, but its branch remains: ${result.detail}`
       );
     } else {
-      console.error(`Failed to reap ${result.label}: ${result.detail}`);
+      err.push(`Failed to reap ${result.label}: ${result.detail}`);
     }
   }
 
-  console.log(
-    `\nReaped ${worktreesRemoved.length}/${results.length} worktree(s).`
+  const qualifier =
+    branchesLeft.length > 0
+      ? ` (${branchesLeft.length} branch(es) left behind)`
+      : "";
+  out.push(
+    `\nReaped ${worktreesRemoved.length}/${results.length} worktree(s).${qualifier}`
   );
 
   if (branchesLeft.length > 0) {
-    console.error(
-      `\n${branchesLeft.length} branch(es) left behind. Delete when you are sure:`
-    );
+    err.push("\nBranches left behind:");
     for (const result of branchesLeft) {
-      console.error(`  git branch ${result.deleteFlag} ${result.branch}`);
+      // Echoing the command that just failed would be useless. `-d` refuses a
+      // squash-merged branch because it cannot see the ancestry, which is the
+      // common case here, so name the override explicitly as an override.
+      err.push(
+        result.deleteFlag === "-d"
+          ? `  git branch -d ${result.branch} refused. If you are sure the work is elsewhere: git branch -D ${result.branch}`
+          : `  git branch -D ${result.branch} failed: ${result.detail}`
+      );
     }
   }
 
   if (kept.length > 0) {
-    console.error(
-      `${kept.length} failed: ${kept.map((r) => r.label).join(", ")}`
-    );
+    err.push(`${kept.length} failed: ${kept.map((r) => r.label).join(", ")}`);
   }
 
-  return branchesLeft.length > 0 || kept.length > 0 ? 1 : 0;
+  return {
+    code: branchesLeft.length > 0 || kept.length > 0 ? 1 : 0,
+    err,
+    out,
+  };
+}
+
+/** Prints the per-worktree outcome and returns the process exit code. */
+export function reportReap(results: readonly ReapStepResult[]): number {
+  const report = formatReap(results);
+  for (const line of report.out) {
+    console.log(line);
+  }
+  for (const line of report.err) {
+    console.error(line);
+  }
+  return report.code;
 }
 
 async function reap(confirmed: boolean): Promise<number> {

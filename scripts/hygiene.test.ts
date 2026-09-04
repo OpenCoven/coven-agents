@@ -6,11 +6,11 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   describe,
+  formatReap,
   isAtRisk,
   type ReapDependencies,
   type Row,
   reapWorktrees,
-  reportReap,
 } from "./hygiene";
 import { isReapable, type WorktreeState } from "./hygiene-core";
 import { collectState, parseWorktreeList } from "./hygiene-git";
@@ -273,18 +273,30 @@ test("a commit made after the merge is protected, not reaped", async () => {
  * first. That makes a half-applied removal reachable, and these tests pin what
  * the operator is told when it happens.
  */
+/**
+ * A reapable worktree whose branch is on origin but NOT preserved on main, so
+ * `branchDeleteFlag` returns `-d`.
+ *
+ * The sha fields are supplied rather than cast away. An earlier version of
+ * this helper used `as WorktreeState` and omitted them; `undefined` then made
+ * `isPreservedOnMain` true through `undefined !== null` and
+ * `undefined === undefined`, silently forcing every fixture onto the
+ * destructive `-D` path via a state `collectState` can never produce.
+ */
 function row(overrides: Partial<WorktreeState> = {}): Row {
   const state: WorktreeState = {
     branch: "fix/example",
     dirtyCount: 0,
     existsOnOrigin: true,
+    headSha: "1111111111111111111111111111111111111111",
     isLocked: false,
     isPrimary: false,
+    mergedHeadSha: null,
     mergedIntoMain: true,
     path: "/tmp/wt/example",
     unpushedCommits: 0,
     ...overrides,
-  } as WorktreeState;
+  };
 
   return { state, verdict: isReapable(state) };
 }
@@ -324,8 +336,8 @@ test("a worktree whose branch delete fails still counts as removed", async () =>
   assert.equal(results.length, 1);
   assert.equal(results[0]?.kind, "branch_left");
   assert.equal(
-    reportReap(results) === 0,
-    false,
+    formatReap(results).code,
+    1,
     "a branch left behind must not report clean success"
   );
 });
@@ -375,13 +387,117 @@ test("the reaped count matches the worktrees actually gone from disk", async () 
   assert.equal(gone, 3);
 });
 
-test("a detached worktree is removed without a branch delete", async () => {
+test("an unsafe row is refused even when the caller passes it in", async () => {
+  // reapWorktrees is exported and deletes the only copy of unpushed work, so
+  // it must not rely on the caller having filtered on verdict.safe. A detached
+  // worktree is never reapable, and a secondary worktree on a protected branch
+  // is the case that would actually destroy something.
   const deps = recordingDeps();
-  const results = await reapWorktrees(
-    [row({ branch: null, mergedIntoMain: true, path: "/tmp/wt/detached" })],
-    deps
-  );
+  const unsafe = [
+    row({ branch: null, path: "/tmp/wt/detached" }),
+    row({ branch: "main", path: "/tmp/wt/on-main" }),
+    row({ dirtyCount: 3, path: "/tmp/wt/dirty" }),
+    row({ isPrimary: true, path: "/tmp/wt/primary" }),
+  ];
+  for (const candidate of unsafe) {
+    assert.equal(
+      candidate.verdict.safe,
+      false,
+      `fixture ${candidate.state.path} must be unsafe for this test to mean anything`
+    );
+  }
 
-  assert.deepEqual(deps.calls, ["worktree:/tmp/wt/detached"]);
-  assert.equal(results[0]?.kind, "removed");
+  const results = await reapWorktrees(unsafe, deps);
+
+  assert.deepEqual(deps.calls, [], "no git command may run for an unsafe row");
+  assert.deepEqual(
+    results.map((r) => r.kind),
+    ["kept", "kept", "kept", "kept"]
+  );
+});
+
+test("the delete flag the predicate chose is the flag git is given", async () => {
+  // Hardcoding "-D" here would discard git's ancestry backstop, and nothing
+  // else in this file would notice.
+  const deps = recordingDeps();
+  await reapWorktrees([row({ branch: "fix/not-preserved" })], deps);
+  assert.deepEqual(deps.calls, [
+    "worktree:/tmp/wt/example",
+    "branch:-d:fix/not-preserved",
+  ]);
+
+  const preserved = recordingDeps();
+  const sha = "2222222222222222222222222222222222222222";
+  await reapWorktrees(
+    [
+      row({
+        branch: "fix/preserved",
+        existsOnOrigin: false,
+        headSha: sha,
+        mergedHeadSha: sha,
+      }),
+    ],
+    preserved
+  );
+  assert.deepEqual(preserved.calls, [
+    "worktree:/tmp/wt/example",
+    "branch:-D:fix/preserved",
+  ]);
+});
+
+test("a clean reap reports every worktree removed and exits zero", async () => {
+  const results = await reapWorktrees(
+    [
+      row({ branch: "fix/a", path: "/tmp/wt/a" }),
+      row({ branch: "fix/b", path: "/tmp/wt/b" }),
+    ],
+    recordingDeps()
+  );
+  const report = formatReap(results);
+
+  assert.equal(report.code, 0);
+  assert.deepEqual(report.err, []);
+  assert.equal(
+    report.out.at(-1),
+    "\nReaped 2/2 worktree(s).",
+    "a clean run must not carry a qualifier"
+  );
+});
+
+test("the summary line counts a worktree whose branch survived", async () => {
+  // This is the regression the change exists to fix: the summary must count
+  // what is gone from disk, not what completed both steps.
+  const results = await reapWorktrees(
+    [
+      row({ branch: "fix/a", path: "/tmp/wt/a" }),
+      row({ branch: "fix/b", path: "/tmp/wt/b" }),
+    ],
+    recordingDeps({ branch: "fix/b" })
+  );
+  const report = formatReap(results);
+
+  assert.equal(
+    report.out.at(-1),
+    "\nReaped 2/2 worktree(s). (1 branch(es) left behind)"
+  );
+  assert.equal(report.code, 1);
+  assert.ok(
+    report.out.some((line) =>
+      line.startsWith("Removed worktree fix/b, but its branch remains:")
+    ),
+    "the operator must be told the worktree went even though the branch stayed"
+  );
+});
+
+test("a refused -d is reported as an override, not as the command that just failed", async () => {
+  const results = await reapWorktrees(
+    [row({ branch: "fix/squashed" })],
+    recordingDeps({ branch: "fix/squashed" })
+  );
+  const advice = formatReap(results).err.join("\n");
+
+  assert.ok(
+    advice.includes("git branch -D fix/squashed"),
+    `expected the -D override to be named, got: ${advice}`
+  );
 });
