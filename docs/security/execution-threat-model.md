@@ -142,8 +142,13 @@ not an eligibility upgrade.
 
 ### B6. Resource policy, inventory, and offboarding
 
-Sandbox creation requests server-owned CPU, memory, disk, auto-stop, and
-auto-archive values rather than accepting provider defaults. Public previews
+Sandbox creation requests server-owned auto-stop and auto-archive values
+rather than accepting provider defaults. CPU, memory, and disk are not named on
+the create, because Daytona refuses a create that names them; a sandbox takes
+them from the snapshot it was built from, and the pinned snapshot declares
+none, so sandboxes currently run on provider defaults and no upper bound on
+those three is enforced anywhere. Restoring one requires a snapshot built with
+a policy the provider accepts. Public previews
 are false; no volume, linked/forked sandbox, or warm-pool setting is used. TTL
 is explicitly disabled and automatic deletion is disabled because each agent's
 persistent workspace is deleted only by an existing database-fenced lifecycle

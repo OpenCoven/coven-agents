@@ -1006,7 +1006,6 @@ test("a provider-not-found stored ID fences a replacement before persisting it",
     language: "python",
     name: daytonaSandboxName(principal.tenant, reserved.id),
     public: false,
-    resources: config.resources,
     snapshot: config.snapshotName,
     ttlMinutes: 0,
   });
