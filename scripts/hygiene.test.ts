@@ -4,8 +4,15 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { describe, isAtRisk } from "./hygiene";
-import { isReapable } from "./hygiene-core";
+import {
+  describe,
+  isAtRisk,
+  type ReapDependencies,
+  type Row,
+  reapWorktrees,
+  reportReap,
+} from "./hygiene";
+import { isReapable, type WorktreeState } from "./hygiene-core";
 import { collectState, parseWorktreeList } from "./hygiene-git";
 
 function sh(args: string[], cwd: string): void {
@@ -258,4 +265,123 @@ test("a commit made after the merge is protected, not reaped", async () => {
   } finally {
     rmSync(root, { force: true, recursive: true });
   }
+});
+
+/**
+ * Reap applies two git operations per worktree and the order is forced: git
+ * refuses to delete a branch that is still checked out, so the worktree goes
+ * first. That makes a half-applied removal reachable, and these tests pin what
+ * the operator is told when it happens.
+ */
+function row(overrides: Partial<WorktreeState> = {}): Row {
+  const state: WorktreeState = {
+    branch: "fix/example",
+    dirtyCount: 0,
+    existsOnOrigin: true,
+    isLocked: false,
+    isPrimary: false,
+    mergedIntoMain: true,
+    path: "/tmp/wt/example",
+    unpushedCommits: 0,
+    ...overrides,
+  } as WorktreeState;
+
+  return { state, verdict: isReapable(state) };
+}
+
+function recordingDeps(
+  fail: { worktree?: string; branch?: string } = {}
+): ReapDependencies & { calls: string[] } {
+  const calls: string[] = [];
+  return {
+    calls,
+    deleteBranch: (flag, branch) => {
+      calls.push(`branch:${flag}:${branch}`);
+      return fail.branch === branch
+        ? Promise.reject(new Error("not fully merged"))
+        : Promise.resolve();
+    },
+    removeWorktree: (path) => {
+      calls.push(`worktree:${path}`);
+      return fail.worktree === path
+        ? Promise.reject(new Error("worktree is dirty"))
+        : Promise.resolve();
+    },
+  };
+}
+
+test("a worktree whose branch delete fails still counts as removed", async () => {
+  // The bug: the success line was logged only after BOTH git calls, so a
+  // failed branch delete reported the whole worktree as not reaped even though
+  // its directory was already gone. The count then understated what changed on
+  // disk, which is the opposite of the direction a cleanup tool may err in.
+  const target = row({ branch: "fix/keeps-branch" });
+  const results = await reapWorktrees(
+    [target],
+    recordingDeps({ branch: "fix/keeps-branch" })
+  );
+
+  assert.equal(results.length, 1);
+  assert.equal(results[0]?.kind, "branch_left");
+  assert.equal(
+    reportReap(results) === 0,
+    false,
+    "a branch left behind must not report clean success"
+  );
+});
+
+test("a failed worktree removal never attempts the branch delete", async () => {
+  const target = row({ path: "/tmp/wt/stuck" });
+  const deps = recordingDeps({ worktree: "/tmp/wt/stuck" });
+  const results = await reapWorktrees([target], deps);
+
+  assert.equal(results[0]?.kind, "kept");
+  assert.deepEqual(
+    deps.calls,
+    ["worktree:/tmp/wt/stuck"],
+    "deleting the branch of a worktree that still exists would strand it"
+  );
+});
+
+test("one failure does not abandon the remaining worktrees", async () => {
+  const results = await reapWorktrees(
+    [
+      row({ branch: "fix/a", path: "/tmp/wt/a" }),
+      row({ branch: "fix/b", path: "/tmp/wt/b" }),
+      row({ branch: "fix/c", path: "/tmp/wt/c" }),
+    ],
+    recordingDeps({ worktree: "/tmp/wt/b" })
+  );
+
+  assert.deepEqual(
+    results.map((r) => r.kind),
+    ["removed", "kept", "removed"]
+  );
+});
+
+test("the reaped count matches the worktrees actually gone from disk", async () => {
+  const results = await reapWorktrees(
+    [
+      row({ branch: "fix/a", path: "/tmp/wt/a" }),
+      row({ branch: "fix/b", path: "/tmp/wt/b" }),
+      row({ branch: "fix/c", path: "/tmp/wt/c" }),
+    ],
+    recordingDeps({ branch: "fix/b" })
+  );
+
+  // b's directory is gone even though its branch survived, so two of three is
+  // wrong: three worktrees were removed.
+  const gone = results.filter((r) => r.kind !== "kept").length;
+  assert.equal(gone, 3);
+});
+
+test("a detached worktree is removed without a branch delete", async () => {
+  const deps = recordingDeps();
+  const results = await reapWorktrees(
+    [row({ branch: null, mergedIntoMain: true, path: "/tmp/wt/detached" })],
+    deps
+  );
+
+  assert.deepEqual(deps.calls, ["worktree:/tmp/wt/detached"]);
+  assert.equal(results[0]?.kind, "removed");
 });

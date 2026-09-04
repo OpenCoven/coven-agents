@@ -95,6 +95,129 @@ async function status(): Promise<number> {
 
 const runCmd = promisify(execFile);
 
+/**
+ * What happened to one worktree during a reap.
+ *
+ * `removed` and `branch_left` both mean the worktree directory is gone; they
+ * differ only in whether the branch went with it. `kept` means nothing was
+ * deleted. Reporting has to tell these apart: the old code logged a single
+ * success line after both git calls, so a failed branch delete was reported as
+ * a total failure even though the worktree had already been removed.
+ */
+export type ReapStepResult =
+  | { readonly kind: "removed"; readonly label: string }
+  | {
+      readonly kind: "branch_left";
+      readonly label: string;
+      readonly branch: string;
+      readonly deleteFlag: "-d" | "-D";
+      readonly detail: string;
+    }
+  | { readonly kind: "kept"; readonly label: string; readonly detail: string };
+
+export type ReapDependencies = {
+  deleteBranch: (flag: "-d" | "-D", branch: string) => Promise<void>;
+  removeWorktree: (path: string) => Promise<void>;
+};
+
+function failureDetail(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Removes each reapable worktree, then its branch, recording the two steps
+ * independently.
+ *
+ * The order is forced: git refuses to delete a branch that is still checked
+ * out in a worktree, so the worktree must go first. That makes a partially
+ * applied removal genuinely reachable, and the caller has to be told about it
+ * rather than shown a count that implies nothing happened.
+ */
+export async function reapWorktrees(
+  reapable: Row[],
+  deps: ReapDependencies
+): Promise<ReapStepResult[]> {
+  const results: ReapStepResult[] = [];
+
+  // Removals run sequentially — concurrent `git worktree remove`/
+  // `git branch -d` calls against the same repo can race on the shared git
+  // index and refs.
+  for (const row of reapable) {
+    const label = row.state.branch ?? row.state.path;
+
+    try {
+      // biome-ignore lint/performance/noAwaitInLoops: sequential by design, see above.
+      await deps.removeWorktree(row.state.path);
+    } catch (error) {
+      results.push({ detail: failureDetail(error), kind: "kept", label });
+      continue;
+    }
+
+    const { branch } = row.state;
+    if (branch === null) {
+      results.push({ kind: "removed", label });
+      continue;
+    }
+
+    // Flag choice is a safety decision, so it lives with the predicate.
+    const deleteFlag = branchDeleteFlag(row.state);
+    try {
+      await deps.deleteBranch(deleteFlag, branch);
+      results.push({ kind: "removed", label });
+    } catch (error) {
+      results.push({
+        branch,
+        deleteFlag,
+        detail: failureDetail(error),
+        kind: "branch_left",
+        label,
+      });
+    }
+  }
+
+  return results;
+}
+
+/** Prints the per-worktree outcome and returns the process exit code. */
+export function reportReap(results: ReapStepResult[]): number {
+  const worktreesRemoved = results.filter((r) => r.kind !== "kept");
+  const branchesLeft = results.filter((r) => r.kind === "branch_left");
+  const kept = results.filter((r) => r.kind === "kept");
+
+  for (const result of results) {
+    if (result.kind === "removed") {
+      console.log(`Removed ${result.label}`);
+    } else if (result.kind === "branch_left") {
+      console.log(
+        `Removed worktree ${result.label}, but its branch remains: ${result.detail}`
+      );
+    } else {
+      console.error(`Failed to reap ${result.label}: ${result.detail}`);
+    }
+  }
+
+  console.log(
+    `\nReaped ${worktreesRemoved.length}/${results.length} worktree(s).`
+  );
+
+  if (branchesLeft.length > 0) {
+    console.error(
+      `\n${branchesLeft.length} branch(es) left behind. Delete when you are sure:`
+    );
+    for (const result of branchesLeft) {
+      console.error(`  git branch ${result.deleteFlag} ${result.branch}`);
+    }
+  }
+
+  if (kept.length > 0) {
+    console.error(
+      `${kept.length} failed: ${kept.map((r) => r.label).join(", ")}`
+    );
+  }
+
+  return branchesLeft.length > 0 || kept.length > 0 ? 1 : 0;
+}
+
 async function reap(confirmed: boolean): Promise<number> {
   const rows = classify(await collectState());
   const reapable = rows.filter((r) => r.verdict.safe);
@@ -113,39 +236,16 @@ async function reap(confirmed: boolean): Promise<number> {
     return 0;
   }
 
-  // Removals run sequentially — concurrent `git worktree remove`/
-  // `git branch -d` calls against the same repo can race on the shared git
-  // index and refs.
-  const failures: string[] = [];
-  let removedCount = 0;
-  for (const row of reapable) {
-    const label = row.state.branch ?? row.state.path;
-    try {
-      // biome-ignore lint/performance/noAwaitInLoops: sequential by design, see above.
-      await runCmd("git", ["worktree", "remove", row.state.path]);
-      if (row.state.branch !== null) {
-        // Flag choice is a safety decision, so it lives with the predicate.
-        await runCmd("git", [
-          "branch",
-          branchDeleteFlag(row.state),
-          row.state.branch,
-        ]);
-      }
-      console.log(`Removed ${label}`);
-      removedCount += 1;
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      console.error(`Failed to reap ${label}: ${detail}`);
-      failures.push(label);
-    }
-  }
+  const results = await reapWorktrees(reapable, {
+    deleteBranch: async (flag, branch) => {
+      await runCmd("git", ["branch", flag, branch]);
+    },
+    removeWorktree: async (path) => {
+      await runCmd("git", ["worktree", "remove", path]);
+    },
+  });
 
-  console.log(`\nReaped ${removedCount}/${reapable.length} worktree(s).`);
-  if (failures.length > 0) {
-    console.error(`${failures.length} failed: ${failures.join(", ")}`);
-    return 1;
-  }
-  return 0;
+  return reportReap(results);
 }
 
 async function configValue(key: string): Promise<string> {
