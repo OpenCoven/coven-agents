@@ -416,6 +416,43 @@ test("an unsafe row is refused even when the caller passes it in", async () => {
   );
 });
 
+test("a stale verdict cannot authorize a deletion the state forbids", async () => {
+  // A Row's verdict is computed at classify time. A caller that re-reads the
+  // worktree, or reuses a Row across a refresh, can present a verdict that no
+  // longer describes the state. Only the state is authoritative at the moment
+  // of deletion.
+  const deps = recordingDeps();
+  const dirty = row({ dirtyCount: 4, path: "/tmp/wt/dirty" });
+  const forged: Row = {
+    state: dirty.state,
+    verdict: { reasons: [], safe: true },
+  };
+
+  const results = await reapWorktrees([forged], deps);
+
+  assert.deepEqual(
+    deps.calls,
+    [],
+    "uncommitted work must not be deleted on the strength of a stale verdict"
+  );
+  assert.equal(results[0]?.kind, "kept");
+});
+
+test("a failed reap reports why, not just that it failed", async () => {
+  const results = await reapWorktrees(
+    [row({ branch: "fix/stuck", path: "/tmp/wt/stuck" })],
+    recordingDeps({ worktree: "/tmp/wt/stuck" })
+  );
+  const { err } = formatReap(results);
+
+  assert.ok(
+    err.some((line) =>
+      line.includes("Failed to reap fix/stuck: worktree is dirty")
+    ),
+    `the operator needs the reason, got: ${err.join(" | ")}`
+  );
+});
+
 test("the delete flag the predicate chose is the flag git is given", async () => {
   // Hardcoding "-D" here would discard git's ancestry backstop, and nothing
   // else in this file would notice.

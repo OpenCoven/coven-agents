@@ -149,9 +149,16 @@ export async function reapWorktrees(
     // `isReapable`, and the caller filters on it — but this function is
     // exported and deletes the operator's only copy of unpushed work, so it
     // refuses an unsafe row itself rather than trusting caller convention.
-    if (!row.verdict.safe) {
+    //
+    // It re-derives the verdict from the state rather than reading
+    // `row.verdict`. A Row carries a verdict computed at classify time; a
+    // caller that re-reads the worktree, or reuses a Row across a refresh,
+    // can hand over a stale verdict that no longer describes the state. Only
+    // the state is authoritative at the moment of deletion.
+    const verdict = isReapable(row.state);
+    if (!verdict.safe) {
       results.push({
-        detail: `refused: ${row.verdict.reasons.join(", ")}`,
+        detail: `refused: ${verdict.reasons.join(", ")}`,
         kind: "kept",
         label,
       });
