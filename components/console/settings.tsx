@@ -1000,9 +1000,11 @@ export function Settings({
                       marginTop: 3,
                     }}
                   >
-                    Runs live in the runner&rsquo;s durable state, not in this
-                    account. There is no export or bulk delete here because
-                    there is no archive on this side to act on.
+                    This account stores one row per counted run: a run id, the
+                    instant it was counted, and the minutes and seconds it
+                    settled against the cap. Transcripts and evidence live in
+                    the runner&rsquo;s durable state. There is no export or bulk
+                    delete for the run rows here yet.
                   </p>
                 </div>
 

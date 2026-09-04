@@ -235,6 +235,12 @@ export function TeamConsole({
   const [projectAuthorityCheckedAt, setProjectAuthorityCheckedAt] = useState(0);
   const [mission, setMission] = useState("");
   const [drafting, setDrafting] = useState(false);
+  /**
+   * A toast is transient; the empty state it leaves behind is not. Without
+   * these, a failed load tells someone they have no teams and no runs.
+   */
+  const [catalogFailed, setCatalogFailed] = useState(false);
+  const [runsFailed, setRunsFailed] = useState(false);
   const [skillName, setSkillName] = useState("");
   const [skillDescription, setSkillDescription] = useState("");
   const [skillInstructions, setSkillInstructions] = useState("");
@@ -366,11 +372,13 @@ export function TeamConsole({
 
   useEffect(() => {
     const controller = new AbortController();
+    setCatalogFailed(false);
     refreshCatalog(controller.signal)
       .catch((error) => {
         if (controller.signal.aborted) {
           return;
         }
+        setCatalogFailed(true);
         toast.error("Could not load teams.", {
           description: readableError(error),
         });
@@ -406,6 +414,7 @@ export function TeamConsole({
     setSelectedRun(null);
     setRunRefreshError(null);
     setLoadingRuns(true);
+    setRunsFailed(false);
     const controller = new AbortController();
     client
       .listTeamRuns(selectedTeamId, { signal: controller.signal })
@@ -422,6 +431,7 @@ export function TeamConsole({
         if (controller.signal.aborted) {
           return;
         }
+        setRunsFailed(true);
         toast.error("Could not load team runs.", {
           description: readableError(error),
         });
@@ -1431,7 +1441,11 @@ export function TeamConsole({
                 ))}
                 {loadingRuns ? <p>Loading run history.</p> : null}
                 {!loadingRuns && runs.length === 0 ? (
-                  <p>No coordinated runs yet.</p>
+                  <p>
+                    {runsFailed
+                      ? "Run history could not be loaded. Any runs you started are unaffected."
+                      : "No coordinated runs yet."}
+                  </p>
                 ) : null}
                 {nextRunCursor ? (
                   <Btn
@@ -1548,10 +1562,15 @@ export function TeamConsole({
         ) : (
           <div className="oc-team-empty">
             <UsersRound size={28} />
-            <h2>Create a coordinated team</h2>
+            <h2>
+              {catalogFailed
+                ? "Teams could not be loaded"
+                : "Create a coordinated team"}
+            </h2>
             <p>
-              Set up the GitHub delivery team or compose a custom sequence from
-              your execution profiles and reusable skills.
+              {catalogFailed
+                ? "Any teams you have are still here. Reload to try reading them again."
+                : "Set up the GitHub delivery team or compose a custom sequence from your execution profiles and reusable skills."}
             </p>
           </div>
         )}

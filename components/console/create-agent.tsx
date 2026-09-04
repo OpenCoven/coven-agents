@@ -49,7 +49,7 @@ const PATHS = [
     icon: BriefcaseBusiness,
     id: "role",
     label: "Start from a role",
-    outcome: "1 profile · ~5 seconds",
+    outcome: "1 profile · one action",
   },
   {
     description: "Create a complementary set for a specific kind of work.",
@@ -561,11 +561,10 @@ export function CreateAgent({
                   </div>
                 ))}
               </div>
-              <FinePrint label="Proposed: sequenced mode">
-                Sequenced mode would run a crew in order and pass each
-                member&rsquo;s evidence to the next. Nothing in the runner
-                orchestrates handoffs today, so it stays a proposal rather than
-                a switch you can flip.
+              <FinePrint label="Sequenced runs live in Teams">
+                Running members in order and passing each one&rsquo;s evidence
+                to the next is what a team does. Build a team to sequence these
+                profiles; a crew here starts them together.
               </FinePrint>
             </>
           ) : null}

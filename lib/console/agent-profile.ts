@@ -5,6 +5,13 @@ export type ExecutionProfile = Readonly<{
   composerGuidance: string;
   id: string;
   label: string;
+  /**
+   * What the profile's instructions ask of the agent, phrased as a brief
+   * rather than a permission. The sandbox does not enforce it: an authorized
+   * agent can write inside the workspace it was granted, which the security
+   * page states plainly. Wording it as "asked to" keeps the screen from
+   * implying a restriction nothing checks.
+   */
   mode: string;
   outcome: string;
   prompts: readonly [string, string, string];
@@ -20,7 +27,7 @@ const ROLE_PROFILES: Readonly<Record<string, RoleProfile>> = {
       "Define the bounded change and the evidence Builder must return: Working change and focused proof.",
     id: "builder",
     label: "Builder",
-    mode: "Can edit",
+    mode: "Asked to edit",
     outcome: "Working change and focused proof",
     prompts: [
       "Implement the highest-impact pending change and prove it with a focused test.",
@@ -35,7 +42,7 @@ const ROLE_PROFILES: Readonly<Record<string, RoleProfile>> = {
       "Define what Critic should challenge and the evidence it must return: Concrete failure scenarios.",
     id: "critic",
     label: "Critic",
-    mode: "Report only",
+    mode: "Asked to report only",
     outcome: "Concrete failure scenarios",
     prompts: [
       "Review the latest changes and report only concrete regressions with failure scenarios.",
@@ -50,7 +57,7 @@ const ROLE_PROFILES: Readonly<Record<string, RoleProfile>> = {
       "Define what Scout should investigate and the evidence it must return: Findings and risks.",
     id: "scout",
     label: "Scout",
-    mode: "Report only",
+    mode: "Asked to report only",
     outcome: "Findings and risks",
     prompts: [
       "Map the repository architecture and identify the three riskiest boundaries.",
@@ -65,7 +72,7 @@ const ROLE_PROFILES: Readonly<Record<string, RoleProfile>> = {
       "Define the documentation truth Scribe must establish: Source-backed documentation update.",
     id: "scribe",
     label: "Scribe",
-    mode: "Can edit docs",
+    mode: "Asked to edit docs",
     outcome: "Source-backed documentation update",
     prompts: [
       "Audit the documentation against current behavior and correct the highest-impact drift.",
@@ -80,7 +87,7 @@ const ROLE_PROFILES: Readonly<Record<string, RoleProfile>> = {
       "Define the behavior Tester must reproduce and prove: Failing-first test and fix.",
     id: "tester",
     label: "Tester",
-    mode: "Can edit",
+    mode: "Asked to edit",
     outcome: "Failing-first test and fix",
     prompts: [
       "Reproduce one user-visible bug with a failing test, then make the smallest fix.",
@@ -97,7 +104,7 @@ const CUSTOM_PROFILE: ExecutionProfile = {
     "Define the outcome and evidence this custom profile must return: Evidence required by the stored contract.",
   id: "custom",
   label: "Custom contract",
-  mode: "Contract defined",
+  mode: "Asked per contract",
   outcome: "Evidence required by the stored contract",
   prompts: [
     "Inspect the current workspace and recommend the highest-impact next action with evidence.",

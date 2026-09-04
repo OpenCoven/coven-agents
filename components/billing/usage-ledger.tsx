@@ -232,9 +232,7 @@ export function UsageLedger({
           aria-hidden="true"
           className="oc-usage-ledger__bar"
           data-state="ok"
-        >
-          <span style={{ width: "0%" }} />
-        </div>
+        />
         <p className="oc-usage-ledger__meta">
           Usage appears here once a subscription is active.
         </p>
@@ -263,9 +261,7 @@ export function UsageLedger({
           aria-hidden="true"
           className="oc-usage-ledger__bar"
           data-state="ok"
-        >
-          <span style={{ width: "0%" }} />
-        </div>
+        />
         <p className="oc-usage-ledger__meta">
           {status === "loading"
             ? "Reading this month's usage."

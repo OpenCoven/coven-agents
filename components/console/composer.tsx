@@ -86,7 +86,10 @@ export function Composer({
           <div className="oc-composer-context">
             {[
               ["role", profile.label],
-              ["mode", profile.mode],
+              // `mode` is deliberately absent: it is an instruction in the
+              // profile text, not something the sandbox enforces, and it read
+              // as a permission sitting beside runtime, model and workspace,
+              // which are enforced.
               ["runtime", agent.runtime],
               ["model", sanitizeEvidenceText(agent.model)],
               [

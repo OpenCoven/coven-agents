@@ -278,33 +278,53 @@ function NotRecorded({
   );
 }
 
+/**
+ * Why the panel has no series.
+ *
+ * `refused` and `unavailable` are kept apart deliberately. Telling someone
+ * their session cannot read the record sends them to sign in again, which is
+ * the wrong move and wasted effort when the real cause was a dropped request
+ * or a response this page could not parse.
+ */
+type LoadFailure = "refused" | "unavailable" | null;
+
 export function Analytics() {
   const [range, setRange] = useState<Range>(30);
   const [data, setData] = useState<Analytics | null>(null);
-  const [refused, setRefused] = useState(false);
+  const [failure, setFailure] = useState<LoadFailure>(null);
 
   useEffect(() => {
     let cancelled = false;
     setData(null);
-    setRefused(false);
+    setFailure(null);
 
     fetch(`${BASE_PATH}/api/analytics?days=${range}`)
-      .then(async (response) =>
-        response.ok ? ((await response.json()) as Analytics) : null
-      )
+      .then(async (response) => {
+        if (response.status === 401 || response.status === 403) {
+          return "refused" as const;
+        }
+        if (!response.ok) {
+          return "unavailable" as const;
+        }
+        try {
+          return (await response.json()) as Analytics;
+        } catch {
+          return "unavailable" as const;
+        }
+      })
       .then((next) => {
         if (cancelled) {
           return;
         }
-        if (next) {
-          setData(next);
-        } else {
-          setRefused(true);
+        if (next === "refused" || next === "unavailable") {
+          setFailure(next);
+          return;
         }
+        setData(next);
       })
       .catch(() => {
         if (!cancelled) {
-          setRefused(true);
+          setFailure("unavailable");
         }
       });
 
@@ -418,10 +438,11 @@ export function Analytics() {
               </span>
             </div>
 
-            {refused ? (
+            {failure ? (
               <p style={{ ...type_.body, font: "400 12px/1.6 var(--font-ui)" }}>
-                Run history is not readable on this session. The record is kept
-                per account, so it needs a signed-in subscriber.
+                {failure === "refused"
+                  ? "Run history is not readable on this session. The record is kept per account, so it needs a signed-in subscriber."
+                  : "Run history could not be loaded just now. Nothing is missing from the record; reload or pick another range to try again."}
               </p>
             ) : data ? (
               <>
@@ -584,8 +605,16 @@ export function Analytics() {
               <RunLength durations={data.durations} />
             ) : (
               <NotRecorded
-                blurb="Run lengths load with the rest of the window."
-                needs="the analytics response"
+                blurb={
+                  failure
+                    ? "Run lengths come from the same request as the series above, which did not return."
+                    : "Run lengths load with the rest of the window."
+                }
+                needs={
+                  failure
+                    ? "a successful analytics read"
+                    : "the analytics response"
+                }
                 title="Run length"
               />
             )}
