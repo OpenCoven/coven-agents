@@ -1463,6 +1463,13 @@ export function TeamConsole({
                         {selectedRun.status.replaceAll("_", " ")}
                       </span>
                     </header>
+                    {selectedRun.status === "queued" ||
+                    selectedRun.status === "running" ? (
+                      <p className="oc-team-run-drive" role="status">
+                        This run advances while this view is open. Leaving the
+                        page pauses it between members; it resumes here.
+                      </p>
+                    ) : null}
                     {selectedRun.status === "waiting_approval" ? (
                       <div className="oc-team-approval">
                         <ShieldCheck size={18} />
