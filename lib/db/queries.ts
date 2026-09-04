@@ -34,8 +34,8 @@ import {
   serializeCheckoutAttemptLeaseOwner,
   serializeCheckoutAttemptState,
 } from "../billing/checkout-lease";
-import type { DayCount } from "../billing/history";
-import { fillDays, runsByDay } from "../billing/history";
+import type { DayCount, RunDurationSummary } from "../billing/history";
+import { fillDays, runDurations, runsByDay } from "../billing/history";
 import {
   drizzleRunReservationDatabase,
   reservationUsage,
@@ -1085,6 +1085,13 @@ export async function runReservationUsageForTenant(
 }
 
 /** Run volume per day for a tenant, oldest first, gaps filled with zeroes. */
+export async function runDurationSummary(
+  tenant: string,
+  since: Date
+): Promise<RunDurationSummary> {
+  return await runDurations(db, tenant, since);
+}
+
 export async function runHistory(
   tenant: string,
   since: Date,
