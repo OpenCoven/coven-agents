@@ -190,6 +190,61 @@ function scripted(...responses: Record<string, unknown>[][]) {
   return { statements, store };
 }
 
+test("a subscriber sandbox reset refuses while an attempt is live", async () => {
+  const current = agent({ sandboxGeneration: 4, version: 8 });
+  const fence = {
+    agentId: current.id,
+    expectedGeneration: current.sandboxGeneration,
+    expectedVersion: current.version,
+  };
+
+  // The guarded UPDATE matches nothing, and the follow-up read reports that
+  // the agent is holding a dispatching or running attempt.
+  const live = scripted([], [{ id: current.id, live: true }]);
+  assert.equal(
+    (await live.store.beginDaytonaSandboxReset(principal, fence)).kind,
+    "not_live"
+  );
+
+  // The same empty UPDATE with no live attempt is an ordinary fence loss, and
+  // must stay distinguishable: one is worth retrying, the other is not.
+  const stale = scripted([], [{ id: current.id, live: false }]);
+  assert.equal(
+    (await stale.store.beginDaytonaSandboxReset(principal, fence)).kind,
+    "stale_version"
+  );
+
+  const missing = scripted([], []);
+  assert.equal(
+    (await missing.store.beginDaytonaSandboxReset(principal, fence)).kind,
+    "not_found"
+  );
+});
+
+test("the subscriber sandbox reset carries its own liveness guard", () => {
+  const current = agent({ sandboxGeneration: 4, version: 8 });
+  const reset = scripted([], [{ id: current.id, live: false }]);
+  reset.store
+    .beginDaytonaSandboxReset(principal, {
+      agentId: current.id,
+      expectedGeneration: current.sandboxGeneration,
+      expectedVersion: current.version,
+    })
+    .catch(() => undefined);
+
+  const update = reset.statements.find(
+    (entry) => entry.name === "begin-daytona-sandbox-reset"
+  );
+  assert.ok(update, "the reset must issue its named statement");
+  const text = queryText(update);
+  // Prewarm replaces a mismatched sandbox, so this path is no longer reached
+  // only through a run lease. Losing this clause would let a prewarm delete a
+  // sandbox out from under a live attempt.
+  assert.match(text, /NOT EXISTS/i);
+  assert.match(text, /'dispatching'/);
+  assert.match(text, /'running'/);
+});
+
 function resultRows<Row extends Record<string, unknown>>(
   values: readonly unknown[]
 ): Promise<Row[]> {

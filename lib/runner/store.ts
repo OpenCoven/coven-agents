@@ -2111,12 +2111,23 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         return { kind: "decommissioning", value: asAgent(updated) };
       }),
 
+    /**
+     * Subscriber-initiated reset, used when prewarming finds a sandbox whose
+     * configuration no longer matches.
+     *
+     * Unlike the dispatch and cancellation resets, this one is not reached
+     * through a run lease, so it carries its own liveness guard: a sandbox
+     * holding a dispatching or running attempt is never reset here. Without
+     * that clause a prewarm could delete the sandbox out from under a live
+     * run, which is why this path previously refused to replace at all and
+     * left a drifted agent retrying forever instead.
+     */
     beginDaytonaSandboxReset: (
       principal: RunnerPrincipal,
       input: DaytonaSandboxFence
     ): Promise<
       | { kind: "updated"; value: RunnerAgentRecord }
-      | { kind: "not_found" | "stale_version" }
+      | { kind: "not_found" | "not_live" | "stale_version" }
     > =>
       database.transaction(async (transaction) => {
         const [updated] = await transaction.execute(
@@ -2140,6 +2151,16 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                   'provisioning_ambiguous',
                   'ready'
                 )
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM "RunnerRun" AS "agentLive"
+                  WHERE "agentLive"."agentId" = ${input.agentId}
+                    AND "agentLive"."tenant" = ${principal.tenant}
+                    AND "agentLive"."dispatchState" IN (
+                      'dispatching',
+                      'running'
+                    )
+                )
               RETURNING *`
           )
         );
@@ -2150,13 +2171,32 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           statement(
             "get-agent-after-daytona-sandbox-reset-begin",
             { agentId: input.agentId, tenant: principal.tenant },
-            sql`SELECT "id" FROM "RunnerAgent"
-              WHERE "id" = ${input.agentId}
-                AND "tenant" = ${principal.tenant}
+            sql`SELECT
+                "agent"."id",
+                EXISTS (
+                  SELECT 1
+                  FROM "RunnerRun" AS "agentLive"
+                  WHERE "agentLive"."agentId" = "agent"."id"
+                    AND "agentLive"."tenant" = "agent"."tenant"
+                    AND "agentLive"."dispatchState" IN (
+                      'dispatching',
+                      'running'
+                    )
+                ) AS "live"
+              FROM "RunnerAgent" AS "agent"
+              WHERE "agent"."id" = ${input.agentId}
+                AND "agent"."tenant" = ${principal.tenant}
               LIMIT 1`
           )
         );
-        return current ? { kind: "stale_version" } : { kind: "not_found" };
+        if (!current) {
+          return { kind: "not_found" };
+        }
+        // A live attempt is a wait, not a conflict: the caller retries once
+        // the run finishes rather than treating the agent as stale.
+        return (current as { live?: boolean }).live
+          ? { kind: "not_live" }
+          : { kind: "stale_version" };
       }),
 
     /**
