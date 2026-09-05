@@ -578,8 +578,8 @@
 }
 
 /*
- * The run is driven by this view's own polling. Saying so is the honest
- * alternative to a spinner that implies unattended progress.
+ * A live run says it keeps going without the page. That is only true because
+ * a scheduled reconcile drives it; see docs/runbooks/vercel-deployment.md.
  */
 .oc-team-run-drive {
   padding: 10px 12px;

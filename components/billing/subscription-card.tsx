@@ -18,6 +18,7 @@ const CONFIRMATION_INTERVAL_MS = 1000;
 const CONFIRMATION_FOREGROUND_BUDGET_MS = 15_000;
 type CheckoutResult = "cancelled" | "success" | null;
 export type MinutePackResult = "added" | "cancelled" | null;
+export type BillingReturn = "managed" | null;
 export type MinutePackOffer = { minutes: number; priceId: string };
 
 export type SubscriptionCardProps = {
@@ -26,6 +27,8 @@ export type SubscriptionCardProps = {
   confirmationOwner?: string | null;
   isSubscriber: boolean;
   /** Top-up packs on offer, smallest first. Empty hides the section. */
+  /** Set when the viewer has just come back from Stripe's billing portal. */
+  billingReturn?: BillingReturn;
   minutePacks?: readonly MinutePackOffer[];
   minutePackResult?: MinutePackResult;
   onCheckoutConfirmed?: () => void;
@@ -168,6 +171,7 @@ function retryTime(retryAt: number): string {
 }
 
 export function SubscriptionCard({
+  billingReturn = null,
   checkoutEnabled,
   checkoutResult = null,
   confirmationOwner,
@@ -204,6 +208,7 @@ export function SubscriptionCard({
   const [checkoutPending, setCheckoutPending] = useState(false);
   const [packPending, setPackPending] = useState<string | null>(null);
   const [packCredited, setPackCredited] = useState(false);
+  const [portalPending, setPortalPending] = useState(false);
   const markPackCredited = useCallback(() => setPackCredited(true), []);
 
   const noticeRef = useRef<HTMLDivElement>(null);
@@ -999,6 +1004,67 @@ export function SubscriptionCard({
     [packPending, publishNotice]
   );
 
+  /**
+   * Sends the subscriber to Stripe's hosted portal to cancel, change a card,
+   * or read invoices. Everything that touches a payment method lives there,
+   * so this app never sees one.
+   */
+  const openBillingPortal = useCallback(async () => {
+    if (portalPending) {
+      return;
+    }
+    setPortalPending(true);
+    let response: Response;
+    try {
+      response = await fetch(browserApplicationPath("/api/billing/portal"), {
+        credentials: "same-origin",
+        method: "POST",
+      });
+    } catch {
+      publishNotice(
+        {
+          detail: "Check your connection, then try again.",
+          title: "Could not reach billing.",
+          tone: "error",
+        },
+        { focus: true }
+      );
+      setPortalPending(false);
+      return;
+    }
+    let decoded: unknown;
+    try {
+      decoded = await response.json();
+    } catch {
+      decoded = null;
+    }
+    const body = responseBody(decoded);
+    if (response.ok) {
+      const destination = secureCheckoutDestination(body.url);
+      if (destination.kind === "valid") {
+        window.location.assign(destination.href);
+        return;
+      }
+    }
+    const error = checkoutError(body);
+    publishNotice(
+      {
+        detail:
+          error === "customer_required"
+            ? "This account has complimentary access, so there is no Stripe subscription to manage."
+            : "Try again in a moment.",
+        title: "Could not open the billing portal.",
+        tone: "error",
+      },
+      { focus: true }
+    );
+    setPortalPending(false);
+  }, [portalPending, publishNotice]);
+
+  const startBillingPortal = useCallback(() => {
+    openBillingPortal().catch(() => undefined);
+  }, [openBillingPortal]);
+
   const chooseMinutePack = useCallback(
     (event: { currentTarget: HTMLButtonElement }) => {
       const { priceId } = event.currentTarget.dataset;
@@ -1315,6 +1381,7 @@ export function SubscriptionCard({
     !activeConfirmed &&
     !confirmationInFlight &&
     !checkoutSuppressed;
+  const showBillingPortal = isSubscriber || activeConfirmed;
   const showMinutePacks =
     checkoutEnabled &&
     minutePacks.length > 0 &&
@@ -1439,6 +1506,28 @@ export function SubscriptionCard({
             <strong>{notice.title}</strong>
             <p>{notice.detail}</p>
           </div>
+        </div>
+      ) : null}
+
+      {showBillingPortal ? (
+        <div className="oc-subscription-manage">
+          <p>
+            Cancelling, changing a card, and invoice history are handled by
+            Stripe.{" "}
+            {billingReturn === "managed"
+              ? "A change made there appears here once Stripe confirms it, which can take a moment."
+              : "A cancellation keeps access until the paid-through date above."}
+          </p>
+          <button
+            aria-busy={portalPending}
+            className="oc-subscription-action"
+            data-variant="quiet"
+            disabled={portalPending}
+            onClick={startBillingPortal}
+            type="button"
+          >
+            {portalPending ? "Opening Stripe…" : "Manage subscription"}
+          </button>
         </div>
       ) : null}
 

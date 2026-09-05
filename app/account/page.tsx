@@ -6,6 +6,7 @@ import { offerableMinutePacksFromEnv } from "@/lib/billing/minute-packs";
 
 type AccountPageProps = {
   searchParams: Promise<{
+    billing?: string | string[];
     checkout?: string | string[];
     minutes?: string | string[];
   }>;
@@ -18,17 +19,17 @@ export const instant = false;
 export default async function AccountPage({ searchParams }: AccountPageProps) {
   await connection();
   const now = new Date();
-  const [{ checkout, minutes }, subscriptionAuthority] = await Promise.all([
-    searchParams,
-    subscriptionPageAuthority(now),
-  ]);
+  const [{ billing, checkout, minutes }, subscriptionAuthority] =
+    await Promise.all([searchParams, subscriptionPageAuthority(now)]);
   const checkoutResult =
     checkout === "success" || checkout === "cancelled" ? checkout : null;
   const minutePackResult =
     minutes === "added" || minutes === "cancelled" ? minutes : null;
+  const billingReturn = billing === "managed" ? "managed" : null;
 
   return (
     <AccountSettings
+      billingReturn={billingReturn}
       checkoutEnabled={subscriptionCheckoutEnabled({
         SUBSCRIPTION_CHECKOUT_ENABLED:
           process.env.SUBSCRIPTION_CHECKOUT_ENABLED,

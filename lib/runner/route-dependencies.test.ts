@@ -88,9 +88,28 @@ test("the reconciliation route supports GET invocation", () => {
   );
 });
 
-test("Vercel does not schedule the reconciliation route", () => {
+test("Vercel schedules reconciliation, and the runbook covers it", () => {
   const vercel = JSON.parse(source("../../vercel.json")) as {
-    crons?: unknown;
+    crons?: { path: string; schedule: string }[];
+    git?: { deploymentEnabled?: boolean };
   };
-  assert.equal(vercel.crons, undefined);
+
+  // The runner sweep is what advances an unattended team run and recovers an
+  // expired dispatch. Without it both wait for a person to open a page.
+  const runner = vercel.crons?.find(
+    (entry) => entry.path === "/api/internal/runner-reconcile"
+  );
+  assert.ok(runner, "the runner reconcile route must be scheduled");
+  assert.equal(runner.schedule, "* * * * *");
+
+  // Scheduling it does not re-enable Git deployments, which stay denied.
+  assert.equal(vercel.git?.deploymentEnabled, false);
+
+  // Any vercel.json beyond the deny-only control must ship with the runbook,
+  // which names every scheduled job. scripts/deployment-documentation-policy
+  // enforces the pairing; this asserts the jobs are actually described.
+  const runbook = source("../../docs/runbooks/vercel-deployment.md");
+  for (const entry of vercel.crons ?? []) {
+    assert.match(runbook, new RegExp(entry.path.replaceAll("/", "\\/")));
+  }
 });

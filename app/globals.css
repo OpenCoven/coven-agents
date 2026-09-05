@@ -847,6 +847,40 @@ textarea:focus-visible {
   color: var(--subscription-text, var(--text-primary));
 }
 
+/*
+ * Managing the subscription is a quiet, always-available row. It is not an
+ * offer, so it does not compete with the purchase action beside it.
+ */
+.oc-subscription-manage {
+  display: flex;
+  flex-wrap: wrap;
+  grid-column: 1 / -1;
+  gap: 10px 16px;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 14px;
+  border-top: 1px solid var(--subscription-border);
+}
+
+.oc-subscription-manage p {
+  flex: 1 1 260px;
+  margin: 0;
+  font: 400 12px / 1.55 var(--font-ui, inherit);
+  color: var(--subscription-text-2);
+  text-wrap: pretty;
+}
+
+.oc-subscription-action[data-variant="quiet"] {
+  color: var(--subscription-text);
+  background: transparent;
+  border-color: var(--subscription-border-strong);
+}
+
+.oc-subscription-action[data-variant="quiet"]:hover {
+  background: var(--subscription-sunken);
+  opacity: 1;
+}
+
 /* Top-up offer: the pack size is the figure, everything else is meta. */
 .oc-subscription-offer {
   display: grid;
