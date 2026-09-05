@@ -677,11 +677,16 @@
   border-bottom: var(--border-hairline);
 }
 
+/*
+ * The composer is the primary action on this screen, so the field takes the
+ * full width and the actions sit beneath it. The earlier two-column rule put
+ * the hint in the right-hand cell, which squeezed the textarea to half width
+ * and stranded the hint beside it.
+ */
 .oc-team-mission {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 12px;
-  align-items: end;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
   padding: 20px 0;
 }
 
@@ -705,6 +710,7 @@
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
+  justify-content: flex-end;
 }
 
 .oc-team-run-layout {
@@ -943,8 +949,7 @@
     max-height: 180px;
   }
 
-  .oc-team-run-layout,
-  .oc-team-mission {
+  .oc-team-run-layout {
     grid-template-columns: 1fr;
   }
 
