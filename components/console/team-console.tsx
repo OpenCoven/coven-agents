@@ -1737,15 +1737,24 @@ export function TeamConsole({
                     ? "Press ⌘↵ to start."
                     : "Draft one if you would rather edit than write."}
                 </span>
-                <span
-                  data-over={
-                    mission.length > TEAM_LIMITS.maxMissionLength
-                      ? ""
-                      : undefined
-                  }
-                >
-                  {mission.length}/{TEAM_LIMITS.maxMissionLength}
-                </span>
+                {/*
+                  The limit is 40,000 characters and a mission is a few
+                  sentences, so a permanent counter was noise reporting a
+                  number nobody is near. It appears only once the length
+                  actually matters.
+                */}
+                {mission.length > TEAM_LIMITS.maxMissionLength * 0.9 ? (
+                  <span
+                    data-over={
+                      mission.length > TEAM_LIMITS.maxMissionLength
+                        ? ""
+                        : undefined
+                    }
+                  >
+                    {mission.length.toLocaleString()} /{" "}
+                    {TEAM_LIMITS.maxMissionLength.toLocaleString()}
+                  </span>
+                ) : null}
               </p>
               <div className="oc-team-mission__actions">
                 <Btn
