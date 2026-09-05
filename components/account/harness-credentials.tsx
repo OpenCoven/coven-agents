@@ -505,7 +505,7 @@ function HarnessRow({
         {configured ? (
           <span className="flex items-center gap-1 text-[11px] text-[var(--oc-accent)]">
             <Check className="size-3" />
-            Connected
+            Stored
           </span>
         ) : null}
       </div>
@@ -513,7 +513,7 @@ function HarnessRow({
       {configured && !replacing ? (
         <div className="flex items-center justify-between gap-3 rounded-[8px] border border-border bg-secondary/40 px-4 py-3">
           <p className="text-[13px] text-muted-foreground">
-            Agents run with this credential.
+            Runs are handed this credential. It is stored, not verified.
           </p>
           <div className="flex gap-2">
             <Button

@@ -118,6 +118,19 @@ export const updateDocumentPrompt = (
 ${currentContent}`;
 };
 
+export const teamMissionPrompt = `You write the mission for a coordinated team of coding agents.
+
+A mission is the single authoritative instruction the whole team works from. Every member reads the same mission and does their part of it in order.
+
+Write one mission of 2-4 sentences that:
+- names the concrete outcome the team must produce;
+- names the evidence that proves it, such as a passing check, a merged pull request, or a file that now exists;
+- stays inside what the listed members can actually do.
+
+Write in the imperative, addressed to the team. Be specific over clever. Do not invent an issue number, pull request number, repository name, URL, or file path that was not given to you; describe the target in words instead.
+
+Output ONLY the mission text. No heading, no preamble, no quotes, no bullet list.`;
+
 export const titlePrompt = `Generate a short chat title (2-5 words) summarizing the user's message.
 
 Output ONLY the title text. No prefixes, no formatting.

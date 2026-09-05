@@ -109,6 +109,56 @@ function Tile({
  * A panel the records cannot fill, named rather than hidden — the same
  * honesty contract as the tenant analytics screen.
  */
+/** `2m 14s`, or `47s` under a minute. */
+function fleetDuration(seconds: number): string {
+  return seconds < 60
+    ? `${seconds}s`
+    : `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`;
+}
+
+/**
+ * A panel the receipts can fill. Solid border, so it reads as a measurement
+ * rather than as one of the named gaps beside it.
+ */
+function Recorded({
+  sub,
+  title,
+  value,
+}: {
+  sub: string;
+  title: string;
+  value: string | null;
+}) {
+  return (
+    <div
+      style={{
+        background: "var(--bg-panel)",
+        border: hairline,
+        borderRadius: "var(--radius-card)",
+        display: "flex",
+        flex: "1 1 160px",
+        flexDirection: "column",
+        gap: 6,
+        padding: "12px 14px",
+      }}
+    >
+      <Eyebrow>{title}</Eyebrow>
+      <span
+        style={{
+          color: value === null ? "var(--text-faint)" : "var(--text-primary)",
+          font: "600 20px/1 var(--font-ui)",
+          ...tabular,
+        }}
+      >
+        {value ?? "—"}
+      </span>
+      <span style={{ ...type_.meta, lineHeight: 1.5, whiteSpace: "normal" }}>
+        {value === null ? "no settled run in range" : String(sub)}
+      </span>
+    </div>
+  );
+}
+
 function NotRecorded({ needs, title }: { needs: string; title: string }) {
   return (
     <div
@@ -503,22 +553,42 @@ export function Warden({ operator }: { operator: string }) {
                 }
                 label="Runs"
                 sub="counted at credential admission"
-                value={overview ? String(overview.runsTotal) : "…"}
+                value={
+                  overview ? String(overview.runsTotal) : refused ? "n/a" : "…"
+                }
               />
               <Tile
                 label="Active accounts"
                 sub="tenants with ≥1 run in range"
-                value={overview ? String(overview.activeAccounts) : "…"}
+                value={
+                  overview
+                    ? String(overview.activeAccounts)
+                    : refused
+                      ? "n/a"
+                      : "…"
+                }
               />
               <Tile
                 label="New accounts"
                 sub="User rows created in range"
-                value={overview ? String(overview.newAccounts) : "…"}
+                value={
+                  overview
+                    ? String(overview.newAccounts)
+                    : refused
+                      ? "n/a"
+                      : "…"
+                }
               />
               <Tile
                 label="All accounts"
                 sub="every User row, ever"
-                value={overview ? String(overview.accountsTotal) : "…"}
+                value={
+                  overview
+                    ? String(overview.accountsTotal)
+                    : refused
+                      ? "n/a"
+                      : "…"
+                }
               />
             </div>
 
@@ -536,7 +606,9 @@ export function Warden({ operator }: { operator: string }) {
               {overview ? (
                 <VolumeChart days={overview.days} />
               ) : (
-                <span style={type_.meta}>loading…</span>
+                <span style={type_.meta}>
+                  {refused ? "directory unreachable" : "loading…"}
+                </span>
               )}
             </div>
 
@@ -545,14 +617,25 @@ export function Warden({ operator }: { operator: string }) {
                 needs="an outcome column on RunUsage"
                 title="Failure rate"
               />
-              <NotRecorded
-                needs="startedAt and completedAt recorded per run"
+              <Recorded
+                sub="95th percentile of settled runs in range"
                 title="p95 duration"
+                value={
+                  overview?.durationP95Seconds === null ||
+                  overview?.durationP95Seconds === undefined
+                    ? null
+                    : fleetDuration(overview.durationP95Seconds)
+                }
               />
               <NotRecorded needs="a retry ledger" title="Retries" />
+              <Recorded
+                sub="minutes charged against caps in range"
+                title="Minutes charged"
+                value={overview ? String(overview.minutesTotal) : null}
+              />
               <NotRecorded
-                needs="provider cost recorded per run"
-                title="Cost"
+                needs="provider spend per run"
+                title="Provider cost"
               />
             </div>
           </div>
@@ -624,7 +707,11 @@ export function Warden({ operator }: { operator: string }) {
               </div>
               {slice.length === 0 ? (
                 <p style={{ ...type_.body, padding: "26px 14px" }}>
-                  {data ? "No accounts match." : "loading…"}
+                  {data
+                    ? "No accounts match."
+                    : refused
+                      ? "The directory could not be read. Nothing is missing from the record."
+                      : "loading…"}
                 </p>
               ) : (
                 slice.map((row) => (

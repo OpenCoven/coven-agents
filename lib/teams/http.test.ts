@@ -221,6 +221,15 @@ function handlers(
     admission?: AbuseAdmission;
     appOrigin?: string | (() => string | null);
     auth?: RunnerAuth;
+    draftMission?: (input: {
+      description: string;
+      hint: string;
+      members: readonly Readonly<{
+        required: boolean;
+        responsibility: string;
+      }>[];
+      name: string;
+    }) => Promise<string>;
     idempotencyStore?: IdempotencyStore;
     onAbuse?: (input: AbuseEnforcementInput) => void;
     onAfter?: (operation: () => Promise<void>) => void;
@@ -243,6 +252,7 @@ function handlers(
     },
     auth: options.auth ?? authorizedAuth(),
     createRequestId: () => REQUEST_ID,
+    ...(options.draftMission ? { draftMission: options.draftMission } : {}),
     createService: () => {
       events.push("service");
       serviceRequests += 1;
@@ -1570,5 +1580,117 @@ if (fixtureMode) {
     );
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout.startsWith('{"ok":true}'), true, result.stdout);
+  });
+}
+
+if (!fixtureMode) {
+  function missionRequest(body: unknown = {}): Request {
+    return new Request(`https://app.test/api/teams/${TEAM_ID}/mission`, {
+      body: JSON.stringify(body),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+  }
+
+  test("a drafted mission is generated from the team's own roster", async () => {
+    const seen: unknown[] = [];
+    const fixture = handlers({
+      draftMission: async (input) => {
+        seen.push(input);
+        return "  Ship the fix and return a passing check.  ";
+      },
+    });
+
+    const response = await fixture.handlers.draftTeamMission(
+      missionRequest({ hint: "  the flaky login test  " }),
+      TEAM_ID
+    );
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      mission: "Ship the fix and return a passing check.",
+    });
+    // The generator receives the roster, never the raw team record.
+    assert.deepEqual(seen, [
+      {
+        description: team.description,
+        hint: "the flaky login test",
+        members: team.members.map((member) => ({
+          required: member.required,
+          responsibility: member.responsibility,
+        })),
+        name: team.name,
+      },
+    ]);
+    assert.deepEqual(
+      fixture.admissions.map((admission) => admission.route),
+      ["team_mission_draft"]
+    );
+  });
+
+  test("drafting reports unavailable when no generator is configured", async () => {
+    const fixture = handlers();
+
+    const response = await fixture.handlers.draftTeamMission(
+      missionRequest(),
+      TEAM_ID
+    );
+
+    assert.equal(response.status, 503);
+    // A generator failure is reported the same way, so a provider outage never
+    // reaches the console as a model or gateway error.
+    const failing = handlers({
+      draftMission: async () => {
+        throw new Error("gateway exploded with a key in the message");
+      },
+    });
+    const failed = await failing.handlers.draftTeamMission(
+      missionRequest(),
+      TEAM_ID
+    );
+    assert.equal(failed.status, 503);
+    assert.doesNotMatch(await failed.text(), /gateway|key/i);
+  });
+
+  test("drafting refuses an unknown team and an unusable draft", async () => {
+    const missing = handlers({
+      draftMission: async () => "unused",
+      service: service({ getTeam: async () => ({ kind: "not_found" }) }),
+    });
+    assert.equal(
+      (await missing.handlers.draftTeamMission(missionRequest(), TEAM_ID))
+        .status,
+      404
+    );
+
+    const blank = handlers({ draftMission: async () => "   " });
+    assert.equal(
+      (await blank.handlers.draftTeamMission(missionRequest(), TEAM_ID)).status,
+      503
+    );
+  });
+
+  test("reading a live team run schedules the pass that advances it", async () => {
+    const live = handlers();
+    await live.handlers.getTeamRun(
+      new Request(`https://app.test/api/team-runs/${TEAM_RUN_ID}`),
+      TEAM_RUN_ID
+    );
+    assert.equal(live.events.includes("after"), true);
+
+    // A finished run has nothing to advance, so reading it schedules nothing.
+    const settled = handlers({
+      service: service({
+        getRun: async () => ({
+          kind: "found",
+          teamRun: { ...teamRun, status: "completed" },
+        }),
+      }),
+    });
+    await settled.handlers.getTeamRun(
+      new Request(`https://app.test/api/team-runs/${TEAM_RUN_ID}`),
+      TEAM_RUN_ID
+    );
+    assert.equal(settled.events.includes("after"), false);
   });
 }

@@ -186,17 +186,9 @@ export function RuntimeInspector({
           }}
         >
           <div style={{ alignItems: "center", display: "flex", gap: 8 }}>
-            <span
-              aria-label="Sandbox healthy"
-              role="img"
-              style={{
-                background: "var(--color-success)",
-                borderRadius: 999,
-                flex: "none",
-                height: 5,
-                width: 5,
-              }}
-            />
+            {/* No health dot here. This panel reads the stored definition and
+                receives no sandbox status, so a green dot asserted a liveness
+                nothing had checked. */}
             <Eyebrow>Boundary</Eyebrow>
             <div style={{ flex: 1 }} />
             <span style={type_.meta}>Daytona sandbox</span>

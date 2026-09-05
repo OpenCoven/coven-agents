@@ -234,6 +234,13 @@ export function TeamConsole({
   >(null);
   const [projectAuthorityCheckedAt, setProjectAuthorityCheckedAt] = useState(0);
   const [mission, setMission] = useState("");
+  const [drafting, setDrafting] = useState(false);
+  /**
+   * A toast is transient; the empty state it leaves behind is not. Without
+   * these, a failed load tells someone they have no teams and no runs.
+   */
+  const [catalogFailed, setCatalogFailed] = useState(false);
+  const [runsFailed, setRunsFailed] = useState(false);
   const [skillName, setSkillName] = useState("");
   const [skillDescription, setSkillDescription] = useState("");
   const [skillInstructions, setSkillInstructions] = useState("");
@@ -365,11 +372,13 @@ export function TeamConsole({
 
   useEffect(() => {
     const controller = new AbortController();
+    setCatalogFailed(false);
     refreshCatalog(controller.signal)
       .catch((error) => {
         if (controller.signal.aborted) {
           return;
         }
+        setCatalogFailed(true);
         toast.error("Could not load teams.", {
           description: readableError(error),
         });
@@ -405,6 +414,7 @@ export function TeamConsole({
     setSelectedRun(null);
     setRunRefreshError(null);
     setLoadingRuns(true);
+    setRunsFailed(false);
     const controller = new AbortController();
     client
       .listTeamRuns(selectedTeamId, { signal: controller.signal })
@@ -421,6 +431,7 @@ export function TeamConsole({
         if (controller.signal.aborted) {
           return;
         }
+        setRunsFailed(true);
         toast.error("Could not load team runs.", {
           description: readableError(error),
         });
@@ -708,6 +719,40 @@ export function TeamConsole({
       });
     } finally {
       setBusy(false);
+    }
+  };
+
+  /**
+   * Fills the mission field from the team's own roster. Whatever is already
+   * typed is passed as a steer, so a half-written note becomes a full
+   * mission rather than being thrown away. The result is editable and still
+   * requires the person to start the run.
+   */
+  const draftMission = async () => {
+    if (!selectedTeam || drafting) {
+      return;
+    }
+    const teamId = selectedTeam.id;
+    setDrafting(true);
+    try {
+      const drafted = await client.draftTeamMission(
+        teamId,
+        { hint: mission.trim() },
+        lifecycleControllerRef.current?.signal
+      );
+      if (selectedTeamIdRef.current !== teamId) {
+        return;
+      }
+      setMission(drafted);
+    } catch (error) {
+      if (lifecycleControllerRef.current?.signal.aborted) {
+        return;
+      }
+      toast.error("Could not draft a mission.", {
+        description: readableError(error),
+      });
+    } finally {
+      setDrafting(false);
     }
   };
 
@@ -1348,18 +1393,27 @@ export function TeamConsole({
                   value={mission}
                 />
               </Field>
-              <Btn
-                disabled={busy || loadingRuns || !mission.trim()}
-                onClick={startRun}
-                variant="primary"
-              >
-                {busy || loadingRuns ? (
-                  <Spinner size={12} />
-                ) : (
-                  <ChevronRight size={13} />
-                )}
-                Start coordinated run
-              </Btn>
+              <div className="oc-team-mission__actions">
+                <Btn
+                  disabled={busy || loadingRuns || drafting}
+                  onClick={draftMission}
+                >
+                  {drafting ? <Spinner size={12} /> : <Sparkles size={13} />}
+                  {mission.trim() ? "Rewrite as a mission" : "Draft a mission"}
+                </Btn>
+                <Btn
+                  disabled={busy || loadingRuns || drafting || !mission.trim()}
+                  onClick={startRun}
+                  variant="primary"
+                >
+                  {busy || loadingRuns ? (
+                    <Spinner size={12} />
+                  ) : (
+                    <ChevronRight size={13} />
+                  )}
+                  Start coordinated run
+                </Btn>
+              </div>
             </div>
             <div className="oc-team-run-layout">
               <aside className="oc-team-run-list">
@@ -1387,7 +1441,11 @@ export function TeamConsole({
                 ))}
                 {loadingRuns ? <p>Loading run history.</p> : null}
                 {!loadingRuns && runs.length === 0 ? (
-                  <p>No coordinated runs yet.</p>
+                  <p>
+                    {runsFailed
+                      ? "Run history could not be loaded. Any runs you started are unaffected."
+                      : "No coordinated runs yet."}
+                  </p>
                 ) : null}
                 {nextRunCursor ? (
                   <Btn
@@ -1419,6 +1477,13 @@ export function TeamConsole({
                         {selectedRun.status.replaceAll("_", " ")}
                       </span>
                     </header>
+                    {selectedRun.status === "queued" ||
+                    selectedRun.status === "running" ? (
+                      <p className="oc-team-run-drive" role="status">
+                        This run advances while this view is open. Leaving the
+                        page pauses it between members; it resumes here.
+                      </p>
+                    ) : null}
                     {selectedRun.status === "waiting_approval" ? (
                       <div className="oc-team-approval">
                         <ShieldCheck size={18} />
@@ -1497,10 +1562,15 @@ export function TeamConsole({
         ) : (
           <div className="oc-team-empty">
             <UsersRound size={28} />
-            <h2>Create a coordinated team</h2>
+            <h2>
+              {catalogFailed
+                ? "Teams could not be loaded"
+                : "Create a coordinated team"}
+            </h2>
             <p>
-              Set up the GitHub delivery team or compose a custom sequence from
-              your execution profiles and reusable skills.
+              {catalogFailed
+                ? "Any teams you have are still here. Reload to try reading them again."
+                : "Set up the GitHub delivery team or compose a custom sequence from your execution profiles and reusable skills."}
             </p>
           </div>
         )}

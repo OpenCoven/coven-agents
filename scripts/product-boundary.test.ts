@@ -92,6 +92,7 @@ const applicationRouteFiles = [
   "app/api/team-runs/[id]/approve/route.ts",
   "app/api/team-runs/[id]/route.ts",
   "app/api/team-runs/[id]/stop/route.ts",
+  "app/api/teams/[id]/mission/route.ts",
   "app/api/teams/[id]/route.ts",
   "app/api/teams/[id]/runs/route.ts",
   "app/api/teams/route.ts",
@@ -622,11 +623,24 @@ test("the subscriber offer renders the authoritative run cap without duplicating
     "utf8"
   );
 
+  // The named import may sit alongside others; what matters is that the cap
+  // comes from the constant and the number itself never appears in the view.
   assert.match(
     source,
-    /import \{ MONTHLY_MINUTE_CAP \} from "@\/lib\/billing\/limits";/
+    /import \{[^}]*\bMONTHLY_MINUTE_CAP\b[^}]*\} from "@\/lib\/billing\/limits";/s
   );
   assert.equal(source.includes(String(MONTHLY_MINUTE_CAP)), false);
+
+  // The usage ledger is the other surface that quotes the cap to a buyer.
+  const ledger = readFileSync(
+    new URL("components/billing/usage-ledger.tsx", repositoryRoot),
+    "utf8"
+  );
+  assert.match(
+    ledger,
+    /import \{[^}]*\bMONTHLY_MINUTE_CAP\b[^}]*\} from "@\/lib\/billing\/limits";/s
+  );
+  assert.equal(ledger.includes(String(MONTHLY_MINUTE_CAP)), false);
 });
 
 test("the README links the living subscription policy", () => {

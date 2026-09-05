@@ -5,9 +5,11 @@ import {
   type CreateSkillInput,
   type CreateTeamInput,
   type CreateTeamRunInput,
+  type DraftTeamMissionInput,
   skillEnvelopeSchema,
   skillsEnvelopeSchema,
   teamEnvelopeSchema,
+  teamMissionEnvelopeSchema,
   teamRunEnvelopeSchema,
   teamRunsEnvelopeSchema,
   teamsEnvelopeSchema,
@@ -95,6 +97,21 @@ export class TeamClient {
         }
       )
     );
+  }
+
+  async draftTeamMission(
+    teamId: string,
+    input: DraftTeamMissionInput,
+    signal?: AbortSignal
+  ) {
+    return teamMissionEnvelopeSchema.parse(
+      await this.request(`/api/teams/${encodeURIComponent(teamId)}/mission`, {
+        body: JSON.stringify(input),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+        signal,
+      })
+    ).mission;
   }
 
   async createTeamRun(

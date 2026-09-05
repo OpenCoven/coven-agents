@@ -61,6 +61,7 @@ type RailProps = {
   /** The browser's clock, or 0 before it is known. */
   now: number;
   onToggle: () => void;
+  failedRunHistoryAgentIds: ReadonlySet<string>;
   pendingRunHistoryAgentIds: ReadonlySet<string>;
   runs: ConsoleRun[];
   selectedAgentId: string | null;
@@ -471,6 +472,9 @@ export function AgentRail(props: RailProps) {
             ...section.agents.map((agent) => {
               const isOpen = agent.id === props.selectedAgentId;
               const agentRuns = runsByAgent.get(agent.id) ?? [];
+              const historyFailed = props.failedRunHistoryAgentIds.has(
+                agent.id
+              );
               const historyPending = props.pendingRunHistoryAgentIds.has(
                 agent.id
               );
@@ -550,7 +554,9 @@ export function AgentRail(props: RailProps) {
                         <p>
                           {historyPending
                             ? "Loading recent runs…"
-                            : "No runs in this session."}
+                            : historyFailed
+                              ? "Recent runs could not be loaded."
+                              : "No runs in this session."}
                         </p>
                       ) : (
                         agentRuns.map((run) => (

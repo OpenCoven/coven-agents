@@ -180,6 +180,14 @@ export function RunConsole({
   const [agents, setAgents] = useState<AgentDefinition[]>([]);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [runs, setRuns] = useState<ConsoleRun[]>([]);
+  /**
+   * Profiles whose run history could not be read. Without this the rail says
+   * "No runs in this session" for a request that failed, which reads as an
+   * empty profile rather than a failed load.
+   */
+  const [failedRunHistoryAgentIds, setFailedRunHistoryAgentIds] = useState<
+    ReadonlySet<string>
+  >(new Set());
   const [pendingRunHistoryAgentIds, setPendingRunHistoryAgentIds] = useState<
     ReadonlySet<string>
   >(() => new Set());
@@ -476,6 +484,11 @@ export function RunConsole({
             } catch (error) {
               if (signal.aborted) {
                 throw error;
+              }
+              if (isLatestRefresh()) {
+                setFailedRunHistoryAgentIds((current) =>
+                  new Set(current).add(agent.id)
+                );
               }
             } finally {
               if (isLatestRefresh()) {
@@ -1601,6 +1614,7 @@ export function RunConsole({
               agents={agents}
               avatarSrc={avatarSrc}
               collapsed={railCollapsed}
+              failedRunHistoryAgentIds={failedRunHistoryAgentIds}
               now={now}
               onCreateAgent={openCreate}
               onNewRun={openComposer}

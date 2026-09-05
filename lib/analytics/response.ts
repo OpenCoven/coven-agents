@@ -7,7 +7,7 @@ import { subscriberAccessResponse } from "@/lib/auth/subscriber-access";
 import type { authorizeSubscriberAccess } from "@/lib/auth/subscriber-authorization.server";
 import { windowStart } from "@/lib/billing/history";
 import { MONTHLY_MINUTE_CAP } from "@/lib/billing/limits";
-import type { runHistory } from "@/lib/db/queries";
+import type { runDurationSummary, runHistory } from "@/lib/db/queries";
 import { tenantForUser } from "@/lib/session";
 
 const RANGES = [7, 30, 90] as const;
@@ -17,6 +17,7 @@ export type AnalyticsDependencies = {
   authorize: typeof authorizeSubscriberAccess;
   authenticate: () => Promise<SessionLike>;
   enforceAbuse: typeof enforceAbusePolicy;
+  readDurations: typeof runDurationSummary;
   readHistory: typeof runHistory;
 };
 
@@ -52,16 +53,17 @@ export async function analyticsResponse(
 
   const now = new Date();
   const since = windowStart(now, days);
-  const series = await dependencies.readHistory(
-    tenantForUser(access.userId),
-    since,
-    now
-  );
+  const tenant = tenantForUser(access.userId);
+  const [series, durations] = await Promise.all([
+    dependencies.readHistory(tenant, since, now),
+    dependencies.readDurations(tenant, since),
+  ]);
 
   return Response.json(
     {
       cap: MONTHLY_MINUTE_CAP,
       days: series,
+      durations,
       minutes: series.reduce((sum, entry) => sum + entry.minutes, 0),
       range: days,
       total: series.reduce((sum, entry) => sum + entry.runs, 0),

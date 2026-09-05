@@ -488,9 +488,10 @@ export function StepsTimeline({
           <div
             className={running ? "oc-shim" : undefined}
             style={{
-              background: running
-                ? "var(--bg-elevated)"
-                : "var(--accent-presence)",
+              // Neutral when finished. This component is told only whether the
+              // run is live, so an accent fill asserted an outcome it does not
+              // know: a failed run looked exactly like a completed one.
+              background: running ? "var(--bg-elevated)" : "var(--text-faint)",
               borderRadius: 999,
               height: "100%",
               width: "100%",
