@@ -298,9 +298,13 @@
 .oc-team-rail h1,
 .oc-team-form h2,
 .oc-team-workspace h2,
+/*
+ * An empty state gives an instruction, it does not name the object in view,
+ * so it speaks in the interface face. The serif is reserved for naming.
+ */
 .oc-team-empty h2 {
   margin: 4px 0 0;
-  font: 500 28px / 1 var(--font-serif);
+  font: 500 19px / 1.3 var(--font-ui);
 }
 
 .oc-team-built-in {
@@ -360,8 +364,14 @@
   letter-spacing: 0.09em;
 }
 
+/*
+ * The list takes the height its content needs and scrolls only when the rail
+ * runs out of room. It used to claim all the free space, which pushed the
+ * create actions to the bottom of a viewport-tall column, far from the list
+ * they add to.
+ */
 .oc-team-list {
-  flex: 1;
+  flex: 0 1 auto;
   min-height: 0;
   overflow-y: auto;
 }
@@ -409,6 +419,10 @@
 }
 
 .oc-team-connect strong {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
   font: 500 12px / 1.3 var(--font-ui);
   color: var(--text-primary);
 }
@@ -449,7 +463,19 @@
   );
 }
 
-.oc-team-connect[data-state="disconnected"] strong {
+.oc-team-connect__state {
+  font: 400 10px / 1.4 var(--font-mono);
+  font-style: normal;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.oc-team-connect__state[data-state="connected"] {
+  color: var(--color-success);
+}
+
+.oc-team-connect__state[data-state="disconnected"] {
   color: var(--accent-presence);
 }
 
@@ -495,6 +521,115 @@
   gap: 5px;
   padding-top: 10px;
   border-top: var(--border-hairline);
+}
+
+/* Delete sits apart from the toolbar group and takes colour on intent. */
+.oc-team-workspace__destructive {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  padding-left: 10px;
+  margin-left: 4px;
+  border-left: var(--border-hairline);
+}
+
+.oc-team-workspace__destructive > button:hover {
+  color: var(--color-danger);
+}
+
+/*
+ * The team, drawn where a second empty state used to sit. Numbered because
+ * the order is real: each member runs after the one above it.
+ */
+.oc-team-sequence {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.oc-team-sequence__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.oc-team-sequence__step {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 12px;
+  padding: 12px 4px;
+  border-top: var(--border-hairline);
+}
+
+.oc-team-sequence__step:first-child {
+  border-top: 0;
+}
+
+.oc-team-sequence__index {
+  font: 500 11px / 1.7 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-faint);
+}
+
+.oc-team-sequence__body {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.oc-team-sequence__name {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.oc-team-sequence__name strong {
+  font: 500 13px / 1.3 var(--font-ui);
+  color: var(--text-primary);
+}
+
+.oc-team-sequence__name em {
+  font: 400 10px / 1.4 var(--font-mono);
+  font-style: normal;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.oc-team-sequence__body p {
+  margin: 0;
+  font: 400 12.5px / 1.55 var(--font-ui);
+  color: var(--text-secondary);
+  text-wrap: pretty;
+}
+
+.oc-team-sequence__skills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.oc-team-sequence__skills code {
+  padding: 1px 7px;
+  font: 400 10px / 1.7 var(--font-mono);
+  color: var(--text-muted);
+  background: var(--bg-sunken);
+  border: var(--border-hairline);
+  border-radius: 999px;
+}
+
+.oc-team-sequence__note {
+  margin: 0;
+  font: 400 11px / 1.5 var(--font-ui);
+  color: var(--text-faint);
+  text-wrap: pretty;
 }
 
 .oc-team-canvas {

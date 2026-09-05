@@ -15,7 +15,6 @@ import {
 import {
   ArrowDown,
   ArrowUp,
-  Check,
   ChevronRight,
   CircleStop,
   Download,
@@ -190,6 +189,76 @@ function Field({
       <Eyebrow>{label}</Eyebrow>
       {children}
     </label>
+  );
+}
+
+/**
+ * The team, drawn.
+ *
+ * The panel used to name a team, describe it in a sentence, and count its
+ * members, which left the object itself invisible until you opened the edit
+ * form or started a run. This is the sequence that will execute: each member
+ * in order, its brief, and what it carries. It reads from the team resource
+ * the panel already holds, so it needs nothing new from the server.
+ */
+function TeamSequence({
+  agents,
+  skills,
+  team,
+}: {
+  agents: AgentDefinition[];
+  skills: SkillResource[];
+  team: TeamResource;
+}) {
+  const ordered = [...team.members].sort(
+    (left, right) => left.position - right.position
+  );
+  return (
+    <div className="oc-team-sequence">
+      <div className="oc-team-rail__label">
+        <span>Sequence</span>
+        <span>
+          {ordered.length} {ordered.length === 1 ? "member" : "members"}
+        </span>
+      </div>
+      <ol className="oc-team-sequence__list">
+        {ordered.map((member, index) => {
+          const agent = agents.find(({ id }) => id === member.agentId);
+          const carried = member.skillIds
+            .map((id) => skills.find((skill) => skill.id === id))
+            .filter((skill): skill is SkillResource => skill !== undefined);
+          return (
+            <li className="oc-team-sequence__step" key={member.id}>
+              <span className="oc-team-sequence__index">{index + 1}</span>
+              <div className="oc-team-sequence__body">
+                <span className="oc-team-sequence__name">
+                  <strong>
+                    {agent
+                      ? sanitizeEvidenceText(agent.name)
+                      : "Profile unavailable"}
+                  </strong>
+                  {member.required ? null : <em>may be skipped</em>}
+                </span>
+                <p>{sanitizeEvidenceText(member.responsibility)}</p>
+                {carried.length > 0 ? (
+                  <span className="oc-team-sequence__skills">
+                    {carried.map((skill) => (
+                      <code key={skill.id}>
+                        {sanitizeEvidenceText(skill.name)}
+                      </code>
+                    ))}
+                  </span>
+                ) : null}
+              </div>
+            </li>
+          );
+        })}
+      </ol>
+      <p className="oc-team-sequence__note">
+        Each member reads the mission, then the evidence the member before it
+        returned. A required step that fails stops the run.
+      </p>
+    </div>
   );
 }
 
@@ -1221,26 +1290,21 @@ export function TeamConsole({
             Runs
           </Btn>
         </div>
-        <button
-          className="oc-team-built-in"
-          data-selected={githubTeam?.id === selectedTeamId ? "" : undefined}
-          disabled={busy}
-          onClick={provisionGitHubTeam}
-          type="button"
-        >
-          <ShieldCheck size={17} />
-          <span>
-            <strong>{GITHUB_DELIVERY_TEAM.name}</strong>
-            <small>Issues · PRs · approvals</small>
-          </span>
-          {busy ? (
-            <Spinner size={12} />
-          ) : githubTeam ? (
-            <Check size={14} />
-          ) : (
-            <Plus size={14} />
-          )}
-        </button>
+        {githubTeam ? null : (
+          <button
+            className="oc-team-built-in"
+            disabled={busy}
+            onClick={provisionGitHubTeam}
+            type="button"
+          >
+            <ShieldCheck size={17} />
+            <span>
+              <strong>{GITHUB_DELIVERY_TEAM.name}</strong>
+              <small>Issues · PRs · approvals</small>
+            </span>
+            {busy ? <Spinner size={12} /> : <Plus size={14} />}
+          </button>
+        )}
         {/*
           The install route mints the signed state the callback requires, so
           connecting has to start here rather than from GitHub. It was
@@ -1260,11 +1324,23 @@ export function TeamConsole({
           <Github size={15} />
           <span>
             <strong>
-              {githubConnected === null
-                ? "Checking GitHub"
-                : githubConnected
-                  ? "GitHub connected"
-                  : "Connect GitHub"}
+              GitHub
+              <em
+                className="oc-team-connect__state"
+                data-state={
+                  githubConnected === null
+                    ? "unknown"
+                    : githubConnected
+                      ? "connected"
+                      : "disconnected"
+                }
+              >
+                {githubConnected === null
+                  ? "checking"
+                  : githubConnected
+                    ? "connected"
+                    : "not connected"}
+              </em>
             </strong>
             <small>
               {githubConnected === null
@@ -1638,7 +1714,6 @@ export function TeamConsole({
           <div className="oc-team-workspace">
             <header className="oc-team-workspace__head">
               <div>
-                <Eyebrow>{selectedTeam.members.length} member sequence</Eyebrow>
                 <h2>{sanitizeEvidenceText(selectedTeam.name)}</h2>
                 <p>{sanitizeEvidenceText(selectedTeam.description)}</p>
               </div>
@@ -1665,39 +1740,41 @@ export function TeamConsole({
                   <Pencil size={12} />
                   Edit
                 </Btn>
-                {confirmingDelete === selectedTeam.id ? (
-                  <>
+                <span className="oc-team-workspace__destructive">
+                  {confirmingDelete === selectedTeam.id ? (
+                    <>
+                      <Btn
+                        disabled={busy}
+                        onClick={() => {
+                          deleteTeam(selectedTeam).catch(() => undefined);
+                        }}
+                        size="xs"
+                        variant="danger-ghost"
+                      >
+                        {busy ? <Spinner size={11} /> : <Trash2 size={12} />}
+                        Delete permanently
+                      </Btn>
+                      <Btn
+                        disabled={busy}
+                        onClick={() => setConfirmingDelete(null)}
+                        size="xs"
+                        variant="ghost"
+                      >
+                        Keep
+                      </Btn>
+                    </>
+                  ) : (
                     <Btn
                       disabled={busy}
-                      onClick={() => {
-                        deleteTeam(selectedTeam).catch(() => undefined);
-                      }}
-                      size="xs"
-                      variant="danger-ghost"
-                    >
-                      {busy ? <Spinner size={11} /> : <Trash2 size={12} />}
-                      Delete permanently
-                    </Btn>
-                    <Btn
-                      disabled={busy}
-                      onClick={() => setConfirmingDelete(null)}
+                      onClick={() => setConfirmingDelete(selectedTeam.id)}
                       size="xs"
                       variant="ghost"
                     >
-                      Keep
+                      <Trash2 size={12} />
+                      Delete
                     </Btn>
-                  </>
-                ) : (
-                  <Btn
-                    disabled={busy}
-                    onClick={() => setConfirmingDelete(selectedTeam.id)}
-                    size="xs"
-                    variant="ghost"
-                  >
-                    <Trash2 size={12} />
-                    Delete
-                  </Btn>
-                )}
+                  )}
+                </span>
               </div>
             </header>
             {confirmingDelete === selectedTeam.id ? (
@@ -1959,14 +2036,11 @@ export function TeamConsole({
                     </div>
                   </>
                 ) : (
-                  <div className="oc-team-empty">
-                    <UsersRound size={24} />
-                    <h3>Start the first coordinated run</h3>
-                    <p>
-                      The record will show every member, approval, handoff, and
-                      execution identifier in sequence.
-                    </p>
-                  </div>
+                  <TeamSequence
+                    agents={agents}
+                    skills={skills}
+                    team={selectedTeam}
+                  />
                 )}
               </div>
             </div>
