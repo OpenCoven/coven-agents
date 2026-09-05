@@ -537,7 +537,9 @@ test("OAuth code exchange timeout, status errors, oversize, and malformed JSON f
           ]
         )
       ),
-      code: "github_oauth_exchange_rejected",
+      // Still fails closed, and now names which refusal it was: an expired
+      // authorization is a different repair from a wrong client secret.
+      code: "github_oauth_code_expired",
     },
     {
       client: clientFor(

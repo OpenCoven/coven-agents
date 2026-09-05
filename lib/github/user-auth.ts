@@ -6,6 +6,28 @@ import type { GitHubUserRepositoryPermission } from "./authority-types";
 
 const GITHUB_API_ORIGIN = "https://api.github.com";
 const GITHUB_OAUTH_ORIGIN = "https://github.com";
+
+/**
+ * Narrows GitHub's own refusal so the operator learns which thing is wrong.
+ *
+ * These are GitHub's fixed OAuth identifiers, not free text, so carrying them
+ * forward leaks nothing. Collapsing all three into one code meant a mistyped
+ * client secret, an expired sign-in, and a misconfigured callback address all
+ * surfaced as "callback validation failed", which named none of them.
+ */
+export function exchangeRejectionCode(error: string): string {
+  switch (error) {
+    case "incorrect_client_credentials":
+      return "github_oauth_credentials_rejected";
+    case "bad_verification_code":
+    case "expired_token":
+      return "github_oauth_code_expired";
+    case "redirect_uri_mismatch":
+      return "github_oauth_redirect_mismatch";
+    default:
+      return "github_oauth_exchange_rejected";
+  }
+}
 const GITHUB_API_VERSION = "2022-11-28";
 const DEFAULT_TIMEOUT_MS = 5000;
 const DEFAULT_EXCHANGE_OBSERVATION_TIMEOUT_MS = 30_000;
@@ -283,7 +305,7 @@ export function createGitHubUserAuthorizationClient(
         typeof parsed.error === "string"
       ) {
         validationError = new GitHubProviderError(
-          "github_oauth_exchange_rejected",
+          exchangeRejectionCode(parsed.error),
           {
             retryable: false,
             status: 400,
