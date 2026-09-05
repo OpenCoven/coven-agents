@@ -7,6 +7,7 @@ import {
   type CreateAgentInput,
   type SkillResource,
   sanitizeEvidenceText,
+  TEAM_LIMITS,
   type TeamCapability,
   type TeamResource,
   type TeamRun,
@@ -17,10 +18,14 @@ import {
   Check,
   ChevronRight,
   CircleStop,
+  Download,
+  Github,
+  Pencil,
   Plus,
   RefreshCw,
   ShieldCheck,
   Sparkles,
+  Trash2,
   UsersRound,
   X,
 } from "lucide-react";
@@ -91,6 +96,36 @@ function isGitHubDeliveryTeam(team: TeamResource): boolean {
       );
     })
   );
+}
+
+const RELATIVE = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+const RELATIVE_STEPS: readonly [Intl.RelativeTimeFormatUnit, number][] = [
+  ["second", 60],
+  ["minute", 60],
+  ["hour", 24],
+  ["day", 7],
+  ["week", 4],
+  ["month", 12],
+];
+
+/** `4 minutes ago`, so a run's age reads without doing arithmetic. */
+function relativeTime(iso: string, now: number): string {
+  const at = Date.parse(iso);
+  if (Number.isNaN(at)) {
+    return "";
+  }
+  let value = (at - now) / 1000;
+  for (const [unit, size] of RELATIVE_STEPS) {
+    if (Math.abs(value) < size) {
+      return RELATIVE.format(Math.round(value), unit);
+    }
+    value /= size;
+  }
+  return RELATIVE.format(Math.round(value), "year");
+}
+
+function statusLabel(status: TeamRun["status"]): string {
+  return status.replaceAll("_", " ");
 }
 
 function teamTone(
@@ -247,6 +282,22 @@ export function TeamConsole({
   const [skillCapabilities, setSkillCapabilities] = useState<TeamCapability[]>(
     []
   );
+  /** Set while the team form is editing an existing team rather than creating. */
+  const [editingTeam, setEditingTeam] = useState<TeamResource | null>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
+  /**
+   * One instant for every age in the list, refreshed whenever the list
+   * itself reloads. Pinning it forever would leave "4 minutes ago" frozen on
+   * a console left open; recomputing per row would let rows disagree.
+   */
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the reload is the refresh point.
+  const listedAt = useMemo(() => Date.now(), [runs]);
+  /**
+   * Whether this account has a GitHub installation bound to it. `null` means
+   * the check has not answered yet, which is deliberately distinct from "not
+   * connected" so the rail never claims a state it has not read.
+   */
+  const [githubConnected, setGithubConnected] = useState<boolean | null>(null);
   const [teamName, setTeamName] = useState("");
   const [teamDescription, setTeamDescription] = useState("");
   const [members, setMembers] = useState<DraftMember[]>([]);
@@ -284,8 +335,12 @@ export function TeamConsole({
           return null;
         }
         const body = (await response.json()) as {
+          connected?: unknown;
           projectAuthorityExpiresAt?: unknown;
         };
+        if (!controller.signal.aborted) {
+          setGithubConnected(body.connected === true);
+        }
         return visibleGitHubProjectCapabilityExpiry(
           body.projectAuthorityExpiresAt,
           new Date()
@@ -305,6 +360,7 @@ export function TeamConsole({
       .catch(() => {
         if (!controller.signal.aborted) {
           setProjectAuthorityExpiresAt(null);
+          setGithubConnected(null);
         }
       });
     return () => {
@@ -657,7 +713,126 @@ export function TeamConsole({
     }
   };
 
+  /** Opens the same form the create flow uses, prefilled from a saved team. */
+  const beginEditTeam = (team: TeamResource) => {
+    setEditingTeam(team);
+    setTeamName(team.name);
+    setTeamDescription(team.description);
+    setMembers(
+      team.members.map((member) => ({
+        agentId: member.agentId,
+        draftId: crypto.randomUUID(),
+        required: member.required,
+        responsibility: member.responsibility,
+        skillIds: [...member.skillIds],
+      }))
+    );
+    setMode("team");
+  };
+
+  const saveTeam = async () => {
+    const team = editingTeam;
+    if (!team) {
+      return;
+    }
+    setBusy(true);
+    try {
+      const updated = await client.updateTeam(
+        team.id,
+        {
+          description: teamDescription,
+          expectedVersion: team.version,
+          members: members.map(
+            ({ agentId, required, responsibility, skillIds }) => ({
+              agentId,
+              required,
+              responsibility,
+              skillIds,
+            })
+          ),
+          name: teamName,
+        },
+        { signal: lifecycleControllerRef.current?.signal }
+      );
+      setTeams((current) =>
+        current.map((entry) => (entry.id === updated.id ? updated : entry))
+      );
+      setSelectedTeamId(updated.id);
+      setEditingTeam(null);
+      setMode("browse");
+      toast.success("Team updated.");
+    } catch (error) {
+      if (lifecycleControllerRef.current?.signal.aborted) {
+        return;
+      }
+      toast.error("Could not update the team.", {
+        description: readableError(error),
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteTeam = async (team: TeamResource) => {
+    setBusy(true);
+    try {
+      await client.deleteTeam(
+        team.id,
+        team.version,
+        lifecycleControllerRef.current?.signal
+      );
+      setTeams((current) => current.filter((entry) => entry.id !== team.id));
+      setConfirmingDelete(null);
+      setSelectedTeamId((current) => (current === team.id ? null : current));
+      setRuns([]);
+      setSelectedRun(null);
+      toast.success("Team deleted.");
+    } catch (error) {
+      if (lifecycleControllerRef.current?.signal.aborted) {
+        return;
+      }
+      toast.error("Could not delete the team.", {
+        description: readableError(error),
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
+   * Writes the team definition to a file the browser saves. Export is
+   * deliberately client-side and derived from what is already on screen: it
+   * carries the sequence and each member's brief, not run history or
+   * evidence, so it is safe to hand to someone else.
+   */
+  const exportTeam = (team: TeamResource) => {
+    const payload = {
+      description: team.description,
+      exportedAt: new Date().toISOString(),
+      members: team.members.map((member) => ({
+        agentId: member.agentId,
+        position: member.position,
+        required: member.required,
+        responsibility: member.responsibility,
+        skillIds: member.skillIds,
+      })),
+      name: team.name,
+      version: team.version,
+    };
+    const url = URL.createObjectURL(
+      new Blob([JSON.stringify(payload, null, 2)], {
+        type: "application/json",
+      })
+    );
+    const link = document.createElement("a");
+    link.download = `${team.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase() || "team"}.json`;
+    link.href = url;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
   const beginTeam = () => {
+    setEditingTeam(null);
     const initialAgents = agents.slice(0, 2);
     setMembers(
       initialAgents.map((agent, index) => ({
@@ -1030,6 +1205,41 @@ export function TeamConsole({
             <Plus size={14} />
           )}
         </button>
+        {/*
+          The install route mints the signed state the callback requires, so
+          connecting has to start here rather than from GitHub. It was
+          previously reachable only by typing the URL.
+        */}
+        <a
+          className="oc-team-connect"
+          data-state={
+            githubConnected === null
+              ? "unknown"
+              : githubConnected
+                ? "connected"
+                : "disconnected"
+          }
+          href={`${BASE_PATH}/api/github/install`}
+        >
+          <Github size={15} />
+          <span>
+            <strong>
+              {githubConnected === null
+                ? "Checking GitHub"
+                : githubConnected
+                  ? "GitHub connected"
+                  : "Connect GitHub"}
+            </strong>
+            <small>
+              {githubConnected === null
+                ? "Reading this account's installation."
+                : githubConnected
+                  ? "Manage which repositories this account can reach."
+                  : "Required before a team can touch issues or pull requests."}
+            </small>
+          </span>
+          <ChevronRight size={13} />
+        </a>
         <div className="oc-team-rail__label">
           <span>Saved teams</span>
           <span>{teams.length}</span>
@@ -1353,7 +1563,13 @@ export function TeamConsole({
               Add member
             </Btn>
             <div className="oc-team-form__actions">
-              <Btn onClick={() => setMode("browse")} variant="ghost">
+              <Btn
+                onClick={() => {
+                  setEditingTeam(null);
+                  setMode("browse");
+                }}
+                variant="ghost"
+              >
                 Cancel
               </Btn>
               <Btn
@@ -1363,11 +1579,11 @@ export function TeamConsole({
                   members.length < 2 ||
                   members.some(({ responsibility }) => !responsibility.trim())
                 }
-                onClick={createTeam}
+                onClick={editingTeam ? saveTeam : createTeam}
                 variant="primary"
               >
                 {busy ? <Spinner size={12} /> : null}
-                Create team
+                {editingTeam ? "Save changes" : "Create team"}
               </Btn>
             </div>
           </div>
@@ -1379,20 +1595,111 @@ export function TeamConsole({
                 <h2>{sanitizeEvidenceText(selectedTeam.name)}</h2>
                 <p>{sanitizeEvidenceText(selectedTeam.description)}</p>
               </div>
-              <Btn onClick={() => refreshCatalog()} size="xs" variant="ghost">
-                <RefreshCw size={12} />
-                Refresh
-              </Btn>
+              <div className="oc-team-workspace__actions">
+                <Btn onClick={() => refreshCatalog()} size="xs" variant="ghost">
+                  <RefreshCw size={12} />
+                  Refresh
+                </Btn>
+                <Btn
+                  disabled={busy}
+                  onClick={() => exportTeam(selectedTeam)}
+                  size="xs"
+                  variant="ghost"
+                >
+                  <Download size={12} />
+                  Export
+                </Btn>
+                <Btn
+                  disabled={busy || agents.length < 2}
+                  onClick={() => beginEditTeam(selectedTeam)}
+                  size="xs"
+                  variant="ghost"
+                >
+                  <Pencil size={12} />
+                  Edit
+                </Btn>
+                {confirmingDelete === selectedTeam.id ? (
+                  <>
+                    <Btn
+                      disabled={busy}
+                      onClick={() => {
+                        deleteTeam(selectedTeam).catch(() => undefined);
+                      }}
+                      size="xs"
+                      variant="danger-ghost"
+                    >
+                      {busy ? <Spinner size={11} /> : <Trash2 size={12} />}
+                      Delete permanently
+                    </Btn>
+                    <Btn
+                      disabled={busy}
+                      onClick={() => setConfirmingDelete(null)}
+                      size="xs"
+                      variant="ghost"
+                    >
+                      Keep
+                    </Btn>
+                  </>
+                ) : (
+                  <Btn
+                    disabled={busy}
+                    onClick={() => setConfirmingDelete(selectedTeam.id)}
+                    size="xs"
+                    variant="ghost"
+                  >
+                    <Trash2 size={12} />
+                    Delete
+                  </Btn>
+                )}
+              </div>
             </header>
+            {confirmingDelete === selectedTeam.id ? (
+              <p className="oc-team-delete-warning" role="alert">
+                Deleting removes the team and its run history from this account.
+                Runs already recorded against your usage are unaffected. This
+                cannot be undone; export first if you want to keep the sequence.
+              </p>
+            ) : null}
             <div className="oc-team-mission">
               <Field label="Mission">
                 <textarea
                   onChange={(event) => setMission(event.currentTarget.value)}
+                  onKeyDown={(event) => {
+                    // The mission is multi-line, so Enter must stay Enter.
+                    // Cmd or Ctrl with Enter starts the run, which is what
+                    // every other composer in this product does.
+                    if (
+                      event.key === "Enter" &&
+                      (event.metaKey || event.ctrlKey) &&
+                      mission.trim() &&
+                      !(busy || loadingRuns || drafting)
+                    ) {
+                      event.preventDefault();
+                      startRun().catch(() => undefined);
+                    }
+                  }}
                   placeholder="Name the issue, pull request, repository, expected outcome, and evidence the team must return."
                   rows={4}
                   value={mission}
                 />
               </Field>
+              <p className="oc-team-mission__hint">
+                <span>
+                  Every member reads this same instruction, in order.{" "}
+                  {mission.trim()
+                    ? "Press ⌘↵ to start."
+                    : "Draft one if you would rather edit than write."}
+                </span>
+                <span
+                  data-over={
+                    mission.length > TEAM_LIMITS.maxMissionLength
+                      ? ""
+                      : undefined
+                  }
+                >
+                  {mission.length}/{TEAM_LIMITS.maxMissionLength}
+                </span>
+              </p>
               <div className="oc-team-mission__actions">
                 <Btn
                   disabled={busy || loadingRuns || drafting}
@@ -1421,24 +1728,72 @@ export function TeamConsole({
                   <span>Run history</span>
                   <span>{runs.length}</span>
                 </div>
-                {runs.map((run) => (
-                  <button
-                    data-selected={run.id === selectedRun?.id ? "" : undefined}
-                    disabled={busy}
-                    key={run.id}
-                    onClick={() => setSelectedRun(run)}
-                    type="button"
-                  >
-                    <StatusDot
-                      label={run.status}
-                      size={7}
-                      tone={teamTone(run.status)}
-                    />
-                    <span style={truncate}>
-                      {sanitizeEvidenceText(run.mission)}
-                    </span>
-                  </button>
-                ))}
+                {/*
+                  A listbox rather than a stack of buttons: the arrow keys
+                  move between runs, Home and End jump to the ends, and only
+                  the selected row is a tab stop, so reaching the record does
+                  not mean tabbing through every run.
+                */}
+                <div
+                  aria-label="Run history"
+                  className="oc-team-run-options"
+                  onKeyDown={(event) => {
+                    const index = runs.findIndex(
+                      (run) => run.id === selectedRun?.id
+                    );
+                    const next =
+                      event.key === "ArrowDown"
+                        ? Math.min(runs.length - 1, index + 1)
+                        : event.key === "ArrowUp"
+                          ? Math.max(0, index - 1)
+                          : event.key === "Home"
+                            ? 0
+                            : event.key === "End"
+                              ? runs.length - 1
+                              : -1;
+                    const target = next >= 0 ? runs[next] : undefined;
+                    if (!target || target.id === selectedRun?.id) {
+                      return;
+                    }
+                    event.preventDefault();
+                    setSelectedRun(target);
+                  }}
+                  role="listbox"
+                  tabIndex={-1}
+                >
+                  {runs.map((run) => {
+                    const selected = run.id === selectedRun?.id;
+                    return (
+                      <button
+                        aria-selected={selected}
+                        data-selected={selected ? "" : undefined}
+                        disabled={busy}
+                        key={run.id}
+                        onClick={() => setSelectedRun(run)}
+                        role="option"
+                        tabIndex={selected ? 0 : -1}
+                        type="button"
+                      >
+                        <StatusDot
+                          label={run.status}
+                          size={7}
+                          tone={teamTone(run.status)}
+                        />
+                        <span className="oc-team-run-option__body">
+                          <span style={truncate}>
+                            {sanitizeEvidenceText(run.mission)}
+                          </span>
+                          <small>
+                            {statusLabel(run.status)}
+                            {run.createdAt
+                              ? ` · ${relativeTime(run.createdAt, listedAt)}`
+                              : ""}
+                          </small>
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
                 {loadingRuns ? <p>Loading run history.</p> : null}
                 {!loadingRuns && runs.length === 0 ? (
                   <p>

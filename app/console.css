@@ -382,6 +382,92 @@
   border-radius: var(--radius-control);
 }
 
+/* Connecting GitHub starts here, because the callback needs signed state. */
+.oc-team-connect {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 9px;
+  align-items: center;
+  padding: 10px 11px;
+  margin-top: 8px;
+  color: var(--text-secondary);
+  text-decoration: none;
+  background: var(--bg-sunken);
+  border: var(--border-hairline);
+  border-radius: var(--radius-control);
+}
+
+.oc-team-connect:hover {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+}
+
+.oc-team-connect span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.oc-team-connect strong {
+  font: 500 12px / 1.3 var(--font-ui);
+  color: var(--text-primary);
+}
+
+.oc-team-connect small {
+  font: 400 11px / 1.4 var(--font-ui);
+  color: var(--text-muted);
+  text-wrap: pretty;
+}
+
+.oc-team-connect[data-state="connected"] {
+  border-color: color-mix(
+    in oklch,
+    var(--color-success, var(--accent-presence)) 45%,
+    transparent
+  );
+}
+
+.oc-team-connect[data-state="disconnected"] strong {
+  color: var(--accent-presence);
+}
+
+.oc-team-workspace__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.oc-team-delete-warning {
+  padding: 10px 12px;
+  margin: 0;
+  font: 400 11px / 1.5 var(--font-ui);
+  color: var(--text-primary);
+  text-wrap: pretty;
+  background: var(--bg-sunken);
+  border: 1px solid
+    color-mix(in oklch, var(--color-danger, red) 42%, transparent);
+  border-radius: var(--radius-control);
+}
+
+.oc-team-mission__hint {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  justify-content: space-between;
+  margin: 6px 0 0;
+  font: 400 11px / 1.5 var(--font-ui);
+  color: var(--text-muted);
+}
+
+.oc-team-mission__hint span:last-child {
+  font-variant-numeric: tabular-nums;
+}
+
+.oc-team-mission__hint span[data-over] {
+  color: var(--color-danger, red);
+}
+
 .oc-team-rail__actions {
   display: grid;
   gap: 5px;
@@ -615,8 +701,35 @@
   border-right: var(--border-hairline);
 }
 
-.oc-team-run-list > button {
+.oc-team-run-options > button {
   grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+}
+
+.oc-team-run-option__body {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.oc-team-run-option__body small {
+  font: 400 10px / 1.4 var(--font-mono);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.oc-team-run-options
+  > button[aria-selected="true"]
+  .oc-team-run-option__body
+  small {
+  color: var(--text-secondary);
+}
+
+.oc-team-run-options:focus-visible,
+.oc-team-run-options > button:focus-visible {
+  outline: 2px solid var(--ring-focus, var(--accent-presence));
+  outline-offset: -2px;
 }
 
 .oc-team-run-list > button[data-selected] {
