@@ -607,7 +607,7 @@ type DaytonaSandboxPersistence = Readonly<{
     reserved: RunnerAgentRecord
   ) => Promise<
     | { kind: "updated"; value: RunnerAgentRecord }
-    | { kind: "not_found" | "stale_version" }
+    | { kind: "not_found" | "not_live" | "stale_version" }
   >;
   fail: (
     reserved: RunnerAgentRecord
@@ -882,7 +882,9 @@ async function resetMismatchedSandboxAndReprovision(
   const resetting = await persistence.beginReset(reserved);
   if (resetting.kind !== "updated") {
     throw new DaytonaSandboxLifecycleError(
-      "Daytona sandbox generation changed before stale cleanup.",
+      resetting.kind === "not_live"
+        ? "Daytona sandbox is running an attempt and cannot be replaced yet."
+        : "Daytona sandbox generation changed before stale cleanup.",
       { retryable: true }
     );
   }
@@ -1149,7 +1151,14 @@ export function ensureDaytonaSandbox(
     configuration,
     dependencies,
     subscriberSandboxPersistence(principal, dependencies),
-    false
+    /**
+     * Prewarm replaces a sandbox whose configuration no longer matches, the
+     * same as dispatch does. It is safe here because the subscriber reset
+     * refuses while an attempt is live; before that guard existed this had to
+     * be false, which left a drifted agent raising a retryable error on every
+     * prewarm and never repairing itself.
+     */
+    true
   );
 }
 
