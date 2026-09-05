@@ -183,7 +183,10 @@ export type GitHubConnectionAuthorityRefreshResult =
 
 type GitHubErrorCode =
   | "abuse_control_unavailable"
+  | "github_app_credentials_rejected"
+  | "github_callback_expired"
   | "github_callback_invalid"
+  | "github_callback_redirect_mismatch"
   | "github_configuration_invalid"
   | "github_feature_disabled"
   | "github_installation_access_denied"
@@ -215,10 +218,28 @@ const ERROR_DEFINITIONS = {
     retryable: true,
     status: 503,
   },
+  github_app_credentials_rejected: {
+    message:
+      "GitHub rejected this application's credentials. The stored client secret does not match the configured GitHub App.",
+    retryable: false,
+    status: 503,
+  },
+  github_callback_expired: {
+    message:
+      "The GitHub authorization expired before it completed. Start the connection again.",
+    retryable: false,
+    status: 400,
+  },
   github_callback_invalid: {
     message: "GitHub callback validation failed.",
     retryable: false,
     status: 400,
+  },
+  github_callback_redirect_mismatch: {
+    message:
+      "GitHub refused the callback address this application asked it to use. The App's callback URL does not match APP_ORIGIN.",
+    retryable: false,
+    status: 503,
   },
   github_configuration_invalid: {
     message: "GitHub connection configuration is unavailable.",
@@ -1907,6 +1928,15 @@ function callbackErrorCode(error: unknown): GitHubErrorCode {
   }
   if (error.code === "github_user_installation_inaccessible") {
     return "github_installation_access_denied";
+  }
+  if (error.code === "github_oauth_credentials_rejected") {
+    return "github_app_credentials_rejected";
+  }
+  if (error.code === "github_oauth_code_expired") {
+    return "github_callback_expired";
+  }
+  if (error.code === "github_oauth_redirect_mismatch") {
+    return "github_callback_redirect_mismatch";
   }
   if (error.code === "github_oauth_exchange_rejected") {
     return "github_callback_invalid";
