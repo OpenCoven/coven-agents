@@ -2130,6 +2130,59 @@ function callbackRequest(
   );
 }
 
+test("the RFC 9207 issuer is accepted from GitHub and rejected from anyone else", async () => {
+  // GitHub returns iss on the authorization redirect. Refusing the callback
+  // for carrying it stranded every connection before a single GitHub call was
+  // made, which is what shipped; tolerating it blindly would throw away the
+  // mix-up defence the parameter exists to provide.
+  const accepted = await createGitHubConnectionHandlers(
+    dependencies()
+  ).callback(
+    new Request(
+      `${oauthCallbackRequest(stateFor()).url}&iss=${encodeURIComponent(
+        "https://github.com/login/oauth"
+      )}`
+    ),
+    null
+  );
+  assert.notEqual(await errorCode(accepted), "github_callback_invalid");
+
+  for (const issuer of [
+    "https://github.com/login/oauth/",
+    "https://gitlab.com/login/oauth",
+    "https://github.com.evil.test/login/oauth",
+    "",
+  ]) {
+    // biome-ignore lint/performance/noAwaitInLoops: each forged issuer uses an isolated handler
+    const rejected = await createGitHubConnectionHandlers(
+      dependencies()
+    ).callback(
+      new Request(
+        `${oauthCallbackRequest(stateFor()).url}&iss=${encodeURIComponent(issuer)}`
+      ),
+      null
+    );
+    assert.equal(rejected.status, 400, issuer);
+    // biome-ignore lint/performance/noAwaitInLoops: each forged issuer uses an isolated handler
+    assert.equal(await errorCode(rejected), "github_callback_invalid", issuer);
+  }
+});
+
+test("an authorization callback still refuses parameters GitHub does not send", async () => {
+  for (const suffix of ["&scope=repo", "&installation_id=1", "&iss2=x"]) {
+    // biome-ignore lint/performance/noAwaitInLoops: each forged query uses an isolated handler
+    const response = await createGitHubConnectionHandlers(
+      dependencies()
+    ).callback(
+      new Request(`${oauthCallbackRequest(stateFor()).url}${suffix}`),
+      null
+    );
+    assert.equal(response.status, 400, suffix);
+    // biome-ignore lint/performance/noAwaitInLoops: each forged query uses an isolated handler
+    assert.equal(await errorCode(response), "github_callback_invalid", suffix);
+  }
+});
+
 function oauthCallbackRequest(
   state: string,
   code = OAUTH_CODE,

@@ -85,6 +85,15 @@ const CALLBACK_PARAMETERS = new Set([
   "state",
 ]);
 const OAUTH_CALLBACK_PARAMETERS = new Set(["code", "state"]);
+/**
+ * GitHub returns the issuer identifier on the authorization redirect, per
+ * RFC 9207. It is optional on the wire, and when it is present it must be
+ * checked rather than merely tolerated: identifying the issuer is the whole
+ * point of the parameter, and it is what defends the redirect against a
+ * mix-up attack from a second authorization server.
+ */
+const OAUTH_OPTIONAL_PARAMETERS = new Set(["iss"]);
+const GITHUB_OAUTH_ISSUER = "https://github.com/login/oauth";
 const INSTALL_PARAMETERS = new Set(["returnTo"]);
 const IDEMPOTENCY_RETENTION_FLOOR_MS = 1000;
 const CALLBACK_PROCESSING_LEASE_MS = 10 * 60_000;
@@ -1618,12 +1627,23 @@ function callbackParameters(request: Request):
     return { installationId, kind: "installation", setupAction, state };
   }
   if (
-    entries.length === OAUTH_CALLBACK_PARAMETERS.size &&
-    entries.every(([name]) => OAUTH_CALLBACK_PARAMETERS.has(name))
+    names.has("code") &&
+    names.has("state") &&
+    entries.every(
+      ([name]) =>
+        OAUTH_CALLBACK_PARAMETERS.has(name) ||
+        OAUTH_OPTIONAL_PARAMETERS.has(name)
+    )
   ) {
     const code = parameters.get("code");
     const state = parameters.get("state");
-    if (!code || !OAUTH_CODE.test(code) || !validCallbackState(state)) {
+    const issuer = parameters.get("iss");
+    if (
+      !code ||
+      !OAUTH_CODE.test(code) ||
+      !validCallbackState(state) ||
+      (issuer !== null && issuer !== GITHUB_OAUTH_ISSUER)
+    ) {
       return null;
     }
     return { code, kind: "oauth", state };
