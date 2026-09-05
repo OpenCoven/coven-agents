@@ -1480,8 +1480,9 @@ export function TeamConsole({
                     {selectedRun.status === "queued" ||
                     selectedRun.status === "running" ? (
                       <p className="oc-team-run-drive" role="status">
-                        This run advances while this view is open. Leaving the
-                        page pauses it between members; it resumes here.
+                        This run continues if you close the page. Each member
+                        starts within about a minute of the one before it
+                        finishing.
                       </p>
                     ) : null}
                     {selectedRun.status === "waiting_approval" ? (

@@ -43,6 +43,9 @@ const POLICIES = Object.freeze({
   auth_start: closedPolicy(["ip"], 0, rateClass(5, 60, 20, 3600)),
   avatar_read: closedPolicy(["ip", "user"], 0, STANDARD_READ),
   avatar_write: closedPolicy(["ip", "user"], 8192, SENSITIVE_WRITE),
+  // Opening the hosted portal is cheap and must stay available to someone
+  // trying to cancel, so it is metered loosely.
+  billing_portal: closedPolicy(["ip", "user"], 0, rateClass(5, 300, 20, 3600)),
   chat: closedPolicy(["ip", "user"], 64_000, rateClass(4, 60, 60, 3600)),
   chat_delete: closedPolicy(["ip", "user"], 0, DESTRUCTIVE_WRITE),
   checkout: closedPolicy(["ip", "user"], 8192, rateClass(2, 300, 3, 3600)),
