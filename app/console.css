@@ -419,6 +419,28 @@
   text-wrap: pretty;
 }
 
+/* Named repositories, so "connected" is checkable rather than asserted. */
+.oc-team-connect__repos {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+  margin-top: 2px;
+}
+
+.oc-team-connect__repos code {
+  max-width: 100%;
+  padding: 1px 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font: 400 10px / 1.6 var(--font-mono);
+  color: var(--text-secondary);
+  white-space: nowrap;
+  background: var(--bg-base);
+  border: var(--border-hairline);
+  border-radius: 999px;
+}
+
 .oc-team-connect[data-state="connected"] {
   border-color: color-mix(
     in oklch,

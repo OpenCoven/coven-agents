@@ -124,6 +124,33 @@ function relativeTime(iso: string, now: number): string {
   return RELATIVE.format(Math.round(value), "year");
 }
 
+/**
+ * `owner/name` for each connected repository, from the connection endpoint.
+ *
+ * Parsed defensively and sorted, because this is rendered as fact: a
+ * malformed entry is dropped rather than shown as a partial name.
+ */
+function connectedRepositories(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const names = new Set<string>();
+  for (const entry of value) {
+    const repository = (entry as { repository?: unknown } | null)?.repository as
+      | { name?: unknown; owner?: unknown }
+      | undefined;
+    if (
+      typeof repository?.name === "string" &&
+      typeof repository.owner === "string" &&
+      repository.name &&
+      repository.owner
+    ) {
+      names.add(`${repository.owner}/${repository.name}`);
+    }
+  }
+  return [...names].sort((left, right) => left.localeCompare(right));
+}
+
 function statusLabel(status: TeamRun["status"]): string {
   return status.replaceAll("_", " ");
 }
@@ -298,6 +325,12 @@ export function TeamConsole({
    * connected" so the rail never claims a state it has not read.
    */
   const [githubConnected, setGithubConnected] = useState<boolean | null>(null);
+  /**
+   * The repositories this account's installation can reach, as the endpoint
+   * reported them. Shown so "connected" names what it is connected to rather
+   * than asserting a state the reader cannot check.
+   */
+  const [githubRepositories, setGithubRepositories] = useState<string[]>([]);
   const [teamName, setTeamName] = useState("");
   const [teamDescription, setTeamDescription] = useState("");
   const [members, setMembers] = useState<DraftMember[]>([]);
@@ -336,10 +369,12 @@ export function TeamConsole({
         }
         const body = (await response.json()) as {
           connected?: unknown;
+          connections?: unknown;
           projectAuthorityExpiresAt?: unknown;
         };
         if (!controller.signal.aborted) {
           setGithubConnected(body.connected === true);
+          setGithubRepositories(connectedRepositories(body.connections));
         }
         return visibleGitHubProjectCapabilityExpiry(
           body.projectAuthorityExpiresAt,
@@ -361,6 +396,7 @@ export function TeamConsole({
         if (!controller.signal.aborted) {
           setProjectAuthorityExpiresAt(null);
           setGithubConnected(null);
+          setGithubRepositories([]);
         }
       });
     return () => {
@@ -1234,9 +1270,20 @@ export function TeamConsole({
               {githubConnected === null
                 ? "Reading this account's installation."
                 : githubConnected
-                  ? "Manage which repositories this account can reach."
+                  ? githubRepositories.length > 0
+                    ? `${githubRepositories.length} ${githubRepositories.length === 1 ? "repository" : "repositories"} · change what this account can reach`
+                    : "No repository is selected yet. Choose which ones this account can reach."
                   : "Required before a team can touch issues or pull requests."}
             </small>
+            {githubConnected && githubRepositories.length > 0 ? (
+              <span className="oc-team-connect__repos">
+                {githubRepositories.map((repository) => (
+                  <code key={repository} title={repository}>
+                    {repository}
+                  </code>
+                ))}
+              </span>
+            ) : null}
           </span>
           <ChevronRight size={13} />
         </a>
