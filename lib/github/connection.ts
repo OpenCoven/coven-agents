@@ -1999,6 +1999,11 @@ function reportFailure(
         [
           "access_revocation",
           "exchange",
+          "exchange_access_token",
+          "exchange_candidates",
+          "exchange_expiration",
+          "exchange_metadata",
+          "exchange_refresh_token",
           "identity_lookup",
           "installation_lookup",
           "project_lookup",

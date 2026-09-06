@@ -335,8 +335,7 @@ export function createGitHubUserAuthorizationClient(
           retainEffectiveCandidate(revokeAccess, accessToken) ||
           candidateOverflow;
       } catch (error) {
-        validationError ??=
-          error instanceof GitHubProviderError ? error : invalidResponse();
+        validationError ??= providerStageError(error, "exchange_access_token");
       }
       try {
         if (parsed.refresh_token !== undefined) {
@@ -346,23 +345,35 @@ export function createGitHubUserAuthorizationClient(
               boundedTokenCandidate(parsed.refresh_token)
             ) || candidateOverflow;
         }
-        if (
-          parsed.error !== undefined ||
-          parsed.token_type !== "bearer" ||
-          parsed.scope !== ""
-        ) {
-          throw invalidResponse();
-        }
+      } catch (error) {
+        validationError ??= providerStageError(error, "exchange_refresh_token");
+      }
+      if (
+        parsed.error !== undefined ||
+        parsed.token_type !== "bearer" ||
+        parsed.scope !== ""
+      ) {
+        validationError ??= providerStageError(
+          invalidResponse(),
+          "exchange_metadata"
+        );
+      }
+      try {
         validateOptionalExpiration(parsed);
       } catch (error) {
-        validationError ??=
-          error instanceof GitHubProviderError ? error : invalidResponse();
+        validationError ??= providerStageError(error, "exchange_expiration");
       }
       if (accessToken !== null && !OAUTH_USER_PATTERN.test(accessToken)) {
-        validationError ??= invalidResponse();
+        validationError ??= providerStageError(
+          invalidResponse(),
+          "exchange_access_token"
+        );
       }
       if (candidateOverflow) {
-        validationError ??= invalidResponse();
+        validationError ??= providerStageError(
+          invalidResponse(),
+          "exchange_candidates"
+        );
       }
       return {
         error: validationError,

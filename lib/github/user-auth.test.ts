@@ -511,6 +511,7 @@ test("OAuth code exchange timeout, status errors, oversize, and malformed JSON f
   const cases: Array<{
     client: ReturnType<typeof clientFor>;
     code: string;
+    providerStage?: string;
   }> = [
     {
       client: clientFor(abortableTimeoutFetch(), {
@@ -564,6 +565,7 @@ test("OAuth code exchange timeout, status errors, oversize, and malformed JSON f
           [
             jsonResponse({
               access_token: "not-a-user-token",
+              scope: "",
               token_type: "bearer",
             }),
             new Response(null, { status: 204 }),
@@ -571,6 +573,7 @@ test("OAuth code exchange timeout, status errors, oversize, and malformed JSON f
         )
       ),
       code: "github_provider_invalid_response",
+      providerStage: "exchange_access_token",
     },
   ];
 
@@ -581,6 +584,9 @@ test("OAuth code exchange timeout, status errors, oversize, and malformed JSON f
       (error: unknown) => {
         assert.ok(error instanceof GitHubProviderError);
         assert.equal(error.code, current.code);
+        if (current.providerStage !== undefined) {
+          assert.equal(error.providerStage, current.providerStage);
+        }
         assert.doesNotMatch(
           `${String(error)}\n${JSON.stringify(error)}`,
           new RegExp(USER_TOKEN, "u")
@@ -602,7 +608,10 @@ test("valid token candidates in a malformed exchange response are revoked before
 
   await assert.rejects(
     client.proveInstallationAccess(proofInput()),
-    providerError("github_provider_invalid_response", false)
+    (error: unknown) =>
+      error instanceof GitHubProviderError &&
+      providerError("github_provider_invalid_response", false)(error) &&
+      error.providerStage === "exchange_metadata"
   );
   assert.equal(requests.length, 3);
   assert.deepEqual(revokedCredentials(requests).sort(), [
