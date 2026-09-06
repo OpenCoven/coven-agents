@@ -1448,11 +1448,14 @@ test("OAuth proof failures report only bounded provider diagnostics", async () =
       {
         proveInstallationAccess: () =>
           Promise.reject(
-            new GitHubProviderError("github_provider_invalid_response", {
-              requestId: "ABC1:DEF2:123456:789ABC:01234567",
-              retryable: false,
-              status: 502,
-            })
+            Object.assign(
+              new GitHubProviderError("github_provider_invalid_response", {
+                requestId: "ABC1:DEF2:123456:789ABC:01234567",
+                retryable: false,
+                status: 502,
+              }),
+              { providerStage: "repository_lookup" as const }
+            )
           ),
       }
     )
@@ -1469,6 +1472,7 @@ test("OAuth proof failures report only bounded provider diagnostics", async () =
     {
       code: "github_provider_invalid_response",
       providerRequestId: "ABC1:DEF2:123456:789ABC:01234567",
+      providerStage: "repository_lookup",
       retryable: false,
       stage: "user_authorization",
       status: 502,

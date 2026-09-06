@@ -1,7 +1,7 @@
 import "server-only";
 
 import type { KeyObject } from "node:crypto";
-import { GitHubProviderError } from "./app-auth";
+import { GitHubProviderError, type GitHubProviderStage } from "./app-auth";
 import type { GitHubUserRepositoryPermission } from "./authority-types";
 
 const GITHUB_API_ORIGIN = "https://api.github.com";
@@ -667,19 +667,30 @@ export function createGitHubUserAuthorizationClient(
   return {
     async proveInstallationAccess(proof) {
       assertProofInput(proof);
-      const { error: exchangeError, tokens: exchangedTokens } =
-        await exchangeCode(proof);
+      const { error: rawExchangeError, tokens: exchangedTokens } =
+        await withProviderStage("exchange", () => exchangeCode(proof));
+      const exchangeError =
+        rawExchangeError === null
+          ? null
+          : providerStageError(rawExchangeError, "exchange");
       let accessToken = exchangedTokens.access;
       const accessTokensToRevoke = [...exchangedTokens.revokeAccess];
       const refreshTokensToRevoke = [...exchangedTokens.revokeRefresh];
       let operationError: unknown = exchangeError ?? undefined;
       let authority: GitHubUserInstallationAuthority | undefined;
       if (operationError === undefined && accessToken !== null) {
+        const proofAccessToken = accessToken;
         try {
-          await assertAccessibleInstallation(proof.installationId, accessToken);
+          await withProviderStage("installation_lookup", () =>
+            assertAccessibleInstallation(proof.installationId, proofAccessToken)
+          );
           const [userResult, repositoryResult] = await Promise.allSettled([
-            userIdentity(accessToken),
-            userRepositories(proof.installationId, accessToken),
+            withProviderStage("identity_lookup", () =>
+              userIdentity(proofAccessToken)
+            ),
+            withProviderStage("repository_lookup", () =>
+              userRepositories(proof.installationId, proofAccessToken)
+            ),
           ]);
           if (userResult.status === "rejected") {
             throw userResult.reason;
@@ -687,9 +698,9 @@ export function createGitHubUserAuthorizationClient(
           if (repositoryResult.status === "rejected") {
             throw repositoryResult.reason;
           }
-          const projectIdsByOwner = await userProjectIds(
-            repositoryResult.value,
-            accessToken
+          const projectIdsByOwner = await withProviderStage(
+            "project_lookup",
+            () => userProjectIds(repositoryResult.value, proofAccessToken)
           );
           authority = {
             repositories: repositoryResult.value.map(
@@ -711,8 +722,14 @@ export function createGitHubUserAuthorizationClient(
       let revocationError: unknown;
       try {
         const revocations = [
-          ...refreshTokensToRevoke.map((token) => revokeRefreshToken(token)),
-          ...accessTokensToRevoke.map((token) => revokeToken(token)),
+          ...refreshTokensToRevoke.map((token) =>
+            withProviderStage("refresh_revocation", () =>
+              revokeRefreshToken(token)
+            )
+          ),
+          ...accessTokensToRevoke.map((token) =>
+            withProviderStage("access_revocation", () => revokeToken(token))
+          ),
         ];
         const results = await Promise.allSettled(revocations);
         revocationError = results.find(
@@ -1273,6 +1290,36 @@ function positiveInteger(value: number, label: string): number {
     throw new RangeError(`${label} must be a positive safe integer.`);
   }
   return value;
+}
+
+async function withProviderStage<T>(
+  providerStage: GitHubProviderStage,
+  operation: () => Promise<T>
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    throw providerStageError(error, providerStage);
+  }
+}
+
+function providerStageError(
+  error: unknown,
+  providerStage: GitHubProviderStage
+): GitHubProviderError {
+  if (!(error instanceof GitHubProviderError)) {
+    return new GitHubProviderError("github_provider_unavailable", {
+      providerStage,
+      retryable: true,
+      status: 503,
+    });
+  }
+  return new GitHubProviderError(error.code, {
+    providerStage: error.providerStage ?? providerStage,
+    requestId: error.requestId,
+    retryable: error.retryable,
+    status: error.status,
+  });
 }
 
 function timeoutError(): GitHubProviderError {

@@ -182,6 +182,7 @@ export type GitHubConnectionDependencies = Readonly<{
 export type GitHubConnectionFailureDiagnostic = Readonly<{
   code: string;
   providerRequestId: string | null;
+  providerStage: string | null;
   retryable: boolean;
   stage: "user_authorization";
   status: number;
@@ -1993,6 +1994,19 @@ function reportFailure(
         ? error.code
         : "github_provider_unexpected",
       providerRequestId: error.requestId,
+      providerStage:
+        error.providerStage &&
+        [
+          "access_revocation",
+          "exchange",
+          "identity_lookup",
+          "installation_lookup",
+          "project_lookup",
+          "refresh_revocation",
+          "repository_lookup",
+        ].includes(error.providerStage)
+          ? error.providerStage
+          : null,
       retryable: error.retryable,
       stage,
       status:
@@ -2006,6 +2020,7 @@ function reportFailure(
     diagnostic = {
       code: "github_provider_unexpected",
       providerRequestId: null,
+      providerStage: null,
       retryable: false,
       stage,
       status: 500,

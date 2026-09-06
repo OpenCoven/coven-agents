@@ -463,7 +463,10 @@ test("user installation responses are byte-bounded, well-formed, and time-bounde
   );
   await assert.rejects(
     malformed.proveInstallationAccess(proofInput()),
-    providerError("github_provider_invalid_response", false)
+    (error: unknown) =>
+      error instanceof GitHubProviderError &&
+      providerError("github_provider_invalid_response", false)(error) &&
+      error.providerStage === "installation_lookup"
   );
 
   const malformedAfterMatch = clientFor(
