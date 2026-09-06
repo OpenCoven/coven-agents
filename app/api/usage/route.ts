@@ -4,7 +4,8 @@ import {
   abuseAdmissionResponse,
   enforceAbusePolicy,
 } from "@/lib/abuse/enforce";
-import { periodStart } from "@/lib/billing/period";
+import { readCampaignPolicy } from "@/lib/billing/campaign";
+import { runEntitlementFor } from "@/lib/billing/entitlement";
 import {
   globalDailyRunCapFromEnv,
   TENANT_DAILY_MINUTE_CAP,
@@ -36,10 +37,25 @@ export async function GET(request: Request) {
   }
 
   const owner = await findUserById(session.user.id);
-  const resetsAt = owner?.subscribedUntil ?? null;
-  const since = periodStart(resetsAt, owner?.billingPeriodStart ?? null);
+  const now = new Date();
+  const entitlement = runEntitlementFor(
+    owner,
+    now,
+    readCampaignPolicy(process.env)
+  );
+  /**
+   * What the account is counting against, and when it stops. A subscriber's
+   * bucket resets at renewal; a campaign grant expires and does not return, so
+   * the date shown is the grant's expiry rather than a renewal that will never
+   * happen.
+   */
+  const resetsAt =
+    entitlement?.source === "campaign"
+      ? (owner?.campaignExpiresAt ?? null)
+      : (owner?.subscribedUntil ?? null);
+  const since = entitlement?.periodStart ?? null;
 
-  if (!(resetsAt && since)) {
+  if (!(entitlement && resetsAt && since)) {
     return Response.json(
       usageResponsePayload({
         globalAdmissionClosed: true,
@@ -60,11 +76,23 @@ export async function GET(request: Request) {
       periodStart: since,
       tenant: tenantForUser(session.user.id),
       tenantDailyCap: TENANT_DAILY_MINUTE_CAP,
+      // Not the default. `reservationUsage` falls back to the 300-minute
+      // subscriber bucket, which would report a campaign account's remainder
+      // against an allowance it does not have.
+      tenantMonthlyCap: entitlement.tenantMonthlyCap,
     });
 
-    return Response.json(usageResponsePayload({ ...usage, resetsAt }), {
-      headers: { "cache-control": "no-store" },
-    });
+    return Response.json(
+      usageResponsePayload({
+        ...usage,
+        cap: entitlement.tenantMonthlyCap,
+        resetsAt,
+        source: entitlement.source,
+      }),
+      {
+        headers: { "cache-control": "no-store" },
+      }
+    );
   } catch {
     return Response.json(
       { error: "capacity_unavailable" },

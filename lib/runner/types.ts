@@ -165,6 +165,13 @@ export type RunnerRunRecord = Omit<
   dispatchLeaseExpiresAt: Date | null;
   dispatchLeaseToken: string | null;
   dispatchState: RunnerDispatchState;
+  /**
+   * Minutes this run was admitted with, and therefore how long it may run.
+   * Null on runs admitted before the column existed, and on the recovery path
+   * where the reconciler marks a stranded dispatch running; both fall back to
+   * the process-wide limit.
+   */
+  entitlementMinutes?: number | null;
   error: RunError | null;
   executionPermission: RunnerExecutionPermission;
   githubBrokerPolicy: GitHubBrokerPolicy | null;

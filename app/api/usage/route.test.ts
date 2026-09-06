@@ -20,6 +20,7 @@ test("usage returns tenant remaining budgets without global capacity numbers", (
     monthlyRemaining: 112,
     packMinutes: 0,
     resetsAt: RESETS_AT.toISOString(),
+    source: "subscription",
     unit: "minutes",
     used: 188,
   });

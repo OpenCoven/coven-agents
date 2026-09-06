@@ -133,6 +133,24 @@ function column<T>(row: Record<string, unknown>, name: string): T {
   return value as T;
 }
 
+/**
+ * A column the caller may legitimately not have selected, or that may not
+ * exist yet on the row being read.
+ *
+ * `column` throws on a missing key so that a query which forgot to select
+ * something fails loudly rather than silently reading undefined. That is the
+ * right default, but it is wrong for a nullable column added after runs
+ * already existed: those rows genuinely have nothing to report, and a run
+ * admitted before the column existed must keep dispatching, not throw.
+ */
+function optionalColumn<T>(
+  row: Record<string, unknown>,
+  name: string
+): T | null {
+  const value = row[name];
+  return value === undefined || value === null ? null : (value as T);
+}
+
 function asAgent(row: Record<string, unknown>): RunnerAgentRecord {
   return {
     createdAt: timestampColumn(row, "createdAt"),
@@ -188,6 +206,7 @@ function asRun(row: Record<string, unknown>): RunnerRunRecord {
     ),
     dispatchLeaseToken: column(row, "dispatchLeaseToken"),
     dispatchState: column(row, "dispatchState"),
+    entitlementMinutes: optionalColumn<number>(row, "entitlementMinutes"),
     error: column(row, "error"),
     executionPermission: column(row, "executionPermission"),
     executionProvenance: column(row, "executionProvenance"),
@@ -3785,9 +3804,23 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           : { kind: "lease_lost" };
       }),
 
+    /**
+     * `entitlementMinutes` is stamped in the same statement that sets
+     * `startedAt`, because the two are only meaningful together: the run's
+     * deadline is `startedAt + entitlementMinutes`, and a row carrying one
+     * without the other cannot be bounded.
+     *
+     * Optional because the reconciler also drives this transition when
+     * admission launched a run and died before marking it running. It has no
+     * credential context to supply, so those runs keep a null and fall back to
+     * the process-wide limit -- which is exactly what bounded every run before
+     * this column existed. Billing is unaffected either way: settlement clamps
+     * the charge to the minutes the reservation actually held.
+     */
     markDispatchRunningForDispatch: (
       _operator: RunnerOperator,
-      authority: RunnerDispatchAuthority
+      authority: RunnerDispatchAuthority,
+      entitlementMinutes?: number
     ): Promise<
       | {
           authority: RunnerDispatchAuthority;
@@ -3807,6 +3840,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           statement(
             "mark-dispatch-running-for-dispatch",
             {
+              entitlementMinutes: entitlementMinutes ?? null,
               expectedVersion: authority.expectedVersion,
               leaseToken: authority.leaseToken,
               runId: run.id,
@@ -3815,6 +3849,10 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
               SET "dispatchState" = 'running',
                   "status" = 'running',
                   "startedAt" = clock_timestamp(),
+                  "entitlementMinutes" = COALESCE(
+                    ${entitlementMinutes ?? null},
+                    "entitlementMinutes"
+                  ),
                   "updatedAt" = clock_timestamp(),
                   "version" = "version" + 1
               WHERE "id" = ${run.id}

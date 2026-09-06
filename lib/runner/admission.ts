@@ -761,10 +761,20 @@ export async function dispatchRunnerClaim(
   }
 
   let credential: RunnerCredentialAcquireResult;
+  /**
+   * Carried from admission to the running transition so the run records the
+   * minutes it was admitted with. That number is both its reservation and its
+   * deadline, and the reconciler reads it back off the row rather than
+   * assuming every run gets the process-wide limit.
+   */
+  let admittedMinutes: number | undefined;
   try {
-    credential = await dependencies.acquireCredential(
-      await dependencies.credentialInput(run, ensured.agent)
+    const credentialInput = await dependencies.credentialInput(
+      run,
+      ensured.agent
     );
+    admittedMinutes = credentialInput.costUnits;
+    credential = await dependencies.acquireCredential(credentialInput);
   } catch {
     return (await requeuePreparedDispatch(
       dependencies,
@@ -1020,7 +1030,8 @@ export async function dispatchRunnerClaim(
   try {
     const marked = await dependencies.store.markDispatchRunningForDispatch(
       dependencies.operator,
-      started.dispatchAuthority
+      started.dispatchAuthority,
+      admittedMinutes
     );
     return marked.kind === "updated"
       ? { kind: "started", runId: run.id }

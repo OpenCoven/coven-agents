@@ -1,9 +1,11 @@
-import { isSubscribedAt } from "@/lib/subscription";
+import { isEntitledAt } from "@/lib/subscription";
 
 const MAX_AUTH_VERSION = 2_147_483_647;
 
 export type SessionAuthority = {
   authVersion: number;
+  campaignExpiresAt?: Date | null;
+  campaignGrantedAt?: Date | null;
   subscribedUntil: Date | null;
 };
 
@@ -29,8 +31,14 @@ export function authVersionMatches(
 
 /**
  * Subscriber authorization has two independent authorities: the token must
- * still be on the current session version, and the database subscription must
- * still be active. Invalid values intentionally fail closed.
+ * still be on the current session version, and the database entitlement must
+ * still be live -- a paid subscription, or unexpired campaign minutes.
+ * Invalid values intentionally fail closed.
+ *
+ * Entitlement rather than subscription, because this is the check the runner
+ * makes before every dispatch. Asking "is this person paying?" here would
+ * revoke a campaign participant's session the instant they tried to spend the
+ * minutes they were granted.
  */
 export function sessionAuthorityMatches(input: {
   database: SessionAuthority;
@@ -39,6 +47,6 @@ export function sessionAuthorityMatches(input: {
 }): boolean {
   return (
     authVersionMatches(input.database.authVersion, input.tokenAuthVersion) &&
-    isSubscribedAt(input.database, input.now)
+    isEntitledAt(input.database, input.now)
   );
 }

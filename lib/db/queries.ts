@@ -228,6 +228,104 @@ export async function findOrCreateFederatedUser(email: string): Promise<User> {
   }
 }
 
+/**
+ * Enrolls a user in the open beta campaign, or reports why it could not.
+ *
+ * Three properties matter here, and all three are enforced by the single
+ * statement rather than by the caller:
+ *
+ * - **Idempotent.** `campaignGrantedAt IS NULL` means a second sign-in never
+ *   re-grants. An expired grant is still a grant: re-granting on expiry would
+ *   turn the campaign into an unlimited refill on a timer, which is the exact
+ *   opposite of the bound it exists to impose.
+ * - **Capped globally.** The count is evaluated inside the same statement, so
+ *   there is no window between reading the count and writing the row.
+ * - **Serialized.** The advisory lock makes concurrent enrollments queue
+ *   rather than race. Two sign-ins landing together under READ COMMITTED would
+ *   both see `count = cap - 1` and both commit, overshooting the cap by one
+ *   per racing pair. Serializable isolation would also fix it, at the cost of
+ *   retry handling on 40001; a lock is simpler and enrollment volume is
+ *   bounded by the cap itself, so contention is measured in dozens, not
+ *   thousands.
+ */
+export type CampaignEnrollment =
+  | { kind: "already_enrolled"; user: User }
+  | { kind: "campaign_full" }
+  | { kind: "enrolled"; user: User };
+
+export async function enrollCampaignParticipant(input: {
+  expiresAt: Date;
+  grantedAt: Date;
+  maxAccounts: number;
+  userId: string;
+}): Promise<CampaignEnrollment> {
+  try {
+    return await db.transaction(async (transaction) => {
+      // Stable key for the campaign enrollment critical section. Held for the
+      // transaction and released with it, including on rollback.
+      await transaction.execute(
+        sql`SELECT pg_advisory_xact_lock(hashtext('beta_campaign_enrollment'))`
+      );
+
+      const [existing] = await transaction
+        .select()
+        .from(user)
+        .where(eq(user.id, input.userId))
+        .limit(1);
+      if (!existing) {
+        throw new ChatbotError("bad_request:database");
+      }
+      if (existing.campaignGrantedAt) {
+        return { kind: "already_enrolled" as const, user: existing };
+      }
+
+      const [enrolled] = await transaction
+        .select({ value: count() })
+        .from(user)
+        .where(sql`${user.campaignGrantedAt} is not null`);
+      if ((enrolled?.value ?? 0) >= input.maxAccounts) {
+        return { kind: "campaign_full" as const };
+      }
+
+      const [granted] = await transaction
+        .update(user)
+        .set({
+          campaignExpiresAt: input.expiresAt,
+          campaignGrantedAt: input.grantedAt,
+        })
+        .where(
+          and(eq(user.id, input.userId), sql`${user.campaignGrantedAt} is null`)
+        )
+        .returning();
+      if (!granted) {
+        throw new ChatbotError("bad_request:database");
+      }
+      return { kind: "enrolled" as const, user: granted };
+    });
+  } catch (error) {
+    if (error instanceof ChatbotError) {
+      throw error;
+    }
+    throw new ChatbotError("bad_request:database", { cause: error });
+  }
+}
+
+/**
+ * How many accounts have ever enrolled in the campaign. Read by the operator
+ * surfaces that need to say how much of the campaign is left.
+ */
+export async function campaignEnrollmentCount(): Promise<number> {
+  try {
+    const [row] = await db
+      .select({ value: count() })
+      .from(user)
+      .where(sql`${user.campaignGrantedAt} is not null`);
+    return row?.value ?? 0;
+  } catch (error) {
+    throw new ChatbotError("bad_request:database", { cause: error });
+  }
+}
+
 export async function findVerifiedUserByEmail(
   email: string
 ): Promise<User | null> {
