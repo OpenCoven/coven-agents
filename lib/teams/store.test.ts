@@ -2534,6 +2534,37 @@ test("GitHub connection listing is tenant fenced and publicly bounded", async ()
   );
 });
 
+test("GitHub connection snapshots accept PostgreSQL timestamptz offset strings", async () => {
+  const row = {
+    ...githubConnectionRow({
+      userProjectAuthorityAuthVersion: 4,
+      userProjectAuthorityConnectionGeneration: 3,
+      userProjectAuthorityExpiresAt: new Date("2026-08-31T00:15:00.000Z"),
+      userProjectAuthorityIssuedAt: NOW,
+      userProjectIds: ["PVT_current"],
+      userProjectManagementCeiling: true,
+      userProjectManagementCurrent: true,
+    }),
+    userProjectAuthorityExpiresAt: "2026-08-31 00:15:00+00",
+    userProjectAuthorityIssuedAt: "2026-08-31 00:00:00+00",
+  };
+  const { store } = scripted([], [{ generation: "3" }], [row]);
+
+  const result = await fencedGitHubStore(store).readGitHubConnectionSnapshot(
+    principal,
+    17
+  );
+
+  assert.equal(
+    result.connections[0]?.userProjectAuthorityIssuedAt?.toISOString(),
+    "2026-08-31T00:00:00.000Z"
+  );
+  assert.equal(
+    result.connections[0]?.userProjectAuthorityExpiresAt?.toISOString(),
+    "2026-08-31T00:15:00.000Z"
+  );
+});
+
 test("GitHub connection snapshots read a durable shared generation before provider work", async () => {
   const row = githubConnectionRow();
   const { statements, store } = scripted([], [{ generation: "7" }], [row]);
