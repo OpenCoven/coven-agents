@@ -2131,7 +2131,7 @@ test("sandbox policy supplies bounded resource limits and persistent lifecycle s
       autoStopInterval: 15,
       configurationId: undefined,
       domainAllowList: "github.com",
-      resources: { cpu: 2, disk: 20, memory: 4 },
+      resources: { cpu: 2, disk: 10, memory: 4 },
       snapshotName: "coven-agents-copilot-1",
       target: "us",
       ttlMinutes: 0,
@@ -2148,7 +2148,7 @@ test("sandbox policy supplies bounded resource limits and persistent lifecycle s
     ["DAYTONA_SANDBOX_MEMORY_GIB", "0"],
     ["DAYTONA_SANDBOX_MEMORY_GIB", "9"],
     ["DAYTONA_SANDBOX_DISK_GIB", "9"],
-    ["DAYTONA_SANDBOX_DISK_GIB", "41"],
+    ["DAYTONA_SANDBOX_DISK_GIB", "11"],
     ["DAYTONA_SANDBOX_CPU_CORES", "1.5"],
   ] as const) {
     assert.throws(

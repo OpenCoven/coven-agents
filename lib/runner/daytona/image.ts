@@ -25,7 +25,7 @@ export const DAYTONA_COPILOT_IMAGE_BASE = "node:22-bookworm-slim";
  * this generation counter is part of the pin: bumping any harness
  * `installVersion` without bumping this leaves the old CLI running.
  */
-export const DAYTONA_COPILOT_SNAPSHOT_NAME = "coven-agents-copilot-1";
+export const DAYTONA_COPILOT_SNAPSHOT_NAME = "coven-agents-copilot-2";
 export const PNPM_VERSION = "10.32.1";
 export const WORKSPACE_DIRECTORY = "/workspace";
 
@@ -76,7 +76,11 @@ export type DaytonaSnapshot = Readonly<{
 
 export type DaytonaSnapshotService = Readonly<{
   create: (
-    parameters: Readonly<{ image: Image; name: string }>,
+    parameters: Readonly<{
+      image: Image;
+      name: string;
+      resources: Readonly<{ cpu: number; disk: number; memory: number }>;
+    }>,
     options: Readonly<{ onLogs: (chunk: string) => void }>
   ) => Promise<DaytonaSnapshot>;
   get: (name: string) => Promise<DaytonaSnapshot>;
@@ -386,6 +390,12 @@ export async function provisionDaytonaSnapshot(
       {
         image: dependencies.image ?? createDaytonaCopilotImage(),
         name: configuration.snapshotName,
+        // Resources belong here and nowhere else. Daytona applies its own
+        // defaults (1 vCPU / 1 GiB / 3 GiB) to a snapshot created without
+        // them, and `CreateSandboxFromSnapshotParams` carries no resources
+        // field, so a sandbox can never ask for more than its snapshot has.
+        // Omitting this is what left every sandbox below policy.
+        resources: configuration.resources,
       },
       {
         onLogs: (chunk) => {

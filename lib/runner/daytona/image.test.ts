@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { DaytonaNotFoundError, SnapshotState } from "@daytona/sdk";
 import {
+  DAYTONA_PROVIDER_RESOURCE_MAXIMA,
+  DAYTONA_SANDBOX_RESOURCE_POLICY_CAPS,
+  DAYTONA_SANDBOX_RESOURCE_POLICY_DEFAULTS,
+} from "./config";
+import {
   createDaytonaBuildLogSanitizer,
   createDaytonaCopilotImage,
   createDaytonaSnapshotDefinition,
@@ -26,6 +31,7 @@ const API_KEY = "daytona-api-key-for-test";
 const configuration: DaytonaSnapshotConfiguration = {
   apiKey: API_KEY,
   apiUrl: "https://app.daytona.io/api",
+  resources: { cpu: 2, disk: 10, memory: 4 },
   snapshotName: DAYTONA_COPILOT_SNAPSHOT_NAME,
   target: "us",
 };
@@ -82,7 +88,10 @@ test("pins the harness versions to the snapshot generation", () => {
     },
     {
       harnesses: ["@github/copilot@1.0.80"],
-      snapshot: "coven-agents-copilot-1",
+      // Generation 2 bakes the resource policy into the snapshot. Generation 1
+      // was built without resources, so it carries Daytona's defaults
+      // (1 vCPU / 1 GiB / 3 GiB) and every sandbox from it drifts below policy.
+      snapshot: "coven-agents-copilot-2",
     }
   );
 });
@@ -475,4 +484,57 @@ test("rejects a created snapshot that cannot be verified as active", async () =>
     }),
     /is not active after creation \(state: build_failed\)/u
   );
+});
+
+test("the snapshot is created with the resources the policy asks for", async () => {
+  // Daytona applies its own defaults (1 vCPU / 1 GiB / 3 GiB) to a snapshot
+  // created without resources, and a sandbox created FROM a snapshot cannot
+  // ask for more than the snapshot carries. Omitting this is what left every
+  // production sandbox permanently below policy and reported as drift.
+  const createCalls: Parameters<DaytonaSnapshotService["create"]>[] = [];
+  await provisionDaytonaSnapshot(
+    { ...configuration, resources: { cpu: 2, disk: 10, memory: 4 } },
+    {
+      log: () => undefined,
+      snapshot: {
+        create: (...arguments_) => {
+          createCalls.push(arguments_);
+          return Promise.resolve(activeSnapshot());
+        },
+        get: (() => {
+          let calls = 0;
+          return () => {
+            calls += 1;
+            return calls === 1
+              ? Promise.reject(missingSnapshot())
+              : Promise.resolve(activeSnapshot());
+          };
+        })(),
+      },
+    }
+  );
+
+  assert.deepEqual(createCalls[0]?.[0].resources, {
+    cpu: 2,
+    disk: 10,
+    memory: 4,
+  });
+});
+
+test("no expressible resource policy exceeds Daytona's per-sandbox maxima", () => {
+  // A create above a provider maximum is rejected outright, so a cap that
+  // permits one is a configuration that cannot work. `disk` was 40 against a
+  // documented ceiling of 10.
+  for (const field of ["cpu", "disk", "memory"] as const) {
+    assert.ok(
+      DAYTONA_SANDBOX_RESOURCE_POLICY_CAPS[field] <=
+        DAYTONA_PROVIDER_RESOURCE_MAXIMA[field],
+      `cap for ${field} (${DAYTONA_SANDBOX_RESOURCE_POLICY_CAPS[field]}) exceeds the provider maximum (${DAYTONA_PROVIDER_RESOURCE_MAXIMA[field]})`
+    );
+    assert.ok(
+      DAYTONA_SANDBOX_RESOURCE_POLICY_DEFAULTS[field] <=
+        DAYTONA_PROVIDER_RESOURCE_MAXIMA[field],
+      `default for ${field} exceeds the provider maximum`
+    );
+  }
 });
