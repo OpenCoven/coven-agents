@@ -3003,6 +3003,23 @@
   transform: scale(1.035);
 }
 
+.oc-familiar-portrait__monogram {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  display: grid;
+  place-items: center;
+  min-width: 12px;
+  height: max(12px, 38%);
+  padding: 0 2px;
+  font-size: 0.58em;
+  color: var(--text-primary);
+  background: color-mix(in oklch, var(--bg-desk) 88%, transparent);
+  border: 1px solid color-mix(in oklch, var(--ink) 24%, transparent);
+  border-radius: 4px;
+  backdrop-filter: blur(3px);
+}
+
 .oc-agent-rail {
   position: relative;
 }

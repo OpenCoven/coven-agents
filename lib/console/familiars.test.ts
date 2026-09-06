@@ -19,7 +19,11 @@ test("every built-in profile has a distinct familiar", () => {
   );
 });
 
-test("custom profiles keep the lightweight initial fallback", () => {
-  assert.equal(familiarForProfileId("custom"), null);
+test("custom profiles receive the neutral unbound familiar", () => {
+  assert.deepEqual(familiarForProfileId("custom"), {
+    name: "Unbound",
+    profileId: "custom",
+    species: "moonstone cat",
+  });
   assert.equal(familiarForProfileId("unknown"), null);
 });

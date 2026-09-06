@@ -15,6 +15,11 @@ const FAMILIARS: Readonly<Record<string, FamiliarDefinition>> = {
     profileId: "critic",
     species: "obsidian raven",
   },
+  custom: {
+    name: "Unbound",
+    profileId: "custom",
+    species: "moonstone cat",
+  },
   scout: {
     name: "Vesper",
     profileId: "scout",
