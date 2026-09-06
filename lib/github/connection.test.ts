@@ -1436,6 +1436,90 @@ test("transient provider failures are sanitized and cannot repeat a consumed OAu
   assert.equal(store.replacements.length, 0);
 });
 
+test("OAuth proof failures report only bounded provider diagnostics", async () => {
+  const diagnostics: unknown[] = [];
+  const handlers = createGitHubConnectionHandlers(
+    dependenciesWithUserAuthorization(
+      {
+        reportFailure: (failure) => {
+          diagnostics.push(failure);
+        },
+      },
+      {
+        proveInstallationAccess: () =>
+          Promise.reject(
+            new GitHubProviderError("github_provider_invalid_response", {
+              requestId: "ABC1:DEF2:123456:789ABC:01234567",
+              retryable: false,
+              status: 502,
+            })
+          ),
+      }
+    )
+  );
+  const authorization = await beginUserAuthorization(handlers);
+
+  const response = await handlers.callback(
+    oauthCallbackRequest(authorization.state),
+    null
+  );
+
+  assert.equal(response.status, 503);
+  assert.deepEqual(diagnostics, [
+    {
+      code: "github_provider_invalid_response",
+      providerRequestId: "ABC1:DEF2:123456:789ABC:01234567",
+      retryable: false,
+      stage: "user_authorization",
+      status: 502,
+    },
+  ]);
+  assert.doesNotMatch(
+    JSON.stringify(diagnostics),
+    /oauth-code|oauth-state|installation-local-token/u
+  );
+});
+
+test("diagnostic reporting cannot strand a consumed OAuth callback", async (context) => {
+  const idempotency = new MemoryIdempotencyStore();
+  context.mock.method(console, "error", () => {
+    throw new Error("fallback logging unavailable");
+  });
+  let proofCalls = 0;
+  const handlers = createGitHubConnectionHandlers(
+    dependenciesWithUserAuthorization(
+      {
+        idempotencyStore: idempotency,
+        reportFailure: () => {
+          throw new Error("logging unavailable");
+        },
+      },
+      {
+        proveInstallationAccess: () => {
+          proofCalls += 1;
+          return Promise.reject(
+            new GitHubProviderError("github_provider_unavailable", {
+              retryable: true,
+              status: 503,
+            })
+          );
+        },
+      }
+    )
+  );
+  const authorization = await beginUserAuthorization(handlers);
+  const request = oauthCallbackRequest(authorization.state);
+
+  const failed = await handlers.callback(request, null);
+  assert.equal(failed.status, 503);
+  assert.equal(await errorCode(failed), "github_provider_unavailable");
+
+  const replayed = await handlers.callback(request, null);
+  assert.equal(replayed.status, 503);
+  assert.equal(await errorCode(replayed), "github_provider_unavailable");
+  assert.equal(proofCalls, 1);
+});
+
 test("a near-expiry OAuth callback keeps its consumed record through slow bounded processing and cleanup", async () => {
   let currentTime = NOW;
   const idempotency = new MemoryIdempotencyStore();
