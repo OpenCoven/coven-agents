@@ -580,9 +580,12 @@ function postgresTimestamp(value: unknown): Date | null {
   if (typeof value !== "string") {
     return null;
   }
-  const normalized = value.includes("T")
-    ? value
-    : `${value.replace(" ", "T")}Z`;
+  const isoLike = value.includes("T") ? value : value.replace(" ", "T");
+  const normalized = /[+-]\d{2}$/u.test(isoLike)
+    ? `${isoLike}:00`
+    : /(?:Z|[+-]\d{2}:?\d{2})$/iu.test(isoLike)
+      ? isoLike
+      : `${isoLike}Z`;
   const parsed = new Date(normalized);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
