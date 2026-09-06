@@ -21,6 +21,7 @@ import {
   type DaytonaSandboxConfiguration,
   type DaytonaSandboxCreateParameters,
   DaytonaSandboxLifecycleError,
+  type DaytonaSandboxService,
   daytonaSandboxConfiguration,
   deleteDaytonaSandbox,
   ensureDaytonaSandbox,
@@ -38,11 +39,25 @@ const config: DaytonaSandboxConfiguration = {
   autoArchiveInterval: 10_080,
   autoDeleteInterval: -1,
   autoStopInterval: 15,
-  resources: { cpu: 2, disk: 20, memory: 4 },
-  snapshotName: "coven-agents-copilot-1",
+  resources: { cpu: 2, disk: 10, memory: 4 },
+  snapshotName: "coven-agents-copilot-2",
   target: "us",
   ttlMinutes: 0,
 };
+
+/**
+ * A snapshot service that resolves the configured snapshot at policy size.
+ * Reprovisioning fails closed without one, so any test that exercises the
+ * delete-then-recreate path must state what the replacement snapshot is.
+ */
+const policySnapshot = (
+  name: string = config.snapshotName
+): NonNullable<DaytonaSandboxService["snapshot"]> => ({
+  get: (requested) =>
+    requested === name
+      ? Promise.resolve({ cpu: 2, disk: 10, memory: 4, name })
+      : Promise.reject(new DaytonaNotFoundError("snapshot absent")),
+});
 
 function agent(overrides: Partial<RunnerAgentRecord> = {}): RunnerAgentRecord {
   return {
@@ -233,6 +248,7 @@ test("dispatch replaces a sandbox when gateway egress configuration identity cha
             ? Promise.resolve(oldSandbox)
             : Promise.reject(new DaytonaNotFoundError("replacement absent"));
         },
+        snapshot: policySnapshot(),
       },
       store: store({
         attachDaytonaSandboxForDispatch: () => {
@@ -871,6 +887,7 @@ test("stale provisioning refuses a deterministic sandbox from the previous gener
             ? Promise.resolve(existing)
             : Promise.reject(new DaytonaNotFoundError("deleted"));
         },
+        snapshot: policySnapshot(),
       },
       store: store({
         attachDaytonaSandbox: () => {
@@ -1190,6 +1207,7 @@ test("an older creator cannot delete a sandbox adopted by a newer generation", a
     daytona: {
       create: () => Promise.resolve(created),
       get: () => providerLookups.shift() as Promise<Sandbox>,
+      snapshot: policySnapshot(),
     },
     store: lifecycleStore,
   });
@@ -1202,6 +1220,7 @@ test("an older creator cannot delete a sandbox adopted by a newer generation", a
       daytona: {
         create: () => Promise.resolve(replacement),
         get: () => providerLookups.shift() as Promise<Sandbox>,
+        snapshot: policySnapshot(),
       },
       store: lifecycleStore,
     }
@@ -2374,6 +2393,7 @@ test("ambiguous recovery deletes and reprovisions stale configuration or generat
               ? Promise.resolve(stale)
               : Promise.reject(new DaytonaNotFoundError("deleted"));
           },
+          snapshot: policySnapshot("coven-agents-copilot-1"),
         },
         store: store({
           attachDaytonaSandbox: () => {
@@ -2525,4 +2545,584 @@ test("decommissioning an ambiguously created sandbox retains its row when reconc
   });
   assert.deepEqual(result, { error: "retryable", kind: "failed" });
   assert.equal(deleted, 0);
+});
+
+/**
+ * Reprovisioning deletes the persistent workspace and only then creates its
+ * replacement, so a snapshot that cannot be resolved would destroy tenant work
+ * and then fail. DAYTONA_SNAPSHOT is only shape-checked at build time, which
+ * is how a snapshot that was never built reaches this path.
+ */
+test("a workspace is never deleted when the replacement snapshot is missing", async () => {
+  const calls: string[] = [];
+  const currentAgent = agent({
+    daytonaSandboxId: "stored",
+    sandboxGeneration: 2,
+    sandboxLifecycle: "ready",
+    version: 4,
+  });
+  const resettingAgent = agent({
+    ...currentAgent,
+    sandboxGeneration: 3,
+    sandboxLifecycle: "resetting",
+    version: 5,
+  });
+  const resetAgent = agent({
+    ...resettingAgent,
+    daytonaSandboxId: null,
+    sandboxLifecycle: "unprovisioned",
+    version: 6,
+  });
+  const reservedAgent = agent({
+    ...resetAgent,
+    sandboxGeneration: 4,
+    sandboxLifecycle: "provisioning",
+    version: 7,
+  });
+  const attachedAgent = agent({
+    ...reservedAgent,
+    daytonaSandboxId: "replacement",
+    sandboxLifecycle: "ready",
+    version: 8,
+  });
+  const oldSandbox = Object.assign(
+    sandbox(SandboxState.STOPPED, {
+      delete: () => {
+        calls.push("delete");
+        return Promise.resolve();
+      },
+    }),
+    { labels: { configurationId: "old-configuration" } }
+  );
+  const replacement = Object.assign(sandbox(SandboxState.STARTED), {
+    id: "replacement",
+    labels: {
+      ...daytonaSandboxLabels(principal.tenant, currentAgent.id),
+      configurationId: "new-configuration",
+      sandboxGeneration: String(reservedAgent.sandboxGeneration),
+    },
+  });
+  const configuration = {
+    ...config,
+    configurationId: "new-configuration",
+    domainAllowList: "api.github.com,app.example",
+    gatewayHostname: "app.example",
+  };
+
+  const attempt = ensureDaytonaSandboxForDispatch(
+    { kind: "runner-operator" },
+    {
+      expectedVersion: 1,
+      leaseToken: "dispatch-lease",
+      runId: "00000000-0000-4000-8000-000000000002",
+    } as never,
+    configuration,
+    {
+      daytona: {
+        create: (parameters) => {
+          calls.push("create");
+          assert.equal(
+            parameters.labels?.configurationId,
+            configuration.configurationId
+          );
+          return Promise.resolve(replacement);
+        },
+        get: (identifier) => {
+          calls.push(`get:${identifier}`);
+          return identifier === "stored"
+            ? Promise.resolve(oldSandbox)
+            : Promise.reject(new DaytonaNotFoundError("replacement absent"));
+        },
+        snapshot: {
+          get: () =>
+            Promise.reject(new DaytonaNotFoundError("snapshot absent")),
+        },
+      },
+      store: store({
+        attachDaytonaSandboxForDispatch: () => {
+          calls.push("attach");
+          return Promise.resolve({
+            kind: "updated" as const,
+            value: attachedAgent,
+          });
+        },
+        beginDaytonaSandboxResetForDispatch: () => {
+          calls.push("begin-reset");
+          return Promise.resolve({
+            kind: "updated" as const,
+            value: resettingAgent,
+          });
+        },
+        finishDaytonaSandboxResetForDispatch: () => {
+          calls.push("finish-reset");
+          return Promise.resolve({
+            kind: "updated" as const,
+            value: resetAgent,
+          });
+        },
+        getDispatchAgent: () => {
+          calls.push("get-dispatch");
+          return Promise.resolve({
+            agent: currentAgent,
+            kind: "found" as const,
+            run: {} as never,
+          });
+        },
+        reserveDaytonaSandboxForDispatch: () => {
+          calls.push("reserve");
+          return Promise.resolve({
+            kind: "reserved" as const,
+            value: reservedAgent,
+          });
+        },
+      }),
+    }
+  );
+
+  await assert.rejects(
+    attempt,
+    /replacement snapshot "coven-agents-copilot-2" could not be resolved/u,
+    "an unresolvable snapshot must stop the reprovision"
+  );
+  assert.ok(
+    !calls.includes("delete"),
+    `the workspace must survive an unusable replacement, got: ${calls.join(", ")}`
+  );
+  assert.ok(
+    !calls.includes("create"),
+    "nothing may be created after refusing to delete"
+  );
+});
+
+/**
+ * The snapshot service is optional in the type only so the existing
+ * construction sites need not change. Optionality must never mean permission:
+ * a caller that cannot prove the replacement is usable does not get to delete.
+ */
+test("a caller that cannot verify the snapshot may not delete either", async () => {
+  const calls: string[] = [];
+  const currentAgent = agent({
+    daytonaSandboxId: "stored",
+    sandboxGeneration: 2,
+    sandboxLifecycle: "ready",
+    version: 4,
+  });
+  const resettingAgent = agent({
+    ...currentAgent,
+    sandboxGeneration: 3,
+    sandboxLifecycle: "resetting",
+    version: 5,
+  });
+  const resetAgent = agent({
+    ...resettingAgent,
+    daytonaSandboxId: null,
+    sandboxLifecycle: "unprovisioned",
+    version: 6,
+  });
+  const reservedAgent = agent({
+    ...resetAgent,
+    sandboxGeneration: 4,
+    sandboxLifecycle: "provisioning",
+    version: 7,
+  });
+  const attachedAgent = agent({
+    ...reservedAgent,
+    daytonaSandboxId: "replacement",
+    sandboxLifecycle: "ready",
+    version: 8,
+  });
+  const oldSandbox = Object.assign(
+    sandbox(SandboxState.STOPPED, {
+      delete: () => {
+        calls.push("delete");
+        return Promise.resolve();
+      },
+    }),
+    { labels: { configurationId: "old-configuration" } }
+  );
+  const replacement = Object.assign(sandbox(SandboxState.STARTED), {
+    id: "replacement",
+    labels: {
+      ...daytonaSandboxLabels(principal.tenant, currentAgent.id),
+      configurationId: "new-configuration",
+      sandboxGeneration: String(reservedAgent.sandboxGeneration),
+    },
+  });
+  const configuration = {
+    ...config,
+    configurationId: "new-configuration",
+    domainAllowList: "api.github.com,app.example",
+    gatewayHostname: "app.example",
+  };
+
+  const attempt = ensureDaytonaSandboxForDispatch(
+    { kind: "runner-operator" },
+    {
+      expectedVersion: 1,
+      leaseToken: "dispatch-lease",
+      runId: "00000000-0000-4000-8000-000000000002",
+    } as never,
+    configuration,
+    {
+      daytona: {
+        create: (parameters) => {
+          calls.push("create");
+          assert.equal(
+            parameters.labels?.configurationId,
+            configuration.configurationId
+          );
+          return Promise.resolve(replacement);
+        },
+        get: (identifier) => {
+          calls.push(`get:${identifier}`);
+          return identifier === "stored"
+            ? Promise.resolve(oldSandbox)
+            : Promise.reject(new DaytonaNotFoundError("replacement absent"));
+        },
+      },
+      store: store({
+        attachDaytonaSandboxForDispatch: () => {
+          calls.push("attach");
+          return Promise.resolve({
+            kind: "updated" as const,
+            value: attachedAgent,
+          });
+        },
+        beginDaytonaSandboxResetForDispatch: () => {
+          calls.push("begin-reset");
+          return Promise.resolve({
+            kind: "updated" as const,
+            value: resettingAgent,
+          });
+        },
+        finishDaytonaSandboxResetForDispatch: () => {
+          calls.push("finish-reset");
+          return Promise.resolve({
+            kind: "updated" as const,
+            value: resetAgent,
+          });
+        },
+        getDispatchAgent: () => {
+          calls.push("get-dispatch");
+          return Promise.resolve({
+            agent: currentAgent,
+            kind: "found" as const,
+            run: {} as never,
+          });
+        },
+        reserveDaytonaSandboxForDispatch: () => {
+          calls.push("reserve");
+          return Promise.resolve({
+            kind: "reserved" as const,
+            value: reservedAgent,
+          });
+        },
+      }),
+    }
+  );
+
+  await assert.rejects(
+    attempt,
+    /no way to verify the replacement snapshot exists/u,
+    "absence of a snapshot service must fail closed, not permit deletion"
+  );
+  assert.ok(
+    !calls.includes("delete"),
+    `the workspace must survive an unusable replacement, got: ${calls.join(", ")}`
+  );
+  assert.ok(
+    !calls.includes("create"),
+    "nothing may be created after refusing to delete"
+  );
+});
+
+/**
+ * A snapshot that exists is not automatically a usable replacement. Destroying
+ * a workspace to rebuild it below policy trades tenant data for no gain.
+ */
+test("a workspace is never deleted for a snapshot that is below policy", async () => {
+  const calls: string[] = [];
+  const currentAgent = agent({
+    daytonaSandboxId: "stored",
+    sandboxGeneration: 2,
+    sandboxLifecycle: "ready",
+    version: 4,
+  });
+  const resettingAgent = agent({
+    ...currentAgent,
+    sandboxGeneration: 3,
+    sandboxLifecycle: "resetting",
+    version: 5,
+  });
+  const resetAgent = agent({
+    ...resettingAgent,
+    daytonaSandboxId: null,
+    sandboxLifecycle: "unprovisioned",
+    version: 6,
+  });
+  const reservedAgent = agent({
+    ...resetAgent,
+    sandboxGeneration: 4,
+    sandboxLifecycle: "provisioning",
+    version: 7,
+  });
+  const attachedAgent = agent({
+    ...reservedAgent,
+    daytonaSandboxId: "replacement",
+    sandboxLifecycle: "ready",
+    version: 8,
+  });
+  const oldSandbox = Object.assign(
+    sandbox(SandboxState.STOPPED, {
+      delete: () => {
+        calls.push("delete");
+        return Promise.resolve();
+      },
+    }),
+    { labels: { configurationId: "old-configuration" } }
+  );
+  const replacement = Object.assign(sandbox(SandboxState.STARTED), {
+    id: "replacement",
+    labels: {
+      ...daytonaSandboxLabels(principal.tenant, currentAgent.id),
+      configurationId: "new-configuration",
+      sandboxGeneration: String(reservedAgent.sandboxGeneration),
+    },
+  });
+  const configuration = {
+    ...config,
+    configurationId: "new-configuration",
+    domainAllowList: "api.github.com,app.example",
+    gatewayHostname: "app.example",
+  };
+
+  const attempt = ensureDaytonaSandboxForDispatch(
+    { kind: "runner-operator" },
+    {
+      expectedVersion: 1,
+      leaseToken: "dispatch-lease",
+      runId: "00000000-0000-4000-8000-000000000002",
+    } as never,
+    configuration,
+    {
+      daytona: {
+        create: (parameters) => {
+          calls.push("create");
+          assert.equal(
+            parameters.labels?.configurationId,
+            configuration.configurationId
+          );
+          return Promise.resolve(replacement);
+        },
+        get: (identifier) => {
+          calls.push(`get:${identifier}`);
+          return identifier === "stored"
+            ? Promise.resolve(oldSandbox)
+            : Promise.reject(new DaytonaNotFoundError("replacement absent"));
+        },
+        snapshot: {
+          // Generation-1 sizing: the snapshot resolves, but a sandbox built
+          // from it would land straight back in drift.
+          get: (name) => Promise.resolve({ cpu: 1, disk: 3, memory: 1, name }),
+        },
+      },
+      store: store({
+        attachDaytonaSandboxForDispatch: () => {
+          calls.push("attach");
+          return Promise.resolve({
+            kind: "updated" as const,
+            value: attachedAgent,
+          });
+        },
+        beginDaytonaSandboxResetForDispatch: () => {
+          calls.push("begin-reset");
+          return Promise.resolve({
+            kind: "updated" as const,
+            value: resettingAgent,
+          });
+        },
+        finishDaytonaSandboxResetForDispatch: () => {
+          calls.push("finish-reset");
+          return Promise.resolve({
+            kind: "updated" as const,
+            value: resetAgent,
+          });
+        },
+        getDispatchAgent: () => {
+          calls.push("get-dispatch");
+          return Promise.resolve({
+            agent: currentAgent,
+            kind: "found" as const,
+            run: {} as never,
+          });
+        },
+        reserveDaytonaSandboxForDispatch: () => {
+          calls.push("reserve");
+          return Promise.resolve({
+            kind: "reserved" as const,
+            value: reservedAgent,
+          });
+        },
+      }),
+    }
+  );
+
+  await assert.rejects(
+    attempt,
+    /is below policy \(cpu, disk, memory\)/u,
+    "replacing a workspace with an undersized one is not a repair"
+  );
+  assert.ok(
+    !calls.includes("delete"),
+    `the workspace must survive an unusable replacement, got: ${calls.join(", ")}`
+  );
+  assert.ok(
+    !calls.includes("create"),
+    "nothing may be created after refusing to delete"
+  );
+});
+
+/**
+ * The snapshot service is optional in the type only so the existing
+ * construction sites need not change. Optionality must never mean permission:
+ * a caller that cannot prove the replacement is usable does not get to delete.
+ */
+
+/**
+ * The provider reports only some resource fields on a snapshot. An absent
+ * field is not evidence of a shortfall, and reading it as one would block
+ * every reprovision against the real API.
+ */
+test("a field the provider omits is not treated as a shortfall", async () => {
+  const calls: string[] = [];
+  const currentAgent = agent({
+    daytonaSandboxId: "stored",
+    sandboxGeneration: 2,
+    sandboxLifecycle: "ready",
+    version: 4,
+  });
+  const resettingAgent = agent({
+    ...currentAgent,
+    sandboxGeneration: 3,
+    sandboxLifecycle: "resetting",
+    version: 5,
+  });
+  const resetAgent = agent({
+    ...resettingAgent,
+    daytonaSandboxId: null,
+    sandboxLifecycle: "unprovisioned",
+    version: 6,
+  });
+  const reservedAgent = agent({
+    ...resetAgent,
+    sandboxGeneration: 4,
+    sandboxLifecycle: "provisioning",
+    version: 7,
+  });
+  const attachedAgent = agent({
+    ...reservedAgent,
+    daytonaSandboxId: "replacement",
+    sandboxLifecycle: "ready",
+    version: 8,
+  });
+  const oldSandbox = Object.assign(
+    sandbox(SandboxState.STOPPED, {
+      delete: () => {
+        calls.push("delete");
+        return Promise.resolve();
+      },
+    }),
+    { labels: { configurationId: "old-configuration" } }
+  );
+  const replacement = Object.assign(sandbox(SandboxState.STARTED), {
+    id: "replacement",
+    labels: {
+      ...daytonaSandboxLabels(principal.tenant, currentAgent.id),
+      configurationId: "new-configuration",
+      sandboxGeneration: String(reservedAgent.sandboxGeneration),
+    },
+  });
+  const configuration = {
+    ...config,
+    configurationId: "new-configuration",
+    domainAllowList: "api.github.com,app.example",
+    gatewayHostname: "app.example",
+  };
+
+  const result = await ensureDaytonaSandboxForDispatch(
+    { kind: "runner-operator" },
+    {
+      expectedVersion: 1,
+      leaseToken: "dispatch-lease",
+      runId: "00000000-0000-4000-8000-000000000002",
+    } as never,
+    configuration,
+    {
+      daytona: {
+        create: (parameters) => {
+          calls.push("create");
+          assert.equal(
+            parameters.labels?.configurationId,
+            configuration.configurationId
+          );
+          return Promise.resolve(replacement);
+        },
+        get: (identifier) => {
+          calls.push(`get:${identifier}`);
+          return identifier === "stored"
+            ? Promise.resolve(oldSandbox)
+            : Promise.reject(new DaytonaNotFoundError("replacement absent"));
+        },
+        snapshot: {
+          // Daytona's snapshot view omits memory. Reading absence as zero
+          // would refuse every legitimate reprovision in production.
+          get: (name) => Promise.resolve({ cpu: 2, disk: 10, name }),
+        },
+      },
+      store: store({
+        attachDaytonaSandboxForDispatch: () => {
+          calls.push("attach");
+          return Promise.resolve({
+            kind: "updated" as const,
+            value: attachedAgent,
+          });
+        },
+        beginDaytonaSandboxResetForDispatch: () => {
+          calls.push("begin-reset");
+          return Promise.resolve({
+            kind: "updated" as const,
+            value: resettingAgent,
+          });
+        },
+        finishDaytonaSandboxResetForDispatch: () => {
+          calls.push("finish-reset");
+          return Promise.resolve({
+            kind: "updated" as const,
+            value: resetAgent,
+          });
+        },
+        getDispatchAgent: () => {
+          calls.push("get-dispatch");
+          return Promise.resolve({
+            agent: currentAgent,
+            kind: "found" as const,
+            run: {} as never,
+          });
+        },
+        reserveDaytonaSandboxForDispatch: () => {
+          calls.push("reserve");
+          return Promise.resolve({
+            kind: "reserved" as const,
+            value: reservedAgent,
+          });
+        },
+      }),
+    }
+  );
+
+  assert.equal(result.sandbox, replacement);
+  assert.ok(
+    calls.includes("delete") && calls.includes("create"),
+    `the reprovision must proceed, got: ${calls.join(", ")}`
+  );
 });

@@ -75,6 +75,19 @@ export type DaytonaSandboxService = Readonly<{
     options?: Readonly<{ timeout?: number }>
   ) => Promise<Sandbox>;
   get: (sandboxIdOrName: string) => Promise<Sandbox>;
+  /**
+   * Read-only snapshot lookup, used to prove a replacement snapshot exists
+   * BEFORE a persistent workspace is destroyed. Optional in the type only so
+   * the 60-odd existing construction sites need not change; absence fails
+   * closed — see `assertReplacementSnapshotReady`.
+   */
+  snapshot?: Readonly<{
+    get: (
+      name: string
+    ) => Promise<
+      Readonly<{ cpu?: number; disk?: number; memory?: number; name: string }>
+    >;
+  }>;
 }>;
 
 export type DaytonaSandboxConfiguration = DaytonaSandboxResourcePolicy &
@@ -286,6 +299,70 @@ function sandboxConfigurationMatches(
     configuration.configurationId === undefined ||
     sandbox.labels?.configurationId === configuration.configurationId
   );
+}
+
+/**
+ * Proves the replacement snapshot exists, and carries the resources policy
+ * asks for, before anything is deleted.
+ *
+ * Reprovisioning deletes the tenant's persistent workspace and only then
+ * creates its replacement. The order is forced — the sandbox name is derived
+ * from the agent, so the replacement cannot be created alongside the original.
+ * That makes an unresolvable snapshot catastrophic rather than merely broken:
+ * the workspace is destroyed and the create that should replace it fails with
+ * the provider's bare 400. `DAYTONA_SNAPSHOT` is only shape-checked at build
+ * time, so a snapshot that was never built deploys green and reaches exactly
+ * this path.
+ *
+ * Absence of the snapshot service fails closed. A caller that cannot prove the
+ * replacement is usable does not get to delete.
+ */
+async function assertReplacementSnapshotReady(
+  configuration: DaytonaSandboxConfiguration,
+  dependencies: DaytonaSandboxDependencies
+): Promise<void> {
+  const snapshots = dependencies.daytona.snapshot;
+  if (!snapshots) {
+    throw new DaytonaSandboxLifecycleError(
+      "Refusing to delete a persistent sandbox: no way to verify the replacement snapshot exists.",
+      { kind: "cleanup_needed", retryable: false }
+    );
+  }
+
+  let snapshot: Readonly<{
+    cpu?: number;
+    disk?: number;
+    memory?: number;
+    name: string;
+  }>;
+  try {
+    snapshot = await snapshots.get(configuration.snapshotName);
+  } catch (error) {
+    throw new DaytonaSandboxLifecycleError(
+      `Refusing to delete a persistent sandbox: replacement snapshot "${configuration.snapshotName}" could not be resolved.`,
+      {
+        cause: error,
+        kind: "cleanup_needed",
+        retryable: classifyDaytonaProviderError(error) !== "non_retryable",
+      }
+    );
+  }
+
+  // A sandbox cannot exceed what its snapshot carries, so a snapshot built
+  // below policy silently reproduces the drift this replacement exists to
+  // remove. Only fields the provider actually reports are compared; it omits
+  // some (memory is absent from the snapshot view), and an absent field is not
+  // evidence of a mismatch.
+  const shortfalls = (["cpu", "disk", "memory"] as const).filter((field) => {
+    const provided = snapshot[field];
+    return provided !== undefined && provided < configuration.resources[field];
+  });
+  if (shortfalls.length > 0) {
+    throw new DaytonaSandboxLifecycleError(
+      `Refusing to delete a persistent sandbox: replacement snapshot "${configuration.snapshotName}" is below policy (${shortfalls.join(", ")}).`,
+      { kind: "cleanup_needed", retryable: false }
+    );
+  }
 }
 
 async function deleteMismatchedSandbox(sandbox: Sandbox): Promise<void> {
@@ -888,6 +965,7 @@ async function resetMismatchedSandboxAndReprovision(
       { retryable: true }
     );
   }
+  await assertReplacementSnapshotReady(configuration, dependencies);
   try {
     await deleteMismatchedSandbox(sandbox);
   } catch (error) {

@@ -538,3 +538,21 @@ test("no expressible resource policy exceeds Daytona's per-sandbox maxima", () =
     );
   }
 });
+
+test("snapshot resources are derived from the environment, not hardcoded", () => {
+  // The pass-through test above proves provisionDaytonaSnapshot forwards what
+  // it is given. It does NOT prove the configuration reads the same policy the
+  // running app will enforce. Hardcoding the resources in
+  // daytonaSnapshotConfiguration passed the entire suite, which would bake a
+  // snapshot that silently disagrees with the runtime — and snapshots are
+  // immutable, so recovering needs another generation bump.
+  const configured = daytonaSnapshotConfiguration({
+    DAYTONA_API_KEY: "test-key",
+    DAYTONA_SANDBOX_CPU_CORES: "3",
+    DAYTONA_SANDBOX_DISK_GIB: "10",
+    DAYTONA_SANDBOX_MEMORY_GIB: "7",
+    DAYTONA_SNAPSHOT: DAYTONA_COPILOT_SNAPSHOT_NAME,
+  } as unknown as NodeJS.ProcessEnv);
+
+  assert.deepEqual(configured.resources, { cpu: 3, disk: 10, memory: 7 });
+});
