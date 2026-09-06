@@ -2962,6 +2962,47 @@
   color: var(--accent);
 }
 
+.oc-familiar-portrait {
+  position: relative;
+  display: grid;
+  flex: none;
+  place-items: center;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  line-height: 1;
+  color: var(--text-secondary);
+  background:
+    radial-gradient(
+      circle at 50% 30%,
+      color-mix(in oklch, var(--accent-presence) 14%, transparent),
+      transparent 62%
+    ),
+    var(--bg-elevated);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-control);
+  box-shadow: inset 0 1px 0 color-mix(in oklch, white 8%, transparent);
+}
+
+.oc-familiar-portrait[data-selected="true"] {
+  color: var(--accent-presence);
+  border-color: color-mix(
+    in oklch,
+    var(--accent-presence) 58%,
+    var(--border-hairline)
+  );
+  box-shadow:
+    inset 0 1px 0 color-mix(in oklch, white 10%, transparent),
+    0 0 0 2px color-mix(in oklch, var(--accent-presence) 10%, transparent);
+}
+
+.oc-familiar-portrait img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transform: scale(1.035);
+}
+
 .oc-agent-rail {
   position: relative;
 }

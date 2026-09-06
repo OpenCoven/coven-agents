@@ -9,6 +9,7 @@ import {
 import { ChevronsUpDown, PanelLeft, Plus, Search } from "lucide-react";
 import { useRef, useState } from "react";
 import { BrandMark } from "@/components/brand/brand-mark";
+import { FamiliarPortrait } from "@/components/console/familiar-portrait";
 import {
   AccountAvatar,
   StatusDot,
@@ -20,7 +21,8 @@ import {
   type as type_,
   well,
 } from "@/components/console/styles";
-import { formatAge, glyphFor } from "@/lib/console/format";
+import { executionProfileForAgent } from "@/lib/console/agent-profile";
+import { formatAge } from "@/lib/console/format";
 import type { ConsoleRun } from "@/lib/console/types";
 
 /**
@@ -90,10 +92,14 @@ function AgentGlyph({
   selected: boolean;
   size?: number;
 }) {
+  const profile = executionProfileForAgent(agent);
   return (
-    <span style={well(selected, size)}>
-      {glyphFor(sanitizeEvidenceText(agent.name))}
-    </span>
+    <FamiliarPortrait
+      fallbackLabel={sanitizeEvidenceText(agent.name)}
+      profileId={profile.id}
+      selected={selected}
+      size={size}
+    />
   );
 }
 

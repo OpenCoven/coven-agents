@@ -352,6 +352,9 @@ test.describe("Run console", () => {
         name: "Choose execution profile",
       });
       await expect(selector).toHaveAttribute("aria-modal", "true");
+      await expect(
+        selector.locator(`[data-profile-id="${template.id}"] img`)
+      ).toBeVisible();
       await selector
         .getByRole("button", {
           name: new RegExp(`${template.name}.*${profile.mode}`, "u"),
