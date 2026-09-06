@@ -44,6 +44,17 @@ export function isCanonicalUuid(value: unknown): value is string {
   return typeof value === "string" && CANONICAL_UUID_PATTERN.test(value);
 }
 
+const familiarIdValueSchema = z.enum([
+  "auto",
+  "builder",
+  "critic",
+  "custom",
+  "scout",
+  "scribe",
+  "tester",
+]);
+export const familiarIdSchema = familiarIdValueSchema.default("auto");
+
 export const TEAM_LIMITS = Object.freeze({
   maxDescriptionLength: AGENT_RUNNER_LIMITS.maxDescriptionLength,
   maxHandoffLength: 16_384,
@@ -370,6 +381,7 @@ const agentDefinitionInputShape = {
     .trim()
     .max(AGENT_RUNNER_LIMITS.maxDescriptionLength)
     .default(""),
+  familiarId: familiarIdSchema,
   instructions: z
     .string()
     .trim()
@@ -400,6 +412,12 @@ const agentDefinitionInputShape = {
  */
 export const createAgentInputSchema = z
   .object(agentDefinitionInputShape)
+  .strict();
+export const updateAgentInputSchema = z
+  .object({
+    ...agentDefinitionInputShape,
+    familiarId: familiarIdValueSchema.optional(),
+  })
   .strict();
 
 /**
@@ -1554,6 +1572,7 @@ export const apiErrorSchema = z.object({
 
 export type Backend = z.infer<typeof backendSchema>;
 export type Runtime = z.infer<typeof runtimeSchema>;
+export type FamiliarId = z.infer<typeof familiarIdSchema>;
 export type CreateAgentInput = z.input<typeof createAgentInputSchema>;
 export type AgentDefinition = z.output<typeof agentDefinitionSchema>;
 export type AgentOwner = z.infer<typeof agentOwnerSchema>;

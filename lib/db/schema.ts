@@ -693,6 +693,20 @@ export const runnerAgent = pgTable(
     createdAt: timestamp("createdAt").notNull().defaultNow(),
     daytonaSandboxId: text("daytonaSandboxId"),
     description: varchar("description", { length: 240 }).notNull().default(""),
+    familiarId: varchar("familiarId", {
+      enum: [
+        "auto",
+        "builder",
+        "critic",
+        "custom",
+        "scout",
+        "scribe",
+        "tester",
+      ],
+      length: 16,
+    })
+      .notNull()
+      .default("auto"),
     id: uuid("id").primaryKey().notNull().defaultRandom(),
     instructions: varchar("instructions", {
       length: AGENT_RUNNER_LIMITS.maxInstructionsLength,
@@ -770,6 +784,10 @@ export const runnerAgent = pgTable(
     check(
       "RunnerAgent_runtime_valid",
       sql`${table.runtime} in ('codex', 'claude', 'copilot')`
+    ),
+    check(
+      "RunnerAgent_familiarId_valid",
+      sql`${table.familiarId} in ('auto', 'builder', 'critic', 'custom', 'scout', 'scribe', 'tester')`
     ),
     check(
       "RunnerAgent_status_valid",

@@ -119,6 +119,7 @@ function agent(overrides: Partial<RunnerAgentRecord> = {}): RunnerAgentRecord {
     createdAt: new Date("2026-01-01T00:00:00.000Z"),
     daytonaSandboxId: null,
     description: "",
+    familiarId: "auto",
     id: "00000000-0000-4000-8000-000000000001",
     instructions: "test instructions",
     lastRunAt: null,
@@ -2942,6 +2943,7 @@ test("principal mutations bind every affected row to the principal tenant", asyn
     runId: current.id,
   });
   await create.store.createAgent(principal, {
+    familiarId: "scribe",
     id: current.agentId,
     instructions: "test instructions",
     model: "test-model",
@@ -2951,6 +2953,7 @@ test("principal mutations bind every affected row to the principal tenant", asyn
   await update.store.updateAgent(principal, {
     description: "",
     expectedVersion: 0,
+    familiarId: "critic",
     id: current.agentId,
     instructions: "test instructions",
     model: "test-model",
@@ -3874,6 +3877,7 @@ test("active queued, dispatching, running, and cancelling runs block agent updat
         await blocked.store.updateAgent(principal, {
           description: "changed",
           expectedVersion: current.version,
+          familiarId: current.familiarId,
           id: current.id,
           instructions: "changed",
           model: "changed",
@@ -3902,6 +3906,7 @@ test("terminal runs do not block agent updates and versions use database time", 
   const result = await update.store.updateAgent(principal, {
     description: "updated",
     expectedVersion: current.version,
+    familiarId: "tester",
     id: current.id,
     instructions: current.instructions,
     model: current.model,
@@ -3919,6 +3924,7 @@ test("terminal runs do not block agent updates and versions use database time", 
   const activeQuery = queryText(update.statements[1] as RunnerStoreStatement);
   assert.match(activeQuery, /"status" IN \('queued', 'running'\)/u);
   const query = queryText(update.statements[2] as RunnerStoreStatement);
+  assert.match(query, /"familiarId" = \$\d+/);
   assert.match(query, /"version" = "version" \+ 1/);
   assert.match(query, /AND "version" = \$\d+/);
   assert.doesNotMatch(query, /"updatedAt" = \$\d+/);
@@ -3931,6 +3937,7 @@ test("agent update keeps stale and tenant-scoped not-found outcomes nondisclosin
   const input = {
     description: current.description,
     expectedVersion: 4,
+    familiarId: current.familiarId,
     id: current.id,
     instructions: current.instructions,
     model: current.model,
@@ -3967,6 +3974,7 @@ test("agent starts and updates serialize so admission either follows the update 
   const updateInput = {
     description: "updated",
     expectedVersion: 4,
+    familiarId: "auto" as const,
     id: agent().id,
     instructions: "updated instructions",
     model: "updated-model",

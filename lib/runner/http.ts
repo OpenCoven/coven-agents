@@ -13,6 +13,7 @@ import {
   runListEnvelopeSchema,
   runSnapshotEnvelopeSchema,
   startRunInputSchema,
+  updateAgentInputSchema,
 } from "@opencoven/agent-contracts";
 import {
   harnessesEnvelopeSchema,
@@ -1190,7 +1191,7 @@ export function createRunnerHttpHandlers(
         const body = await boundedJson(
           request,
           "runner_write",
-          createAgentInputSchema,
+          updateAgentInputSchema,
           dependencies
         );
         if (body.kind !== "ok") {

@@ -2,7 +2,11 @@
 
 "use client";
 
-import type { CreateAgentInput, Runtime } from "@opencoven/agent-contracts";
+import type {
+  CreateAgentInput,
+  FamiliarId,
+  Runtime,
+} from "@opencoven/agent-contracts";
 import { HARNESS_SPECS } from "@opencoven/harness";
 import {
   ArrowLeft,
@@ -12,6 +16,7 @@ import {
   UsersRound,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { FamiliarPicker } from "@/components/console/familiar-picker";
 import { FamiliarPortrait } from "@/components/console/familiar-portrait";
 import { Btn, Eyebrow } from "@/components/console/primitives";
 import {
@@ -283,6 +288,7 @@ export function CreateAgent({
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [instructions, setInstructions] = useState("");
+  const [familiarId, setFamiliarId] = useState<FamiliarId>("auto");
   const [runtime, setRuntime] = useState<Runtime>(
     (RUNNABLE[0]?.id as Runtime) ?? "copilot"
   );
@@ -321,6 +327,7 @@ export function CreateAgent({
     onCreate({
       backend: "cloud",
       description: description.trim(),
+      familiarId,
       instructions: instructions.trim(),
       model: model.trim() || DEFAULT_MODEL,
       name: name.trim(),
@@ -660,6 +667,17 @@ export function CreateAgent({
                     onChange={(event) => setWorkspace(event.target.value)}
                     style={inputStyle}
                     value={workspace}
+                  />
+                </Field>
+                <Field
+                  hint="Choose a curated identity now, or keep it matched to the profile."
+                  label="Familiar"
+                >
+                  <FamiliarPicker
+                    automaticProfileId="custom"
+                    disabled={busy}
+                    onChange={setFamiliarId}
+                    value={familiarId}
                   />
                 </Field>
                 <Field

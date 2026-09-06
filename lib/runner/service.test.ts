@@ -31,6 +31,7 @@ function agent(overrides: Partial<RunnerAgentRecord> = {}): RunnerAgentRecord {
     createdAt: new Date("2026-08-28T15:00:00.000Z"),
     daytonaSandboxId: null,
     description: "",
+    familiarId: "auto",
     id: AGENT_ID,
     instructions: "Do the thing.",
     lastRunAt: null,
@@ -115,6 +116,7 @@ test("agent creation stamps the authenticated tenant and rejects supplied owners
   const created = await service.createAgent(PRINCIPAL, definition());
   assert.equal(created.kind, "created");
   if (created.kind === "created") {
+    assert.equal(created.agent.familiarId, "auto");
     assert.equal(created.agent.owner.kind, "tenant");
     if (created.agent.owner.kind === "tenant") {
       assert.equal(created.agent.owner.tenantId, PRINCIPAL.tenant);
@@ -123,6 +125,10 @@ test("agent creation stamps the authenticated tenant and rejects supplied owners
   assert.deepEqual(
     (createdInput as { principal: RunnerPrincipal }).principal,
     PRINCIPAL
+  );
+  assert.equal(
+    (createdInput as { input: { familiarId: string } }).input.familiarId,
+    "auto"
   );
 
   const ownerInjected = await service.createAgent(
@@ -192,6 +198,7 @@ test("public agent projections require warm state and omit provider records", as
     "backend",
     "createdAt",
     "description",
+    "familiarId",
     "id",
     "instructions",
     "lastRunAt",
@@ -269,6 +276,73 @@ test("agent updates preserve tenant ownership and expose stale versions", async 
     (updateInput as { expectedVersion: number }).expectedVersion,
     agent().version
   );
+  assert.equal((updateInput as { familiarId: string }).familiarId, "auto");
+});
+
+test("agent creation and updates persist explicit familiar selections", async () => {
+  let createdInput: unknown;
+  let updateInput: unknown;
+  const service = createRunnerService({
+    createId: () => AGENT_ID,
+    store: baseStore({
+      createAgent: (_principal: RunnerPrincipal, input: unknown) => {
+        createdInput = input;
+        return Promise.resolve({
+          agent: agent({ familiarId: "scribe" }),
+          kind: "created" as const,
+        });
+      },
+      updateAgent: (_principal: RunnerPrincipal, input: unknown) => {
+        updateInput = input;
+        return Promise.resolve({
+          kind: "updated" as const,
+          value: agent({ familiarId: "critic", version: 5 }),
+        });
+      },
+    }),
+  });
+
+  const created = await service.createAgent(
+    PRINCIPAL,
+    definition({ familiarId: "scribe" })
+  );
+  assert.equal(
+    created.kind === "created" && created.agent.familiarId,
+    "scribe"
+  );
+  assert.equal((createdInput as { familiarId: string }).familiarId, "scribe");
+
+  const updated = await service.updateAgent(
+    PRINCIPAL,
+    AGENT_ID,
+    definition({ familiarId: "critic" })
+  );
+  assert.equal(
+    updated.kind === "updated" && updated.agent.familiarId,
+    "critic"
+  );
+  assert.equal((updateInput as { familiarId: string }).familiarId, "critic");
+});
+
+test("legacy agent updates preserve an existing familiar selection", async () => {
+  let updateInput: unknown;
+  const service = createRunnerService({
+    store: baseStore({
+      getAgent: () => Promise.resolve(agent({ familiarId: "scribe" })),
+      updateAgent: (_principal: RunnerPrincipal, input: unknown) => {
+        updateInput = input;
+        return Promise.resolve({ kind: "stale_version" as const });
+      },
+    }),
+  });
+
+  await service.updateAgent(
+    PRINCIPAL,
+    AGENT_ID,
+    definition({ name: "Legacy" })
+  );
+
+  assert.equal((updateInput as { familiarId: string }).familiarId, "scribe");
 });
 
 test("agent updates preserve the explicit busy outcome", async () => {

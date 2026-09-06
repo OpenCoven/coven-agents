@@ -5,6 +5,7 @@
 import type {
   AgentDefinition,
   CreateAgentInput,
+  FamiliarId,
   RunEvent,
   RunSnapshot,
 } from "@opencoven/agent-contracts";
@@ -26,6 +27,7 @@ import {
 } from "@/components/console/command-palette";
 import { Composer } from "@/components/console/composer";
 import { CreateAgent } from "@/components/console/create-agent";
+import { FamiliarPicker } from "@/components/console/familiar-picker";
 import { FamiliarPortrait } from "@/components/console/familiar-portrait";
 import {
   Btn,
@@ -223,6 +225,8 @@ export function RunConsole({
   const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [runMenuOpen, setRunMenuOpen] = useState(false);
+  const [choosingFamiliar, setChoosingFamiliar] = useState(false);
+  const [familiarSaving, setFamiliarSaving] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [renameDraft, setRenameDraft] = useState("");
   const [removing, setRemoving] = useState(false);
@@ -365,6 +369,9 @@ export function RunConsole({
   }
 
   const threadRef = useRef<HTMLDivElement>(null);
+  const familiarDialogRef = useRef<HTMLDialogElement>(null);
+  const familiarUpdatePendingRef = useRef(false);
+  const runMenuButtonRef = useRef<HTMLButtonElement>(null);
   const runsRef = useRef<ConsoleRun[]>([]);
   const credentialOwnerRef = useRef<string | null>(null);
   const activeSessionIdentityRef = useRef("");
@@ -376,6 +383,24 @@ export function RunConsole({
   const sessionGenerationRef = useRef(0);
   latestSessionIdentityRef.current = sessionIdentity;
   runsRef.current = runs;
+
+  useEffect(() => {
+    if (!choosingFamiliar) {
+      return;
+    }
+    requestAnimationFrame(() => {
+      const dialog = familiarDialogRef.current;
+      if (!dialog) {
+        return;
+      }
+      if (!dialog.open) {
+        dialog.showModal();
+      }
+      dialog
+        .querySelector<HTMLInputElement>('input[type="radio"]:checked')
+        ?.focus();
+    });
+  }, [choosingFamiliar]);
 
   const client = useMemo(() => new RunnerClient(), []);
 
@@ -1160,6 +1185,7 @@ export function RunConsole({
         {
           backend: selectedAgent.backend,
           description: selectedAgent.description,
+          familiarId: selectedAgent.familiarId,
           instructions: selectedAgent.instructions,
           model: selectedAgent.model,
           name: next,
@@ -1183,6 +1209,67 @@ export function RunConsole({
       if (isCurrentSession(context.generation, context.signal)) {
         setRenaming(false);
       }
+    }
+  };
+
+  const finishFamiliarPicker = () => {
+    setChoosingFamiliar(false);
+    requestAnimationFrame(() => runMenuButtonRef.current?.focus());
+  };
+
+  const closeFamiliarPicker = () => {
+    if (!familiarUpdatePendingRef.current) {
+      finishFamiliarPicker();
+    }
+  };
+
+  const chooseFamiliar = async (familiarId: FamiliarId) => {
+    if (familiarUpdatePendingRef.current) {
+      return;
+    }
+    if (!selectedAgent || familiarId === selectedAgent.familiarId) {
+      closeFamiliarPicker();
+      return;
+    }
+    const context = currentSessionContext();
+    if (!context) {
+      return;
+    }
+    familiarUpdatePendingRef.current = true;
+    familiarDialogRef.current
+      ?.querySelector<HTMLButtonElement>("[data-familiar-close]")
+      ?.focus();
+    setFamiliarSaving(true);
+    try {
+      const updated = await client.updateAgent(
+        selectedAgent.id,
+        {
+          backend: selectedAgent.backend,
+          description: selectedAgent.description,
+          familiarId,
+          instructions: selectedAgent.instructions,
+          model: selectedAgent.model,
+          name: selectedAgent.name,
+          runtime: selectedAgent.runtime,
+          workspace: selectedAgent.workspace,
+        },
+        context.signal
+      );
+      if (!isCurrentSession(context.generation, context.signal)) {
+        return;
+      }
+      setAgents((current) =>
+        current.map((agent) => (agent.id === updated.id ? updated : agent))
+      );
+      finishFamiliarPicker();
+      toast.success("Familiar updated.");
+    } catch (error) {
+      if (isCurrentSession(context.generation, context.signal)) {
+        reportRunnerError(error, "Could not update the familiar.");
+      }
+    } finally {
+      familiarUpdatePendingRef.current = false;
+      setFamiliarSaving(false);
     }
   };
 
@@ -1666,6 +1753,7 @@ export function RunConsole({
                           fallbackLabel={sanitizeEvidenceText(
                             runAgent?.name ?? selectedAgent.name
                           )}
+                          familiarId={(runAgent ?? selectedAgent).familiarId}
                           profileId={
                             executionProfileForAgent(runAgent ?? selectedAgent)
                               .id
@@ -1818,6 +1906,7 @@ export function RunConsole({
                       aria-label="More run actions"
                       className="oc-tint"
                       onClick={() => setRunMenuOpen((value) => !value)}
+                      ref={runMenuButtonRef}
                       style={{
                         background: "transparent",
                         border: "1px solid transparent",
@@ -1895,6 +1984,13 @@ export function RunConsole({
                             {
                               go: () => {
                                 setRunMenuOpen(false);
+                                setChoosingFamiliar(true);
+                              },
+                              label: "Choose familiar",
+                            },
+                            {
+                              go: () => {
+                                setRunMenuOpen(false);
                                 refreshCurrent().catch(() => undefined);
                               },
                               label: "Reload profiles",
@@ -1930,6 +2026,73 @@ export function RunConsole({
                           ))}
                         </div>
                       </>
+                    ) : null}
+
+                    {choosingFamiliar ? (
+                      <dialog
+                        aria-label="Familiar selection"
+                        aria-modal="true"
+                        className="oc-familiar-dialog"
+                        onCancel={(event) => {
+                          event.preventDefault();
+                          closeFamiliarPicker();
+                        }}
+                        ref={familiarDialogRef}
+                        style={{
+                          background: "var(--bg-elevated)",
+                          border: "1px solid var(--border-strong)",
+                          borderRadius: "var(--radius-card)",
+                          boxShadow: "var(--shadow-lg)",
+                          margin: 0,
+                          padding: 12,
+                          position: "absolute",
+                          right: 14,
+                          top: 44,
+                          width: "min(440px, calc(100vw - 32px))",
+                          zIndex: 40,
+                        }}
+                        tabIndex={-1}
+                      >
+                        <div
+                          style={{
+                            alignItems: "center",
+                            color: "var(--text-primary)",
+                            display: "flex",
+                            font: "600 12px/1.2 var(--font-ui)",
+                            justifyContent: "space-between",
+                            marginBottom: 10,
+                          }}
+                        >
+                          <span>Choose familiar</span>
+                          <button
+                            aria-disabled={familiarSaving}
+                            className="oc-tint"
+                            data-familiar-close
+                            onClick={closeFamiliarPicker}
+                            style={{
+                              background: "transparent",
+                              border: 0,
+                              color: "var(--text-muted)",
+                              cursor: "pointer",
+                              font: "500 11px/1 var(--font-ui)",
+                              padding: "5px 6px",
+                            }}
+                            type="button"
+                          >
+                            {familiarSaving ? "Saving…" : "Close"}
+                          </button>
+                        </div>
+                        <FamiliarPicker
+                          automaticProfileId={
+                            executionProfileForAgent(selectedAgent).id
+                          }
+                          disabled={busy || familiarSaving}
+                          onChange={(familiarId) => {
+                            chooseFamiliar(familiarId).catch(() => undefined);
+                          }}
+                          value={selectedAgent.familiarId}
+                        />
+                      </dialog>
                     ) : null}
                   </div>
 

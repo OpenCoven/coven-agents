@@ -288,6 +288,13 @@
       "when": 1788704198939,
       "tag": "0040_beta_campaign",
       "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1788730603039,
+      "tag": "0041_redundant_black_knight",
+      "breakpoints": true
     }
   ]
 }

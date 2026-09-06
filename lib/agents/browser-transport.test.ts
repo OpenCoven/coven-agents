@@ -16,6 +16,7 @@ const agent: AgentDefinition = {
   backend: "cloud",
   createdAt: "2026-08-29T00:00:00.000Z",
   description: "Transport fixture",
+  familiarId: "auto",
   id: AGENT_ID,
   instructions: "Exercise every browser route.",
   lastRunAt: null,

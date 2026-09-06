@@ -27,6 +27,7 @@ import {
   runStatusSchema,
   startRunInputSchema,
   storedAgentDefinitionSchema,
+  updateAgentInputSchema,
 } from "./index";
 
 const contractFixture = JSON.parse(
@@ -54,6 +55,58 @@ test("accepts the v1 cloud deployment class with a harness runtime", () => {
   });
 
   assert.equal(result.success, true);
+});
+
+test("agent definitions accept only curated familiar identities", () => {
+  const base = {
+    backend: "cloud",
+    instructions: "Inspect, implement, and verify.",
+    model: "auto",
+    name: "Cody",
+    runtime: "copilot",
+  };
+
+  for (const familiarId of [
+    "auto",
+    "builder",
+    "critic",
+    "custom",
+    "scout",
+    "scribe",
+    "tester",
+  ]) {
+    assert.equal(
+      createAgentInputSchema.safeParse({ ...base, familiarId }).success,
+      true
+    );
+  }
+
+  assert.equal(
+    createAgentInputSchema.safeParse({
+      ...base,
+      familiarId: "remote-generated-url",
+    }).success,
+    false
+  );
+});
+
+test("agent updates preserve omission of a legacy familiar field", () => {
+  const result = updateAgentInputSchema.parse({
+    backend: "cloud",
+    instructions: "Inspect, implement, and verify.",
+    model: "auto",
+    name: "Cody",
+    runtime: "copilot",
+  });
+
+  assert.equal(Object.hasOwn(result, "familiarId"), false);
+  assert.equal(
+    updateAgentInputSchema.safeParse({
+      ...result,
+      familiarId: "remote-generated-url",
+    }).success,
+    false
+  );
 });
 
 test("definition schemas accept only the supported runtime set", () => {

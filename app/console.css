@@ -3219,6 +3219,15 @@
   backdrop-filter: blur(3px);
 }
 
+.oc-familiar-picker__option:has(input:focus-visible) {
+  outline: 2px solid var(--ring-focus, var(--accent-presence));
+  outline-offset: 2px;
+}
+
+.oc-familiar-dialog::backdrop {
+  background: color-mix(in oklch, var(--bg-desk) 55%, transparent);
+}
+
 .oc-agent-rail {
   position: relative;
 }

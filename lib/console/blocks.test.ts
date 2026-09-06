@@ -16,6 +16,7 @@ const AGENT: AgentDefinition = {
   backend: "cloud",
   createdAt: "2026-08-25T11:00:00.000Z",
   description: "Implements a described change, with a test proving it.",
+  familiarId: "auto",
   id: AGENT_ID,
   instructions: "You are an implementation agent.",
   lastRunAt: null,

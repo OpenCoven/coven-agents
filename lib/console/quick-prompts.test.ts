@@ -8,6 +8,7 @@ const BASE_AGENT: AgentDefinition = {
   backend: "cloud",
   createdAt: "2026-08-30T12:00:00.000Z",
   description: "",
+  familiarId: "auto",
   id: "11111111-1111-4111-8111-111111111111",
   instructions: "Custom operating contract.",
   lastRunAt: null,
