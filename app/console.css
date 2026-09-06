@@ -3204,8 +3204,8 @@
 
 .oc-familiar-portrait__monogram {
   position: absolute;
+  top: 2px;
   right: 2px;
-  bottom: 2px;
   display: grid;
   place-items: center;
   min-width: 12px;

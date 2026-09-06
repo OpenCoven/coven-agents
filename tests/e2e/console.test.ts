@@ -352,9 +352,21 @@ test.describe("Run console", () => {
         name: "Choose execution profile",
       });
       await expect(selector).toHaveAttribute("aria-modal", "true");
-      await expect(
-        selector.locator(`[data-profile-id="${template.id}"] img`)
-      ).toBeVisible();
+      const portrait = selector.locator(
+        `[data-profile-id="${template.id}"] img`
+      );
+      await expect(portrait).toBeVisible();
+      await expect(portrait).toHaveAttribute(
+        "src",
+        new RegExp(`/_next/static/media/${template.id}\\.[^/]+\\.webp$`, "u")
+      );
+      await expect
+        .poll(() =>
+          portrait.evaluate((image: HTMLImageElement) =>
+            image.complete ? image.naturalWidth : 0
+          )
+        )
+        .toBeGreaterThan(0);
       await selector
         .getByRole("button", {
           name: new RegExp(`${template.name}.*${profile.mode}`, "u"),
