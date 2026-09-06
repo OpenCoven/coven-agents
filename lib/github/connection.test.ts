@@ -1482,9 +1482,8 @@ test("OAuth proof failures report only bounded provider diagnostics", async () =
 
 test("diagnostic reporting cannot strand a consumed OAuth callback", async (context) => {
   const idempotency = new MemoryIdempotencyStore();
-  const fallbackReports: unknown[][] = [];
-  context.mock.method(console, "error", (...values: unknown[]) => {
-    fallbackReports.push(values);
+  context.mock.method(console, "error", () => {
+    throw new Error("fallback logging unavailable");
   });
   let proofCalls = 0;
   const handlers = createGitHubConnectionHandlers(
@@ -1519,12 +1518,6 @@ test("diagnostic reporting cannot strand a consumed OAuth callback", async (cont
   assert.equal(replayed.status, 503);
   assert.equal(await errorCode(replayed), "github_provider_unavailable");
   assert.equal(proofCalls, 1);
-  assert.deepEqual(fallbackReports, [
-    [
-      "GitHub connection failure reporter failed.",
-      { stage: "user_authorization" },
-    ],
-  ]);
 });
 
 test("a near-expiry OAuth callback keeps its consumed record through slow bounded processing and cleanup", async () => {

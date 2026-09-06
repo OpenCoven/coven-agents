@@ -2014,7 +2014,11 @@ function reportFailure(
   try {
     reporter(diagnostic);
   } catch {
-    console.error("GitHub connection failure reporter failed.", { stage });
+    try {
+      console.error("GitHub connection failure reporter failed.", { stage });
+    } catch {
+      // Observability must never consume or strand the one-time OAuth callback.
+    }
   }
 }
 
