@@ -45,6 +45,7 @@ import {
   type GitHubConnectionAppClient,
   type GitHubInstallation,
   GitHubProviderError,
+  type GitHubProviderStage,
   normalizedAppPermission,
 } from "./app-auth";
 import { clampUserPermission } from "./authority-types";
@@ -184,7 +185,10 @@ export type GitHubConnectionFailureDiagnostic = Readonly<{
   providerRequestId: string | null;
   providerStage: string | null;
   retryable: boolean;
-  stage: "user_authorization";
+  stage:
+    | "connection_persistence"
+    | "installation_authority"
+    | "user_authorization";
   status: number;
 }>;
 
@@ -1243,6 +1247,7 @@ async function completeUserAuthorization(
     );
   } catch (error) {
     if (!terminalInstallationError(error)) {
+      reportFailure(input.dependencies, "installation_authority", error);
       return { code: callbackErrorCode(error), kind: "error" };
     }
     try {
@@ -1256,7 +1261,12 @@ async function completeUserAuthorization(
       if (removal.kind === "stale") {
         return { code: "request_in_progress", kind: "error" };
       }
-    } catch {
+    } catch (persistenceError) {
+      reportFailure(
+        input.dependencies,
+        "connection_persistence",
+        persistenceError
+      );
       return { code: "github_provider_unavailable", kind: "error" };
     }
     return { code: "github_installation_unusable", kind: "error" };
@@ -1326,7 +1336,10 @@ async function verifiedInstallationAuthority(
         userAuthority: GitHubUserInstallationAuthority;
       }>
 ): Promise<VerifiedInstallationAuthority> {
-  const installation = await provider.getInstallation(installationId);
+  const installation = await withConnectionProviderStage(
+    "app_installation_lookup",
+    () => provider.getInstallation(installationId)
+  );
   const appContentsPermission = normalizedAppPermission(
     installation.permissions.contents
   );
@@ -1355,7 +1368,10 @@ async function verifiedInstallationAuthority(
       status: 409,
     });
   }
-  const selection = await provider.listInstallationRepositories(installationId);
+  const selection = await withConnectionProviderStage(
+    "app_repository_lookup",
+    () => provider.listInstallationRepositories(installationId)
+  );
   if (
     selection.repositorySelection !== "selected" ||
     selection.repositories.length < 1 ||
@@ -1385,6 +1401,7 @@ async function verifiedInstallationAuthority(
         selected.owner !== userRepository.owner
       ) {
         throw new GitHubProviderError("github_provider_invalid_response", {
+          providerStage: "authority_comparison",
           retryable: false,
           status: 502,
         });
@@ -1998,6 +2015,9 @@ function reportFailure(
         error.providerStage &&
         [
           "access_revocation",
+          "app_installation_lookup",
+          "app_repository_lookup",
+          "authority_comparison",
           "exchange",
           "exchange_access_token",
           "exchange_candidates",
@@ -2039,6 +2059,31 @@ function reportFailure(
     } catch {
       // Observability must never consume or strand the one-time OAuth callback.
     }
+  }
+}
+
+async function withConnectionProviderStage<T>(
+  providerStage: GitHubProviderStage,
+  operation: () => Promise<T>
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (!(error instanceof GitHubProviderError)) {
+      // biome-ignore lint/style/useErrorCause: provider errors are replaced with bounded non-secret diagnostics
+      throw new GitHubProviderError("github_provider_unavailable", {
+        providerStage,
+        retryable: true,
+        status: 503,
+      });
+    }
+    // biome-ignore lint/style/useErrorCause: provider errors are replaced with bounded non-secret diagnostics
+    throw new GitHubProviderError(error.code, {
+      providerStage: error.providerStage ?? providerStage,
+      requestId: error.requestId,
+      retryable: error.retryable,
+      status: error.status,
+    });
   }
 }
 

@@ -1400,6 +1400,7 @@ test("missing, suspended, under-permissioned, all-repository, and excessive inst
 test("transient provider failures are sanitized and cannot repeat a consumed OAuth exchange", async () => {
   const idempotency = new MemoryIdempotencyStore();
   const store = new MemoryConnectionStore();
+  const diagnostics: unknown[] = [];
   let attempts = 0;
   const handlers = createGitHubConnectionHandlers(
     dependencies({
@@ -1419,6 +1420,9 @@ test("transient provider failures are sanitized and cannot repeat a consumed OAu
         }),
       createStore: () => store,
       idempotencyStore: idempotency,
+      reportFailure: (failure) => {
+        diagnostics.push(failure);
+      },
     })
   );
   const authorization = await beginUserAuthorization(handlers);
@@ -1434,6 +1438,16 @@ test("transient provider failures are sanitized and cannot repeat a consumed OAu
   assert.equal(await errorCode(retried), "github_provider_unavailable");
   assert.equal(attempts, 1);
   assert.equal(store.replacements.length, 0);
+  assert.deepEqual(diagnostics, [
+    {
+      code: "github_provider_unavailable",
+      providerRequestId: null,
+      providerStage: "app_installation_lookup",
+      retryable: true,
+      stage: "installation_authority",
+      status: 503,
+    },
+  ]);
 });
 
 test("OAuth proof failures report only bounded provider diagnostics", async () => {
