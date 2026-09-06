@@ -72,8 +72,9 @@ export const DAYTONA_BUILD_LOG_LOOKBEHIND_SIZE = 96;
 export type DaytonaSnapshot = Readonly<{
   cpu?: number;
   disk?: number;
-  /** Daytona reports snapshot memory as `mem`, not `memory`. */
+  /** Daytona reports snapshot memory as `mem`; `memory` is the sandbox name. */
   mem?: number;
+  memory?: number;
   name: string;
   state: string;
 }>;
@@ -450,7 +451,11 @@ export async function provisionDaytonaSnapshot(
     [
       ["cpu", snapshot.cpu, configuration.resources.cpu],
       ["disk", snapshot.disk, configuration.resources.disk],
-      ["memory", snapshot.mem, configuration.resources.memory],
+      [
+        "memory",
+        snapshot.mem ?? snapshot.memory,
+        configuration.resources.memory,
+      ],
     ] as const
   ).filter(
     ([, provided, required]) => provided !== undefined && provided < required

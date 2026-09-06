@@ -26,6 +26,7 @@ import {
   sanitizeDaytonaBuildLog,
   WORKSPACE_DIRECTORY,
 } from "./image";
+import { assertReplacementSnapshotReady } from "./sandbox";
 
 const API_KEY = "daytona-api-key-for-test";
 const configuration: DaytonaSnapshotConfiguration = {
@@ -592,5 +593,64 @@ test("a snapshot created below policy fails the build instead of shipping", asyn
     ),
     /was created below policy \(memory 1 < 4\)/u,
     "a clamped snapshot must not be reported as a successful build"
+  );
+});
+
+test("the build-time and runtime checks reject the same snapshot", async () => {
+  // Two structurally parallel checks: one refuses to ship a snapshot, the
+  // other refuses to delete a workspace for it. If they disagree, a snapshot
+  // can pass the build and then permanently refuse the whole fleet. This
+  // drives BOTH real functions rather than restating their logic.
+  const resources = { cpu: 2, disk: 10, memory: 4 };
+  const belowPolicy = {
+    cpu: 2,
+    disk: 10,
+    mem: 1,
+    name: configuration.snapshotName,
+    state: SnapshotState.ACTIVE,
+  };
+
+  await assert.rejects(
+    provisionDaytonaSnapshot(
+      { ...configuration, resources },
+      {
+        log: () => undefined,
+        snapshot: {
+          create: () =>
+            Promise.resolve({
+              name: configuration.snapshotName,
+              state: SnapshotState.ACTIVE,
+            }),
+          get: (() => {
+            let calls = 0;
+            return () => {
+              calls += 1;
+              return calls === 1
+                ? Promise.reject(missingSnapshot())
+                : Promise.resolve(belowPolicy);
+            };
+          })(),
+        },
+      }
+    ),
+    /below policy/u,
+    "the build must refuse it"
+  );
+
+  await assert.rejects(
+    assertReplacementSnapshotReady(
+      {
+        autoArchiveInterval: 10_080,
+        autoDeleteInterval: -1,
+        autoStopInterval: 15,
+        resources,
+        snapshotName: configuration.snapshotName,
+        target: "us",
+        ttlMinutes: 0,
+      },
+      { daytona: { snapshot: { get: () => Promise.resolve(belowPolicy) } } }
+    ),
+    /below policy/u,
+    "the runtime guard must refuse the same snapshot"
   );
 });

@@ -329,8 +329,20 @@ function sandboxConfigurationMatches(
  * replacement is usable does not get to delete.
  */
 const SNAPSHOT_ACTIVE_STATE = "active";
-/** States a snapshot never leaves on its own; everything else may still settle. */
-const TERMINAL_SNAPSHOT_STATES = new Set(["build_failed", "error"]);
+/**
+ * States a snapshot leaves on its own. An allowlist, not a denylist: Daytona
+ * also defines `inactive` (needs an explicit activate), `removing` (ends in
+ * deletion) and an unknown-default member, none of which settle by waiting.
+ * Listing what heals means a state we have never seen is treated as permanent
+ * and surfaces, rather than deferring silently forever — which is the failure
+ * the refusal-reports-as-failure change exists to prevent.
+ */
+const SETTLING_SNAPSHOT_STATES = new Set([
+  "building",
+  "pending",
+  "pulling",
+  "snapshotting",
+]);
 
 export async function assertReplacementSnapshotReady(
   configuration: DaytonaSandboxConfiguration,
@@ -379,7 +391,7 @@ export async function assertReplacementSnapshotReady(
       `Refusing to delete a persistent sandbox: replacement snapshot "${configuration.snapshotName}" is not active (state: ${snapshot.state}).`,
       {
         kind: "cleanup_needed",
-        retryable: !TERMINAL_SNAPSHOT_STATES.has(snapshot.state),
+        retryable: SETTLING_SNAPSHOT_STATES.has(snapshot.state),
       }
     );
   }
@@ -1019,10 +1031,7 @@ async function resetMismatchedSandboxAndReprovision(
       {
         cause: error,
         kind: "cleanup_needed",
-        // A snapshot that does not resolve is not a transient blip: it stays
-        // missing until someone builds or repoints it. Retrying forever hides
-        // the misconfiguration behind a queue that never drains.
-        retryable: classifyDaytonaProviderError(error) === "retryable",
+        retryable: classifyDaytonaProviderError(error) !== "non_retryable",
       }
     );
   }
@@ -1083,9 +1092,30 @@ async function deleteFirstDaytonaSandbox(
  * no dispatch can attach a new process while Daytona deletion is in flight;
  * only confirmed deletion clears the next sandbox generation.
  */
+
+/**
+ * Records that a cancellation deleted a workspace the configured snapshot
+ * cannot replace. Never throws and never blocks: the deletion has already
+ * happened, and cancellation must complete regardless.
+ */
+async function reportUnusableReplacementAfterCancellation(
+  configuration: DaytonaSandboxConfiguration,
+  dependencies: DaytonaSandboxDependencies
+): Promise<void> {
+  try {
+    await assertReplacementSnapshotReady(configuration, dependencies);
+  } catch {
+    observeRunnerResourceOperation(dependencies.observe, {
+      operation: "reset",
+      outcome: "failed",
+    });
+  }
+}
+
 export async function resetDaytonaSandboxForCancellation(
   operator: RunnerOperator,
   authority: RunnerDispatchAuthority,
+  configuration: DaytonaSandboxConfiguration,
   dependencies: DaytonaSandboxDependencies
 ): Promise<
   | { kind: "reset" | "provider_not_found" }
@@ -1137,6 +1167,19 @@ export async function resetDaytonaSandboxForCancellation(
       ? { kind: "unavailable", source: "provider" }
       : { kind: "sandbox_reset_required" };
   }
+
+  // Deliberately NOT guarded by assertReplacementSnapshotReady, unlike every
+  // other delete-then-recreate path. This delete is the kill mechanism: the
+  // harness process lives inside the sandbox, so refusing it would leave a
+  // cancelled agent running with live credentials. Containment outranks
+  // preserving capacity we may not be able to rebuild.
+  //
+  // It must not be silent, though. If the snapshot cannot back the
+  // replacement, this cancellation has destroyed a workspace with no rebuild
+  // path, and an operator needs to learn that from something other than the
+  // tenant's next failed dispatch.
+  await reportUnusableReplacementAfterCancellation(configuration, dependencies);
+
   let cleared: Awaited<
     ReturnType<RunnerStore["finishDaytonaSandboxResetForRecovery"]>
   >;

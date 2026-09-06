@@ -331,6 +331,7 @@ test("cancellation reset fences the sandbox before clearing its generation", asy
   const reset = await resetDaytonaSandboxForCancellation(
     { kind: "runner-operator" },
     dispatchAuthority,
+    config,
     {
       daytona: {
         create: () => Promise.reject(new Error("must not create")),
@@ -386,6 +387,7 @@ test("cancellation reset preserves absence, provider outage, and stale fences", 
   const absent = await resetDaytonaSandboxForCancellation(
     { kind: "runner-operator" },
     dispatchAuthority,
+    config,
     {
       daytona: {
         create: () => Promise.reject(new Error("must not create")),
@@ -408,6 +410,7 @@ test("cancellation reset preserves absence, provider outage, and stale fences", 
   const unavailable = await resetDaytonaSandboxForCancellation(
     { kind: "runner-operator" },
     dispatchAuthority,
+    config,
     {
       daytona: {
         create: () => Promise.reject(new Error("must not create")),
@@ -429,6 +432,7 @@ test("cancellation reset preserves absence, provider outage, and stale fences", 
   const stale = await resetDaytonaSandboxForCancellation(
     { kind: "runner-operator" },
     dispatchAuthority,
+    config,
     {
       daytona: {
         create: () => Promise.reject(new Error("must not create")),
@@ -3396,4 +3400,136 @@ test("a transient provider fault defers the refusal rather than failing it", asy
     );
     return true;
   });
+});
+
+/**
+ * A denylist of terminal states left `inactive`, `removing` and the SDK's
+ * unknown-default classified as "wait, it will settle" — none of which ever
+ * do. That deferred forever and reported healthy, which is exactly the
+ * outcome the refusal-as-failure change exists to prevent. Only states that
+ * genuinely settle may defer.
+ */
+test("only a snapshot state that settles on its own is treated as transient", async () => {
+  const classify = async (state: string) => {
+    try {
+      await assertReplacementSnapshotReady(config, {
+        daytona: {
+          snapshot: {
+            get: (name) =>
+              Promise.resolve({ cpu: 2, disk: 10, mem: 4, name, state }),
+          },
+        },
+      });
+      return "accepted";
+    } catch (error) {
+      assert.ok(error instanceof DaytonaSandboxLifecycleError);
+      return error.retryable ? "deferred" : "failed";
+    }
+  };
+
+  for (const state of ["building", "pending", "pulling", "snapshotting"]) {
+    assert.equal(
+      // biome-ignore lint/performance/noAwaitInLoops: each case needs its own isolated call
+      await classify(state),
+      "deferred",
+      `${state} settles on its own`
+    );
+  }
+  for (const state of [
+    "inactive",
+    "removing",
+    "error",
+    "build_failed",
+    "11184809",
+  ]) {
+    assert.equal(
+      // biome-ignore lint/performance/noAwaitInLoops: each case needs its own isolated call
+      await classify(state),
+      "failed",
+      `${state} never settles by waiting and must surface`
+    );
+  }
+  assert.equal(await classify("active"), "accepted");
+});
+
+/**
+ * Cancellation deliberately deletes without the snapshot guard: the harness
+ * process lives in the sandbox, so refusing would leave a cancelled agent
+ * running with live credentials. Containment outranks preserving capacity.
+ *
+ * But it must not be silent. When the snapshot cannot back the replacement,
+ * the cancellation has destroyed a workspace with no rebuild path, and that
+ * has to reach an operator before it reaches the tenant as a failed dispatch.
+ */
+test("a cancellation that cannot be rebuilt still cancels, and says so", async () => {
+  for (const [label, snapshot, expected] of [
+    [
+      "unusable snapshot",
+      {
+        get: () => Promise.reject(new DaytonaNotFoundError("absent")),
+      },
+      [{ operation: "reset", outcome: "failed" }],
+    ],
+    [
+      "usable snapshot",
+      {
+        get: (name: string) =>
+          Promise.resolve({ cpu: 2, disk: 10, mem: 4, name, state: "active" }),
+      },
+      [],
+    ],
+  ] as const) {
+    const observations: unknown[] = [];
+    const deletes: string[] = [];
+    // biome-ignore lint/performance/noAwaitInLoops: each case needs its own isolated call
+    const reset = await resetDaytonaSandboxForCancellation(
+      { kind: "runner-operator" },
+      {
+        expectedVersion: 2,
+        leaseToken: "cancel-lease",
+        runId: "00000000-0000-4000-8000-000000000002",
+      } as never,
+      config,
+      {
+        daytona: {
+          create: () => Promise.reject(new Error("must not create")),
+          get: (identifier) =>
+            Promise.resolve({
+              delete: () => {
+                deletes.push(identifier);
+                return Promise.resolve();
+              },
+              id: identifier,
+            } as never),
+          snapshot,
+        },
+        observe: (observation) => observations.push(observation),
+        store: store({
+          beginDaytonaSandboxResetForCancellation: () =>
+            Promise.resolve({
+              kind: "resetting" as const,
+              value: agent({
+                daytonaSandboxId: "sandbox",
+                sandboxGeneration: 2,
+                sandboxLifecycle: "resetting",
+                version: 3,
+              }),
+            }),
+          finishDaytonaSandboxResetForRecovery: () =>
+            Promise.resolve({
+              kind: "updated" as const,
+              value: agent({ sandboxGeneration: 2, version: 4 }),
+            }),
+        }),
+      }
+    );
+
+    assert.equal(reset.kind, "reset", `${label}: cancellation must complete`);
+    assert.equal(
+      deletes.length > 0,
+      true,
+      `${label}: the sandbox must be deleted either way — it is the kill switch`
+    );
+    assert.deepEqual(observations, expected, `${label}: observability`);
+  }
 });
