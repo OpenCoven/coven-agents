@@ -2683,7 +2683,21 @@ test("a workspace is never deleted when the replacement snapshot is missing", as
 
   await assert.rejects(
     attempt,
-    /replacement snapshot "coven-agents-copilot-2" could not be resolved/u,
+    (error: unknown) => {
+      assert.ok(error instanceof DaytonaSandboxLifecycleError);
+      assert.match(
+        error.message,
+        /replacement snapshot "coven-agents-copilot-2" could not be resolved/u
+      );
+      // A snapshot that is not there stays not there. Marking this retryable
+      // buries the misconfiguration in a queue that never drains.
+      assert.equal(
+        error.retryable,
+        false,
+        "a missing snapshot is a permanent condition, not a transient one"
+      );
+      return true;
+    },
     "an unresolvable snapshot must stop the reprovision"
   );
   assert.ok(

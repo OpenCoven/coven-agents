@@ -74,6 +74,16 @@ function run(overrides: Partial<RunnerRunRecord> = {}): RunnerRunRecord {
   };
 }
 
+/**
+ * A snapshot that can genuinely replace a workspace: active and at policy.
+ * Recovery fails closed without one, so any test asserting that recovery
+ * deletes must say what the replacement is.
+ */
+const usableSnapshot = () => ({
+  get: (name: string) =>
+    Promise.resolve({ cpu: 2, disk: 10, mem: 4, name, state: "active" }),
+});
+
 test("reconciliation projects and claims teams before dispatch and retries terminal cleanup last", async () => {
   const calls: string[] = [];
   const claimedRun = run({ executionPermission: "workspace_write" });
@@ -607,6 +617,7 @@ test("cron recovery deletes and resets stale or unlabeled provisioning sandboxes
             id: "stale-sandbox",
             labels,
           }) as never,
+        snapshot: usableSnapshot(),
       },
       operator,
       sandboxConfiguration: SANDBOX_CONFIGURATION,
@@ -664,6 +675,7 @@ test("stale cron recovery cannot delete a sandbox after losing the durable reset
             sandboxGeneration: "2",
           },
         }) as never,
+      snapshot: usableSnapshot(),
     },
     operator,
     sandboxConfiguration: SANDBOX_CONFIGURATION,
@@ -3129,4 +3141,99 @@ test("cron recovery defers a reset it cannot complete instead of deleting the wo
 
   assert.deepEqual(calls, [], "no deletion and no reset completion");
   assert.deepEqual(result, { deferred: 1, failures: 0, recovered: 0 });
+});
+
+/**
+ * The provisioning-identity-mismatch branch is the one a configurationId
+ * change actually drives: after a snapshot or policy bump every sandbox in the
+ * fleet mismatches. Guarding only the `resetting` branch left this one
+ * deleting workspaces for a snapshot that cannot replace them.
+ */
+test("cron recovery refuses the provisioning mismatch branch when the snapshot cannot replace the workspace", async () => {
+  for (const snapshot of [
+    {
+      get: () => Promise.reject(new DaytonaNotFoundError("snapshot absent")),
+      label: "missing",
+    },
+    {
+      get: (name: string) =>
+        Promise.resolve({ cpu: 2, disk: 10, mem: 4, name, state: "error" }),
+      label: "inactive",
+    },
+    {
+      get: (name: string) =>
+        Promise.resolve({ cpu: 1, disk: 3, mem: 1, name, state: "active" }),
+      label: "below policy",
+    },
+  ]) {
+    let deletes = 0;
+    const pending = agent({
+      daytonaSandboxId: "stale-sandbox",
+      sandboxGeneration: 2,
+      sandboxLifecycle: "provisioning",
+      version: 2,
+    });
+
+    // biome-ignore lint/performance/noAwaitInLoops: each case needs its own isolated reconcile
+    const result = await reconcileDaytonaSandboxes({
+      daytona: {
+        create: () => {
+          throw new Error("reconciliation must not create");
+        },
+        get: () =>
+          ({
+            delete: () => {
+              deletes += 1;
+              return Promise.resolve();
+            },
+            id: "stale-sandbox",
+            // No provisioning identity labels: a guaranteed mismatch.
+            labels: {},
+          }) as never,
+        snapshot: { get: snapshot.get },
+      },
+      operator,
+      provisioningStaleBefore: new Date("2030-01-01T00:00:00.000Z"),
+      sandboxConfiguration: SANDBOX_CONFIGURATION,
+      store: {
+        attachDaytonaSandboxForRecovery: () => {
+          throw new Error("must not attach");
+        },
+        // These succeed deliberately. If they threw, the test would pass
+        // even with the guard removed — the deletion would be blocked by the
+        // store double rather than by the guard under test.
+        beginDaytonaSandboxResetForRecovery: () =>
+          Promise.resolve({
+            kind: "updated" as const,
+            value: agent({
+              sandboxGeneration: 2,
+              sandboxLifecycle: "resetting",
+              version: 3,
+            }),
+          }),
+        finishDaytonaSandboxResetForRecovery: () =>
+          Promise.resolve({
+            kind: "updated" as const,
+            value: agent({
+              sandboxGeneration: 2,
+              sandboxLifecycle: "unprovisioned",
+              version: 4,
+            }),
+          }),
+        scanDaytonaSandboxRecoveries: () => Promise.resolve([pending]),
+        scanDaytonaWarmRecoveries: () => Promise.resolve([]),
+      } as never,
+    });
+
+    assert.equal(
+      deletes,
+      0,
+      `a ${snapshot.label} snapshot must not cost the tenant its workspace`
+    );
+    assert.equal(
+      result.recovered,
+      0,
+      `a ${snapshot.label} snapshot must not report recovery`
+    );
+  }
 });

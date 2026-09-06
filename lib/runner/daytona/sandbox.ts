@@ -69,6 +69,21 @@ export type DaytonaSandboxCreateErrorKind = "ambiguous" | "definite_rejection";
  */
 export type DaytonaSandboxCreateParameters = CreateSandboxFromSnapshotParams;
 
+/**
+ * What the guard needs from a snapshot, named as the provider names it.
+ * Daytona reports memory as `mem` on a snapshot and `memory` on a sandbox;
+ * declaring both here is what keeps the memory check verifiable by the type
+ * system rather than by a wider type re-declared at the call site.
+ */
+export type DaytonaSnapshotDescription = Readonly<{
+  cpu?: number;
+  disk?: number;
+  mem?: number;
+  memory?: number;
+  name: string;
+  state?: string;
+}>;
+
 export type DaytonaSandboxService = Readonly<{
   create: (
     parameters: DaytonaSandboxCreateParameters,
@@ -321,7 +336,9 @@ const SNAPSHOT_ACTIVE_STATE = "active";
 
 export async function assertReplacementSnapshotReady(
   configuration: DaytonaSandboxConfiguration,
-  dependencies: DaytonaSandboxDependencies
+  dependencies: Readonly<{
+    daytona: Pick<DaytonaSandboxService, "snapshot">;
+  }>
 ): Promise<void> {
   const snapshots = dependencies.daytona.snapshot;
   if (!snapshots) {
@@ -331,14 +348,7 @@ export async function assertReplacementSnapshotReady(
     );
   }
 
-  let snapshot: Readonly<{
-    cpu?: number;
-    disk?: number;
-    mem?: number;
-    memory?: number;
-    name: string;
-    state?: string;
-  }>;
+  let snapshot: DaytonaSnapshotDescription;
   try {
     snapshot = await snapshots.get(configuration.snapshotName);
   } catch (error) {
@@ -347,7 +357,10 @@ export async function assertReplacementSnapshotReady(
       {
         cause: error,
         kind: "cleanup_needed",
-        retryable: classifyDaytonaProviderError(error) !== "non_retryable",
+        // A snapshot that does not resolve is not a transient blip: it stays
+        // missing until someone builds or repoints it. Retrying forever hides
+        // the misconfiguration behind a queue that never drains.
+        retryable: classifyDaytonaProviderError(error) === "retryable",
       }
     );
   }
@@ -1000,7 +1013,10 @@ async function resetMismatchedSandboxAndReprovision(
       {
         cause: error,
         kind: "cleanup_needed",
-        retryable: classifyDaytonaProviderError(error) !== "non_retryable",
+        // A snapshot that does not resolve is not a transient blip: it stays
+        // missing until someone builds or repoints it. Retrying forever hides
+        // the misconfiguration behind a queue that never drains.
+        retryable: classifyDaytonaProviderError(error) === "retryable",
       }
     );
   }

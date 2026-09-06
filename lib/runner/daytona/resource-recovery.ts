@@ -192,6 +192,19 @@ async function recoverSandbox(
         dependencies.sandboxConfiguration
       )
     ) {
+      // This branch replaces a workspace whose provisioning identity no longer
+      // matches, which after a configurationId change is every sandbox in the
+      // fleet. It deletes before recreating, so it needs the same proof the
+      // foreground reprovision needs: guarding only the `resetting` branch
+      // left the identical defect live one branch over.
+      try {
+        await assertReplacementSnapshotReady(
+          dependencies.sandboxConfiguration,
+          { daytona: dependencies.daytona }
+        );
+      } catch (error) {
+        return classifySandboxRecoveryFailure(error);
+      }
       const resetting =
         await dependencies.store.beginDaytonaSandboxResetForRecovery(
           dependencies.operator,
