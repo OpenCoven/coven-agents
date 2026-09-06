@@ -294,6 +294,7 @@ function projectAgent(record: RunnerAgentRecord): AgentDefinition {
     backend: "cloud",
     createdAt: record.createdAt.toISOString(),
     description: record.description,
+    familiarId: record.familiarId,
     id: record.id,
     instructions: record.instructions,
     lastRunAt: record.lastRunAt?.toISOString() ?? null,
@@ -344,6 +345,14 @@ function parsedDefinition(input: unknown):
       value: {
         backend: "cloud";
         description: string;
+        familiarId:
+          | "auto"
+          | "builder"
+          | "critic"
+          | "custom"
+          | "scout"
+          | "scribe"
+          | "tester";
         instructions: string;
         model: string;
         name: string;
@@ -391,6 +400,7 @@ function agentMatchesDefinition(
 ): boolean {
   return (
     agent.description === definition.value.description &&
+    agent.familiarId === definition.value.familiarId &&
     agent.instructions === definition.value.instructions &&
     agent.model === definition.value.model &&
     agent.name === definition.value.name &&

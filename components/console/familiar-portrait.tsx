@@ -1,3 +1,4 @@
+import type { FamiliarId } from "@opencoven/agent-contracts";
 import Image, { type StaticImageData } from "next/image";
 import builderPortrait from "@/components/console/familiar-assets/builder.webp";
 import criticPortrait from "@/components/console/familiar-assets/critic.webp";
@@ -5,7 +6,10 @@ import customPortrait from "@/components/console/familiar-assets/custom.webp";
 import scoutPortrait from "@/components/console/familiar-assets/scout.webp";
 import scribePortrait from "@/components/console/familiar-assets/scribe.webp";
 import testerPortrait from "@/components/console/familiar-assets/tester.webp";
-import { familiarForProfileId } from "@/lib/console/familiars";
+import {
+  familiarForProfileId,
+  resolveFamiliarProfileId,
+} from "@/lib/console/familiars";
 import { glyphFor } from "@/lib/console/format";
 
 const PORTRAITS: Readonly<Record<string, StaticImageData>> = {
@@ -18,18 +22,21 @@ const PORTRAITS: Readonly<Record<string, StaticImageData>> = {
 };
 
 export function FamiliarPortrait({
+  familiarId = "auto",
   fallbackLabel,
   profileId,
   selected,
   size = 30,
 }: {
+  familiarId?: FamiliarId;
   fallbackLabel: string;
   profileId: string;
   selected: boolean;
   size?: number;
 }) {
-  const familiar = familiarForProfileId(profileId);
-  const portrait = PORTRAITS[profileId];
+  const resolvedProfileId = resolveFamiliarProfileId(profileId, familiarId);
+  const familiar = familiarForProfileId(resolvedProfileId);
+  const portrait = PORTRAITS[resolvedProfileId];
   const title = familiar
     ? `${familiar.name}, the ${familiar.species} familiar`
     : `${fallbackLabel} profile`;
@@ -38,7 +45,7 @@ export function FamiliarPortrait({
     <span
       aria-hidden="true"
       className="oc-familiar-portrait"
-      data-profile-id={profileId}
+      data-profile-id={resolvedProfileId}
       data-selected={selected ? "true" : "false"}
       style={{
         fontSize: Math.round(size * 0.42),
@@ -58,7 +65,7 @@ export function FamiliarPortrait({
             unoptimized
             width={size}
           />
-          {profileId === "custom" ? (
+          {resolvedProfileId === "custom" ? (
             <span className="oc-familiar-portrait__monogram">
               {glyphFor(fallbackLabel)}
             </span>

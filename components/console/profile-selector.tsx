@@ -127,6 +127,7 @@ export function ProfileSelector({
       >
         <FamiliarPortrait
           fallbackLabel={sanitizeEvidenceText(currentAgent.name)}
+          familiarId={currentAgent.familiarId}
           profileId={currentProfile.id}
           selected
           size={30}
@@ -241,6 +242,7 @@ export function ProfileSelector({
                         <span className="oc-profile-selector__glyph">
                           <FamiliarPortrait
                             fallbackLabel={sanitizeEvidenceText(agent.name)}
+                            familiarId={agent.familiarId}
                             profileId={profile.id}
                             selected={selected}
                             size={34}

@@ -96,6 +96,7 @@ function AgentGlyph({
   return (
     <FamiliarPortrait
       fallbackLabel={sanitizeEvidenceText(agent.name)}
+      familiarId={agent.familiarId}
       profileId={profile.id}
       selected={selected}
       size={size}

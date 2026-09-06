@@ -156,6 +156,7 @@ function asAgent(row: Record<string, unknown>): RunnerAgentRecord {
     createdAt: timestampColumn(row, "createdAt"),
     daytonaSandboxId: column(row, "daytonaSandboxId"),
     description: column(row, "description"),
+    familiarId: column(row, "familiarId"),
     id: column(row, "id"),
     instructions: column(row, "instructions"),
     lastRunAt: nullableTimestampColumn(row, "lastRunAt"),
@@ -2856,11 +2857,12 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             "create-agent",
             { ...input, tenant: principal.tenant },
             sql`INSERT INTO "RunnerAgent" (
-              "id", "tenant", "name", "description", "instructions", "model",
-              "runtime", "workspace"
+              "id", "tenant", "name", "description", "familiarId", "instructions",
+              "model", "runtime", "workspace"
             ) VALUES (
               ${input.id}, ${principal.tenant}, ${input.name}, ${input.description ?? ""},
-              ${input.instructions}, ${input.model}, ${input.runtime}, ${input.workspace ?? null}
+              ${input.familiarId}, ${input.instructions}, ${input.model},
+              ${input.runtime}, ${input.workspace ?? null}
             ) ON CONFLICT DO NOTHING
               RETURNING *`
           )
@@ -5304,6 +5306,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             sql`UPDATE "RunnerAgent"
               SET "name" = ${input.name},
                   "description" = ${input.description},
+                  "familiarId" = ${input.familiarId},
                   "instructions" = ${input.instructions},
                   "model" = ${input.model},
                   "runtime" = ${input.runtime},

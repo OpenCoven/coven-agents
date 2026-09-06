@@ -1,10 +1,14 @@
+import type { FamiliarId } from "@opencoven/agent-contracts";
+
 export type FamiliarDefinition = Readonly<{
   name: string;
-  profileId: string;
+  profileId: Exclude<FamiliarId, "auto">;
   species: string;
 }>;
 
-const FAMILIARS: Readonly<Record<string, FamiliarDefinition>> = {
+export const FAMILIARS: Readonly<
+  Record<Exclude<FamiliarId, "auto">, FamiliarDefinition>
+> = {
   builder: {
     name: "Cinder",
     profileId: "builder",
@@ -40,5 +44,17 @@ const FAMILIARS: Readonly<Record<string, FamiliarDefinition>> = {
 export function familiarForProfileId(
   profileId: string
 ): FamiliarDefinition | null {
-  return FAMILIARS[profileId] ?? null;
+  return profileId in FAMILIARS
+    ? FAMILIARS[profileId as Exclude<FamiliarId, "auto">]
+    : null;
+}
+
+export function resolveFamiliarProfileId(
+  profileId: string,
+  familiarId: FamiliarId = "auto"
+): Exclude<FamiliarId, "auto"> {
+  if (familiarId !== "auto") {
+    return familiarId;
+  }
+  return familiarForProfileId(profileId)?.profileId ?? "custom";
 }

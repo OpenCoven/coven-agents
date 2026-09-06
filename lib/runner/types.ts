@@ -2,6 +2,7 @@ import "server-only";
 
 import type {
   CommandEvidence,
+  FamiliarId,
   FileEvidence,
   RunError,
   RunEvent,
@@ -118,6 +119,7 @@ export type RunnerAgentRecord = {
   createdAt: Date;
   daytonaSandboxId: string | null;
   description: string;
+  familiarId: FamiliarId;
   id: string;
   instructions: string;
   lastRunAt: Date | null;
@@ -214,6 +216,7 @@ export type PersistRunnerAttemptRedactionInput = Omit<
 
 export type CreateRunnerAgentInput = {
   description?: string;
+  familiarId: FamiliarId;
   id: string;
   instructions: string;
   model: string;
@@ -225,6 +228,7 @@ export type CreateRunnerAgentInput = {
 export type UpdateRunnerAgentInput = {
   description: string;
   expectedVersion: number;
+  familiarId: FamiliarId;
   id: string;
   instructions: string;
   model: string;

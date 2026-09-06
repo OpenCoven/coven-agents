@@ -56,6 +56,39 @@ test("accepts the v1 cloud deployment class with a harness runtime", () => {
   assert.equal(result.success, true);
 });
 
+test("agent definitions accept only curated familiar identities", () => {
+  const base = {
+    backend: "cloud",
+    instructions: "Inspect, implement, and verify.",
+    model: "auto",
+    name: "Cody",
+    runtime: "copilot",
+  };
+
+  for (const familiarId of [
+    "auto",
+    "builder",
+    "critic",
+    "custom",
+    "scout",
+    "scribe",
+    "tester",
+  ]) {
+    assert.equal(
+      createAgentInputSchema.safeParse({ ...base, familiarId }).success,
+      true
+    );
+  }
+
+  assert.equal(
+    createAgentInputSchema.safeParse({
+      ...base,
+      familiarId: "remote-generated-url",
+    }).success,
+    false
+  );
+});
+
 test("definition schemas accept only the supported runtime set", () => {
   const definition = {
     backend: "cloud",

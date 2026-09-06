@@ -1,0 +1,2 @@
+ALTER TABLE "RunnerAgent" ADD COLUMN "familiarId" varchar(16) DEFAULT 'auto' NOT NULL;--> statement-breakpoint
+ALTER TABLE "RunnerAgent" ADD CONSTRAINT "RunnerAgent_familiarId_valid" CHECK ("RunnerAgent"."familiarId" in ('auto', 'builder', 'critic', 'custom', 'scout', 'scribe', 'tester'));

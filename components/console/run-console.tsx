@@ -5,6 +5,7 @@
 import type {
   AgentDefinition,
   CreateAgentInput,
+  FamiliarId,
   RunEvent,
   RunSnapshot,
 } from "@opencoven/agent-contracts";
@@ -26,6 +27,7 @@ import {
 } from "@/components/console/command-palette";
 import { Composer } from "@/components/console/composer";
 import { CreateAgent } from "@/components/console/create-agent";
+import { FamiliarPicker } from "@/components/console/familiar-picker";
 import { FamiliarPortrait } from "@/components/console/familiar-portrait";
 import {
   Btn,
@@ -223,6 +225,7 @@ export function RunConsole({
   const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [runMenuOpen, setRunMenuOpen] = useState(false);
+  const [choosingFamiliar, setChoosingFamiliar] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [renameDraft, setRenameDraft] = useState("");
   const [removing, setRemoving] = useState(false);
@@ -1160,6 +1163,7 @@ export function RunConsole({
         {
           backend: selectedAgent.backend,
           description: selectedAgent.description,
+          familiarId: selectedAgent.familiarId,
           instructions: selectedAgent.instructions,
           model: selectedAgent.model,
           name: next,
@@ -1182,6 +1186,45 @@ export function RunConsole({
     } finally {
       if (isCurrentSession(context.generation, context.signal)) {
         setRenaming(false);
+      }
+    }
+  };
+
+  const chooseFamiliar = async (familiarId: FamiliarId) => {
+    if (!selectedAgent || familiarId === selectedAgent.familiarId) {
+      setChoosingFamiliar(false);
+      return;
+    }
+    const context = currentSessionContext();
+    if (!context) {
+      return;
+    }
+    try {
+      const updated = await client.updateAgent(
+        selectedAgent.id,
+        {
+          backend: selectedAgent.backend,
+          description: selectedAgent.description,
+          familiarId,
+          instructions: selectedAgent.instructions,
+          model: selectedAgent.model,
+          name: selectedAgent.name,
+          runtime: selectedAgent.runtime,
+          workspace: selectedAgent.workspace,
+        },
+        context.signal
+      );
+      if (!isCurrentSession(context.generation, context.signal)) {
+        return;
+      }
+      setAgents((current) =>
+        current.map((agent) => (agent.id === updated.id ? updated : agent))
+      );
+      setChoosingFamiliar(false);
+      toast.success("Familiar updated.");
+    } catch (error) {
+      if (isCurrentSession(context.generation, context.signal)) {
+        reportRunnerError(error, "Could not update the familiar.");
       }
     }
   };
@@ -1666,6 +1709,7 @@ export function RunConsole({
                           fallbackLabel={sanitizeEvidenceText(
                             runAgent?.name ?? selectedAgent.name
                           )}
+                          familiarId={(runAgent ?? selectedAgent).familiarId}
                           profileId={
                             executionProfileForAgent(runAgent ?? selectedAgent)
                               .id
@@ -1895,6 +1939,13 @@ export function RunConsole({
                             {
                               go: () => {
                                 setRunMenuOpen(false);
+                                setChoosingFamiliar(true);
+                              },
+                              label: "Choose familiar",
+                            },
+                            {
+                              go: () => {
+                                setRunMenuOpen(false);
                                 refreshCurrent().catch(() => undefined);
                               },
                               label: "Reload profiles",
@@ -1928,6 +1979,60 @@ export function RunConsole({
                               {item.label}
                             </button>
                           ))}
+                        </div>
+                      </>
+                    ) : null}
+
+                    {choosingFamiliar ? (
+                      <>
+                        <button
+                          aria-label="Close the familiar picker"
+                          onClick={() => setChoosingFamiliar(false)}
+                          style={{
+                            background: "transparent",
+                            border: 0,
+                            cursor: "default",
+                            inset: 0,
+                            position: "fixed",
+                            zIndex: 38,
+                          }}
+                          type="button"
+                        />
+                        <div
+                          aria-label="Familiar selection"
+                          role="dialog"
+                          style={{
+                            background: "var(--bg-elevated)",
+                            border: "1px solid var(--border-strong)",
+                            borderRadius: "var(--radius-card)",
+                            boxShadow: "var(--shadow-lg)",
+                            padding: 12,
+                            position: "absolute",
+                            right: 14,
+                            top: 44,
+                            width: "min(440px, calc(100vw - 32px))",
+                            zIndex: 40,
+                          }}
+                        >
+                          <div
+                            style={{
+                              color: "var(--text-primary)",
+                              font: "600 12px/1.2 var(--font-ui)",
+                              marginBottom: 10,
+                            }}
+                          >
+                            Choose familiar
+                          </div>
+                          <FamiliarPicker
+                            automaticProfileId={
+                              executionProfileForAgent(selectedAgent).id
+                            }
+                            disabled={busy}
+                            onChange={(familiarId) => {
+                              chooseFamiliar(familiarId).catch(() => undefined);
+                            }}
+                            value={selectedAgent.familiarId}
+                          />
                         </div>
                       </>
                     ) : null}

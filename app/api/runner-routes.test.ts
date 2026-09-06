@@ -63,6 +63,7 @@ function definition(overrides: Partial<AgentDefinition> = {}): AgentDefinition {
     backend: "cloud",
     createdAt: "2026-08-28T15:00:00.000Z",
     description: "",
+    familiarId: "auto",
     id: AGENT_ID,
     instructions: "Do the thing.",
     lastRunAt: null,

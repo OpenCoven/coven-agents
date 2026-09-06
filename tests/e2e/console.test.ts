@@ -35,6 +35,7 @@ const retainedAgent = {
   backend: "cloud",
   createdAt: "2026-08-27T06:00:00.000Z",
   description: "Verifies the run timeline.",
+  familiarId: "auto",
   id: AGENT_ID,
   instructions: "Report evidence clearly.",
   lastRunAt: "2026-08-27T06:01:00.000Z",
@@ -614,6 +615,116 @@ test.describe("Run console", () => {
     await expect(page.getByLabel("Operating contract")).toHaveValue(
       "Review the release evidence and report concrete blockers."
     );
+  });
+
+  test("Forge creation persists the selected familiar", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    let createdBody: Record<string, unknown> | null = null;
+    await page.route("**/api/tenant/prewarm", (route) =>
+      route.fulfill({ status: 204 })
+    );
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: ["copilot"] } })
+    );
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const request = route.request();
+      const { pathname } = new URL(request.url());
+      if (pathname === "/api/agents" && request.method() === "POST") {
+        createdBody = request.postDataJSON() as Record<string, unknown>;
+        return route.fulfill({
+          json: {
+            agent: {
+              ...retainedAgent,
+              ...createdBody,
+              id: OTHER_AGENT_ID,
+              name: "Release steward",
+            },
+          },
+          status: 201,
+        });
+      }
+      return route.fulfill(
+        pathname === "/api/agents"
+          ? { json: { agents: [] } }
+          : { json: { apiVersion: "1.0", runs: [] } }
+      );
+    });
+
+    await page.goto("/agents");
+    await expect(page.getByText("e2e-user@example.invalid")).toBeVisible();
+    await page.getByRole("button", { name: "New agent" }).click();
+    await page.getByRole("button", { name: /Forge a profile/ }).click();
+    await page.getByLabel("Name", { exact: true }).fill("Release steward");
+    await page
+      .getByLabel("Operating contract")
+      .fill("Review release evidence and report every concrete blocker.");
+    await page.getByRole("radio", { name: /Morrow/ }).click();
+    await page.getByRole("button", { name: "Create profile" }).click();
+
+    await expect.poll(() => createdBody?.familiarId).toBe("scribe");
+    await expect(
+      page.locator('[data-profile-id="scribe"] img').first()
+    ).toBeVisible();
+  });
+
+  test("an existing profile can change its familiar", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    let updatedBody: Record<string, unknown> | null = null;
+    await page.route("**/api/tenant/prewarm", (route) =>
+      route.fulfill({ status: 204 })
+    );
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: ["copilot"] } })
+    );
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const request = route.request();
+      const { pathname } = new URL(request.url());
+      if (
+        pathname === `/api/agents/${AGENT_ID}` &&
+        request.method() === "PUT"
+      ) {
+        updatedBody = request.postDataJSON() as Record<string, unknown>;
+        return route.fulfill({
+          json: {
+            agent: {
+              ...retainedAgent,
+              ...updatedBody,
+              familiarId: "critic",
+            },
+          },
+        });
+      }
+      return route.fulfill(
+        pathname === "/api/agents"
+          ? { json: { agents: [retainedAgent] } }
+          : { json: { apiVersion: "1.0", runs: [] } }
+      );
+    });
+
+    await page.goto("/agents");
+    await page.getByRole("button", { name: "More run actions" }).click();
+    await page.getByRole("menuitem", { name: "Choose familiar" }).click();
+    await page.getByRole("radio", { name: /Rook/ }).click();
+
+    await expect.poll(() => updatedBody?.familiarId).toBe("critic");
+    const portrait = page.locator('[data-profile-id="critic"] img').first();
+    await expect(portrait).toHaveAttribute(
+      "src",
+      /\/_next\/static\/media\/critic\.[^/]+\.webp$/u
+    );
+    await expect
+      .poll(() =>
+        portrait.evaluate((image: HTMLImageElement) =>
+          image.complete ? image.naturalWidth : 0
+        )
+      )
+      .toBeGreaterThan(0);
   });
 
   test("profile paths share a row on wide screens and stack without overflow on narrow screens", async ({
