@@ -16,6 +16,7 @@ import {
 } from "./names";
 import { probeDaytonaHarnesses } from "./process";
 import {
+  assertReplacementSnapshotReady,
   classifyDaytonaProviderError,
   classifyDaytonaSandboxCreateError,
   type DaytonaSandboxConfiguration,
@@ -3333,4 +3334,66 @@ test("a workspace is never deleted for a snapshot that is not active", async () 
     !calls.includes("create"),
     "nothing may be created after refusing to delete"
   );
+});
+
+/**
+ * The refusal must distinguish a permanent misconfiguration from a passing
+ * provider fault. Marking everything permanent fails the whole fleet on a
+ * blip; marking everything transient buries a missing snapshot in a queue that
+ * never drains.
+ */
+test("a transient provider fault defers the refusal rather than failing it", async () => {
+  const permanent = assertReplacementSnapshotReady(config, {
+    daytona: {
+      snapshot: {
+        get: () => Promise.reject(new DaytonaNotFoundError("absent")),
+      },
+    },
+  });
+  await assert.rejects(permanent, (error: unknown) => {
+    assert.ok(error instanceof DaytonaSandboxLifecycleError);
+    assert.equal(error.retryable, false, "a missing snapshot is permanent");
+    return true;
+  });
+
+  const transient = assertReplacementSnapshotReady(config, {
+    daytona: {
+      snapshot: {
+        get: () => Promise.reject(new DaytonaTimeoutError("timeout")),
+      },
+    },
+  });
+  await assert.rejects(transient, (error: unknown) => {
+    assert.ok(error instanceof DaytonaSandboxLifecycleError);
+    assert.equal(
+      error.retryable,
+      true,
+      "a timeout must not permanently fail every workspace in the fleet"
+    );
+    return true;
+  });
+
+  const building = assertReplacementSnapshotReady(config, {
+    daytona: {
+      snapshot: {
+        get: (name: string) =>
+          Promise.resolve({
+            cpu: 2,
+            disk: 10,
+            mem: 4,
+            name,
+            state: "building",
+          }),
+      },
+    },
+  });
+  await assert.rejects(building, (error: unknown) => {
+    assert.ok(error instanceof DaytonaSandboxLifecycleError);
+    assert.equal(
+      error.retryable,
+      true,
+      "a snapshot mid-build settles on its own; the deploy window must heal"
+    );
+    return true;
+  });
 });

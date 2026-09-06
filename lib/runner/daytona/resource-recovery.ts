@@ -253,10 +253,13 @@ async function recoverSandbox(
     try {
       await assertReplacementSnapshotReady(dependencies.sandboxConfiguration, {
         daytona: dependencies.daytona,
-        store: dependencies.store,
-      } as never);
-    } catch {
-      return "deferred";
+      });
+    } catch (error) {
+      // Same reasoning as the identity-mismatch branch: "deferred" cannot be
+      // told apart from "not yet stale", and the batch summary reports
+      // "recovered" whenever any other row succeeds, so a fleet wedged behind
+      // an unbuildable snapshot would look healthy on every tick.
+      return classifySandboxRecoveryFailure(error);
     }
     let sandbox: Sandbox | null;
     try {

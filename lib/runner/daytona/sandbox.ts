@@ -97,11 +97,7 @@ export type DaytonaSandboxService = Readonly<{
    * closed — see `assertReplacementSnapshotReady`.
    */
   snapshot?: Readonly<{
-    get: (
-      name: string
-    ) => Promise<
-      Readonly<{ cpu?: number; disk?: number; memory?: number; name: string }>
-    >;
+    get: (name: string) => Promise<DaytonaSnapshotDescription>;
   }>;
 }>;
 
@@ -333,6 +329,8 @@ function sandboxConfigurationMatches(
  * replacement is usable does not get to delete.
  */
 const SNAPSHOT_ACTIVE_STATE = "active";
+/** States a snapshot never leaves on its own; everything else may still settle. */
+const TERMINAL_SNAPSHOT_STATES = new Set(["build_failed", "error"]);
 
 export async function assertReplacementSnapshotReady(
   configuration: DaytonaSandboxConfiguration,
@@ -372,9 +370,17 @@ export async function assertReplacementSnapshotReady(
     snapshot.state !== undefined &&
     snapshot.state !== SNAPSHOT_ACTIVE_STATE
   ) {
+    // Building, pulling, pending and snapshotting all resolve here, and they
+    // are exactly the states a freshly built generation passes through — the
+    // deploy window this change creates. Treating them as permanent turns a
+    // self-healing few minutes into a hard 422 for every tenant, so only a
+    // terminal build outcome refuses for good.
     throw new DaytonaSandboxLifecycleError(
       `Refusing to delete a persistent sandbox: replacement snapshot "${configuration.snapshotName}" is not active (state: ${snapshot.state}).`,
-      { kind: "cleanup_needed", retryable: false }
+      {
+        kind: "cleanup_needed",
+        retryable: !TERMINAL_SNAPSHOT_STATES.has(snapshot.state),
+      }
     );
   }
 

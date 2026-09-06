@@ -556,3 +556,41 @@ test("snapshot resources are derived from the environment, not hardcoded", () =>
 
   assert.deepEqual(configured.resources, { cpu: 3, disk: 10, memory: 7 });
 });
+
+test("a snapshot created below policy fails the build instead of shipping", async () => {
+  // Snapshots are immutable, so a clamped snapshot cannot be corrected in
+  // place: the runtime guard would refuse the whole fleet permanently and the
+  // only remedy is another generation. This is the moment it is still cheap.
+  await assert.rejects(
+    provisionDaytonaSnapshot(
+      { ...configuration, resources: { cpu: 2, disk: 10, memory: 4 } },
+      {
+        log: () => undefined,
+        snapshot: {
+          create: () =>
+            Promise.resolve({
+              name: configuration.snapshotName,
+              state: SnapshotState.ACTIVE,
+            }),
+          get: (() => {
+            let calls = 0;
+            return () => {
+              calls += 1;
+              return calls === 1
+                ? Promise.reject(missingSnapshot())
+                : Promise.resolve({
+                    cpu: 2,
+                    disk: 10,
+                    mem: 1,
+                    name: configuration.snapshotName,
+                    state: SnapshotState.ACTIVE,
+                  });
+            };
+          })(),
+        },
+      }
+    ),
+    /was created below policy \(memory 1 < 4\)/u,
+    "a clamped snapshot must not be reported as a successful build"
+  );
+});

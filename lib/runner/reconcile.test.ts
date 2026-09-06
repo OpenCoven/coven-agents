@@ -3140,7 +3140,10 @@ test("cron recovery defers a reset it cannot complete instead of deleting the wo
   });
 
   assert.deepEqual(calls, [], "no deletion and no reset completion");
-  assert.deepEqual(result, { deferred: 1, failures: 0, recovered: 0 });
+  // A refusal must report as a failure. "deferred" is indistinguishable from
+  // "not yet stale", and the batch summary reports "recovered" whenever any
+  // other row succeeds, so a wedged fleet would look healthy every tick.
+  assert.deepEqual(result, { deferred: 0, failures: 1, recovered: 0 });
 });
 
 /**
@@ -3154,16 +3157,27 @@ test("cron recovery refuses the provisioning mismatch branch when the snapshot c
     {
       get: () => Promise.reject(new DaytonaNotFoundError("snapshot absent")),
       label: "missing",
+      permanent: true,
     },
     {
       get: (name: string) =>
         Promise.resolve({ cpu: 2, disk: 10, mem: 4, name, state: "error" }),
       label: "inactive",
+      permanent: true,
+    },
+    {
+      // Mid-build is the state a freshly bumped generation passes through.
+      // It must defer, not fail: the deploy window heals itself.
+      get: (name: string) =>
+        Promise.resolve({ cpu: 2, disk: 10, mem: 4, name, state: "building" }),
+      label: "still building",
+      permanent: false,
     },
     {
       get: (name: string) =>
         Promise.resolve({ cpu: 1, disk: 3, mem: 1, name, state: "active" }),
       label: "below policy",
+      permanent: true,
     },
   ]) {
     let deletes = 0;
@@ -3234,6 +3248,11 @@ test("cron recovery refuses the provisioning mismatch branch when the snapshot c
       result.recovered,
       0,
       `a ${snapshot.label} snapshot must not report recovery`
+    );
+    assert.equal(
+      result.failures,
+      snapshot.permanent ? 1 : 0,
+      `a ${snapshot.label} snapshot must report ${snapshot.permanent ? "a failure" : "a deferral"}`
     );
   }
 });

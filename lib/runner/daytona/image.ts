@@ -70,6 +70,10 @@ const MARKER_NAMES = [
 export const DAYTONA_BUILD_LOG_LOOKBEHIND_SIZE = 96;
 
 export type DaytonaSnapshot = Readonly<{
+  cpu?: number;
+  disk?: number;
+  /** Daytona reports snapshot memory as `mem`, not `memory`. */
+  mem?: number;
   name: string;
   state: string;
 }>;
@@ -434,6 +438,32 @@ export async function provisionDaytonaSnapshot(
   ) {
     throw new Error(
       `Daytona snapshot "${configuration.snapshotName}" is not active after creation (state: ${snapshotState(snapshot.state)}).`
+    );
+  }
+
+  // Verify what was asked for is what landed. Snapshots are immutable, so a
+  // snapshot clamped below policy — by an org quota, say — cannot be corrected
+  // in place: the runtime guard would then refuse the whole fleet permanently,
+  // and the only remedy is another generation. This is the one moment the
+  // mistake is still cheap, so it must fail here rather than at delete time.
+  const shortfalls = (
+    [
+      ["cpu", snapshot.cpu, configuration.resources.cpu],
+      ["disk", snapshot.disk, configuration.resources.disk],
+      ["memory", snapshot.mem, configuration.resources.memory],
+    ] as const
+  ).filter(
+    ([, provided, required]) => provided !== undefined && provided < required
+  );
+  if (shortfalls.length > 0) {
+    throw new Error(
+      `Daytona snapshot "${configuration.snapshotName}" was created below policy (${shortfalls
+        .map(
+          ([field, provided, required]) => `${field} ${provided} < ${required}`
+        )
+        .join(
+          ", "
+        )}). Snapshots are immutable: build the next generation instead.`
     );
   }
   return snapshot;
