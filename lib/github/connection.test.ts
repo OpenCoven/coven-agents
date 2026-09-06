@@ -1480,6 +1480,53 @@ test("OAuth proof failures report only bounded provider diagnostics", async () =
   );
 });
 
+test("diagnostic reporting cannot strand a consumed OAuth callback", async (context) => {
+  const idempotency = new MemoryIdempotencyStore();
+  const fallbackReports: unknown[][] = [];
+  context.mock.method(console, "error", (...values: unknown[]) => {
+    fallbackReports.push(values);
+  });
+  let proofCalls = 0;
+  const handlers = createGitHubConnectionHandlers(
+    dependenciesWithUserAuthorization(
+      {
+        idempotencyStore: idempotency,
+        reportFailure: () => {
+          throw new Error("logging unavailable");
+        },
+      },
+      {
+        proveInstallationAccess: () => {
+          proofCalls += 1;
+          return Promise.reject(
+            new GitHubProviderError("github_provider_unavailable", {
+              retryable: true,
+              status: 503,
+            })
+          );
+        },
+      }
+    )
+  );
+  const authorization = await beginUserAuthorization(handlers);
+  const request = oauthCallbackRequest(authorization.state);
+
+  const failed = await handlers.callback(request, null);
+  assert.equal(failed.status, 503);
+  assert.equal(await errorCode(failed), "github_provider_unavailable");
+
+  const replayed = await handlers.callback(request, null);
+  assert.equal(replayed.status, 503);
+  assert.equal(await errorCode(replayed), "github_provider_unavailable");
+  assert.equal(proofCalls, 1);
+  assert.deepEqual(fallbackReports, [
+    [
+      "GitHub connection failure reporter failed.",
+      { stage: "user_authorization" },
+    ],
+  ]);
+});
+
 test("a near-expiry OAuth callback keeps its consumed record through slow bounded processing and cleanup", async () => {
   let currentTime = NOW;
   const idempotency = new MemoryIdempotencyStore();
