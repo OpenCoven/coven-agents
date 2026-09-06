@@ -12,17 +12,16 @@ import {
   UsersRound,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { FamiliarPortrait } from "@/components/console/familiar-portrait";
 import { Btn, Eyebrow } from "@/components/console/primitives";
 import {
   hairline,
   tabular,
   truncate,
   type as type_,
-  well,
 } from "@/components/console/styles";
 import { FORMATIONS, type Formation, TEMPLATES } from "@/lib/agents/formations";
 import { executionProfileForTemplate } from "@/lib/console/agent-profile";
-import { glyphFor } from "@/lib/console/format";
 
 /**
  * Forging an execution profile.
@@ -404,9 +403,12 @@ export function CreateAgent({
                       }}
                       type="button"
                     >
-                      <span style={well(false, 26)}>
-                        {glyphFor(template.name)}
-                      </span>
+                      <FamiliarPortrait
+                        fallbackLabel={template.name}
+                        profileId={template.id}
+                        selected={false}
+                        size={32}
+                      />
                       <span
                         style={{
                           display: "grid",
@@ -542,9 +544,12 @@ export function CreateAgent({
                             padding: "6px 11px 6px 7px",
                           }}
                         >
-                          <span style={well(false, 20)}>
-                            {glyphFor(member.name)}
-                          </span>
+                          <FamiliarPortrait
+                            fallbackLabel={member.name}
+                            profileId={member.id}
+                            selected={false}
+                            size={22}
+                          />
                           <span style={type_.label}>{member.name}</span>
                         </span>
                       ))}

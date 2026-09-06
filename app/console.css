@@ -3161,6 +3161,64 @@
   color: var(--accent);
 }
 
+.oc-familiar-portrait {
+  position: relative;
+  display: grid;
+  flex: none;
+  place-items: center;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  line-height: 1;
+  color: var(--text-secondary);
+  background:
+    radial-gradient(
+      circle at 50% 30%,
+      color-mix(in oklch, var(--accent-presence) 14%, transparent),
+      transparent 62%
+    ),
+    var(--bg-elevated);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-control);
+  box-shadow: inset 0 1px 0 color-mix(in oklch, white 8%, transparent);
+}
+
+.oc-familiar-portrait[data-selected="true"] {
+  color: var(--accent-presence);
+  border-color: color-mix(
+    in oklch,
+    var(--accent-presence) 58%,
+    var(--border-hairline)
+  );
+  box-shadow:
+    inset 0 1px 0 color-mix(in oklch, white 10%, transparent),
+    0 0 0 2px color-mix(in oklch, var(--accent-presence) 10%, transparent);
+}
+
+.oc-familiar-portrait img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transform: scale(1.035);
+}
+
+.oc-familiar-portrait__monogram {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  display: grid;
+  place-items: center;
+  min-width: 12px;
+  height: max(12px, 38%);
+  padding: 0 2px;
+  font-size: 0.58em;
+  color: var(--text-primary);
+  background: color-mix(in oklch, var(--bg-desk) 88%, transparent);
+  border: 1px solid color-mix(in oklch, var(--ink) 24%, transparent);
+  border-radius: 4px;
+  backdrop-filter: blur(3px);
+}
+
 .oc-agent-rail {
   position: relative;
 }

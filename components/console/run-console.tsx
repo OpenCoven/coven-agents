@@ -26,6 +26,7 @@ import {
 } from "@/components/console/command-palette";
 import { Composer } from "@/components/console/composer";
 import { CreateAgent } from "@/components/console/create-agent";
+import { FamiliarPortrait } from "@/components/console/familiar-portrait";
 import {
   Btn,
   Eyebrow,
@@ -50,7 +51,6 @@ import {
   tabular,
   truncate,
   type as type_,
-  well,
 } from "@/components/console/styles";
 import { TeamConsole } from "@/components/console/team-console";
 import { useSubscriptionAuthorityRefresh } from "@/hooks/use-subscription-authority-refresh";
@@ -64,8 +64,9 @@ import type { Formation } from "@/lib/agents/formations";
 import { memberName } from "@/lib/agents/formations";
 import { browserApplicationLoginHref } from "@/lib/application-path";
 import { avatarFor } from "@/lib/avatar";
+import { executionProfileForAgent } from "@/lib/console/agent-profile";
 import { isTerminal, projectRun } from "@/lib/console/blocks";
-import { formatDuration, glyphFor, spanBetween } from "@/lib/console/format";
+import { formatDuration, spanBetween } from "@/lib/console/format";
 import type { SessionOperationContext } from "@/lib/console/session-operation";
 import type { ConsoleRun } from "@/lib/console/types";
 import {
@@ -1661,13 +1662,17 @@ export function RunConsole({
                   >
                     {selectedRun || renaming ? (
                       <>
-                        <span style={well(true, 30)}>
-                          {glyphFor(
-                            sanitizeEvidenceText(
-                              runAgent?.name ?? selectedAgent.name
-                            )
+                        <FamiliarPortrait
+                          fallbackLabel={sanitizeEvidenceText(
+                            runAgent?.name ?? selectedAgent.name
                           )}
-                        </span>
+                          profileId={
+                            executionProfileForAgent(runAgent ?? selectedAgent)
+                              .id
+                          }
+                          selected
+                          size={30}
+                        />
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div
                             style={{
