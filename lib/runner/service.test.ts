@@ -324,6 +324,27 @@ test("agent creation and updates persist explicit familiar selections", async ()
   assert.equal((updateInput as { familiarId: string }).familiarId, "critic");
 });
 
+test("legacy agent updates preserve an existing familiar selection", async () => {
+  let updateInput: unknown;
+  const service = createRunnerService({
+    store: baseStore({
+      getAgent: () => Promise.resolve(agent({ familiarId: "scribe" })),
+      updateAgent: (_principal: RunnerPrincipal, input: unknown) => {
+        updateInput = input;
+        return Promise.resolve({ kind: "stale_version" as const });
+      },
+    }),
+  });
+
+  await service.updateAgent(
+    PRINCIPAL,
+    AGENT_ID,
+    definition({ name: "Legacy" })
+  );
+
+  assert.equal((updateInput as { familiarId: string }).familiarId, "scribe");
+});
+
 test("agent updates preserve the explicit busy outcome", async () => {
   const service = createRunnerService({
     store: baseStore({

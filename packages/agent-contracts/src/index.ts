@@ -44,9 +44,16 @@ export function isCanonicalUuid(value: unknown): value is string {
   return typeof value === "string" && CANONICAL_UUID_PATTERN.test(value);
 }
 
-export const familiarIdSchema = z
-  .enum(["auto", "builder", "critic", "custom", "scout", "scribe", "tester"])
-  .default("auto");
+const familiarIdValueSchema = z.enum([
+  "auto",
+  "builder",
+  "critic",
+  "custom",
+  "scout",
+  "scribe",
+  "tester",
+]);
+export const familiarIdSchema = familiarIdValueSchema.default("auto");
 
 export const TEAM_LIMITS = Object.freeze({
   maxDescriptionLength: AGENT_RUNNER_LIMITS.maxDescriptionLength,
@@ -405,6 +412,12 @@ const agentDefinitionInputShape = {
  */
 export const createAgentInputSchema = z
   .object(agentDefinitionInputShape)
+  .strict();
+export const updateAgentInputSchema = z
+  .object({
+    ...agentDefinitionInputShape,
+    familiarId: familiarIdValueSchema.optional(),
+  })
   .strict();
 
 /**

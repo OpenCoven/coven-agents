@@ -27,6 +27,7 @@ import {
   runStatusSchema,
   startRunInputSchema,
   storedAgentDefinitionSchema,
+  updateAgentInputSchema,
 } from "./index";
 
 const contractFixture = JSON.parse(
@@ -83,6 +84,25 @@ test("agent definitions accept only curated familiar identities", () => {
   assert.equal(
     createAgentInputSchema.safeParse({
       ...base,
+      familiarId: "remote-generated-url",
+    }).success,
+    false
+  );
+});
+
+test("agent updates preserve omission of a legacy familiar field", () => {
+  const result = updateAgentInputSchema.parse({
+    backend: "cloud",
+    instructions: "Inspect, implement, and verify.",
+    model: "auto",
+    name: "Cody",
+    runtime: "copilot",
+  });
+
+  assert.equal(Object.hasOwn(result, "familiarId"), false);
+  assert.equal(
+    updateAgentInputSchema.safeParse({
+      ...result,
       familiarId: "remote-generated-url",
     }).success,
     false

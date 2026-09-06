@@ -1079,6 +1079,35 @@ test("update schedules bounded warm and reconciliation work", async () => {
   assert.equal(reconciled, 1);
 });
 
+test("legacy update bodies reach the service without a default familiar", async () => {
+  let receivedInput: unknown;
+  const fixture = handlers({
+    service: service({
+      updateAgent: (_principal, _agentId, input) => {
+        receivedInput = input;
+        return Promise.resolve({
+          agent: definition({ name: "Updated" }),
+          kind: "updated",
+        });
+      },
+    }),
+  });
+
+  const response = await fixture.handlers.updateAgent(
+    new Request(`https://app.test/api/agents/${AGENT_ID}`, {
+      body: validDefinitionBody({ name: "Updated" }),
+      method: "PUT",
+    }),
+    AGENT_ID
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(
+    Object.hasOwn(receivedInput as Record<string, unknown>, "familiarId"),
+    false
+  );
+});
+
 test("scheduled update warming observes failures without rejection or provider leakage", async () => {
   let reconciled = 0;
   const typedFailure = handlers({

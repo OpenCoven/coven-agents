@@ -341,6 +341,7 @@ function unreachable(_value: never, operation: string): never {
 function parsedDefinition(input: unknown):
   | { kind: "invalid" }
   | {
+      familiarSpecified: boolean;
       kind: "ok";
       value: {
         backend: "cloud";
@@ -369,6 +370,10 @@ function parsedDefinition(input: unknown):
     return { kind: "unsupported_harness" };
   }
   return {
+    familiarSpecified:
+      typeof input === "object" &&
+      input !== null &&
+      Object.hasOwn(input, "familiarId"),
     kind: "ok",
     value: {
       ...parsed.data,
@@ -919,6 +924,9 @@ export function createRunnerService(
         updated = await dependencies.store.updateAgent(principal, {
           ...parsed.value,
           expectedVersion: current.version,
+          familiarId: parsed.familiarSpecified
+            ? parsed.value.familiarId
+            : current.familiarId,
           id: agentId,
           workspace: parsed.value.workspace ?? null,
         });

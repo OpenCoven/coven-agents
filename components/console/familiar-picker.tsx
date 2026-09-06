@@ -55,7 +55,7 @@ export function FamiliarPicker({
 
         return (
           <label
-            className="oc-row"
+            className="oc-familiar-picker__option oc-row"
             key={familiarId}
             style={{
               alignItems: "center",
@@ -73,6 +73,7 @@ export function FamiliarPicker({
               minHeight: 56,
               opacity: disabled ? 0.55 : 1,
               padding: "8px 10px",
+              position: "relative",
               textAlign: "left",
             }}
           >
@@ -82,10 +83,12 @@ export function FamiliarPicker({
               name="familiar"
               onChange={handleChange}
               style={{
-                height: 1,
+                cursor: disabled ? "not-allowed" : "pointer",
+                height: "100%",
+                inset: 0,
                 opacity: 0,
                 position: "absolute",
-                width: 1,
+                width: "100%",
               }}
               type="radio"
               value={familiarId}

@@ -676,6 +676,7 @@ test.describe("Run console", () => {
   }) => {
     await context.addCookies(await subscriberCookies());
     let updatedBody: Record<string, unknown> | null = null;
+    let releaseUpdate!: () => Promise<void>;
     await page.route("**/api/tenant/prewarm", (route) =>
       route.fulfill({ status: 204 })
     );
@@ -690,14 +691,19 @@ test.describe("Run console", () => {
         request.method() === "PUT"
       ) {
         updatedBody = request.postDataJSON() as Record<string, unknown>;
-        return route.fulfill({
-          json: {
-            agent: {
-              ...retainedAgent,
-              ...updatedBody,
-              familiarId: "critic",
-            },
-          },
+        return new Promise<void>((resolve) => {
+          releaseUpdate = async () => {
+            await route.fulfill({
+              json: {
+                agent: {
+                  ...retainedAgent,
+                  ...updatedBody,
+                  familiarId: "critic",
+                },
+              },
+            });
+            resolve();
+          };
         });
       }
       return route.fulfill(
@@ -708,11 +714,20 @@ test.describe("Run console", () => {
     });
 
     await page.goto("/agents");
-    await page.getByRole("button", { name: "More run actions" }).click();
+    const actions = page.getByRole("button", { name: "More run actions" });
+    await actions.click();
     await page.getByRole("menuitem", { name: "Choose familiar" }).click();
+    const dialog = page.getByRole("dialog", { name: "Familiar selection" });
+    await expect(dialog).toHaveAttribute("aria-modal", "true");
+    await expect(dialog.getByRole("radio", { checked: true })).toBeFocused();
     await page.getByRole("radio", { name: /Rook/ }).click();
 
     await expect.poll(() => updatedBody?.familiarId).toBe("critic");
+    await expect(page.getByRole("button", { name: "Saving…" })).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeVisible();
+    await releaseUpdate();
+    await expect(dialog).toBeHidden();
     const portrait = page.locator('[data-profile-id="critic"] img').first();
     await expect(portrait).toHaveAttribute(
       "src",
@@ -725,6 +740,11 @@ test.describe("Run console", () => {
         )
       )
       .toBeGreaterThan(0);
+
+    await actions.click();
+    await page.getByRole("menuitem", { name: "Choose familiar" }).click();
+    await page.keyboard.press("Escape");
+    await expect(actions).toBeFocused();
   });
 
   test("profile paths share a row on wide screens and stack without overflow on narrow screens", async ({
