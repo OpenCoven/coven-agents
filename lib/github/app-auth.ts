@@ -144,6 +144,9 @@ export class GitHubProviderError extends Error {
 
 export type GitHubProviderStage =
   | "access_revocation"
+  | "app_installation_lookup"
+  | "app_repository_lookup"
+  | "authority_comparison"
   | "exchange"
   | "exchange_access_token"
   | "exchange_candidates"
