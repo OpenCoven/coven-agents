@@ -960,7 +960,7 @@
   );
 }
 
-.oc-team-member-editor__required {
+.oc-team-member-editor__skills label.oc-team-member-editor__required {
   color: var(--color-warning);
   background: var(--fill-warning);
   border-color: color-mix(
