@@ -296,7 +296,7 @@ test.describe("Team console", () => {
     const skillForm = page.locator(".oc-team-form");
     await expect(
       skillForm.getByText(
-        "GitHub Project capabilities remain unavailable until current user Project-management authority can be verified exactly."
+        "GitHub Project capabilities appear only while exact user Project-management authority remains current."
       )
     ).toBeVisible();
     await expect(skillForm.getByLabel("github.projects.write")).toHaveCount(0);
@@ -348,6 +348,12 @@ test.describe("Team console", () => {
     await expect(
       page.getByRole("heading", { exact: true, name: team.name })
     ).toBeVisible();
+    await expect(
+      page.getByRole("heading", {
+        name: "The handoff, before you launch",
+      })
+    ).toBeVisible();
+    await expect(page.locator(".oc-team-sequence__card")).toHaveCount(2);
 
     await page
       .getByLabel("Mission")
@@ -359,6 +365,7 @@ test.describe("Team console", () => {
     await expect(startRunButton).toBeDisabled();
     releaseRunList?.();
     await expect(startRunButton).toBeEnabled();
+    await expect(page.getByText("No runs yet")).toBeVisible();
     await startRunButton.click();
     await expect(page.getByText("Approval required")).toBeVisible();
     await expect(page.getByText("github.issues.write")).toBeVisible();
