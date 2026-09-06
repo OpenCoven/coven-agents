@@ -35,6 +35,8 @@ const DEFAULT_MAX_RESPONSE_BYTES = 1024 * 1024;
 const DEFAULT_MAX_PAGES = 10;
 const DEFAULT_MAX_INSTALLATIONS = 1000;
 const DEFAULT_MAX_REPOSITORIES = 16;
+const MAX_ACCESS_TOKEN_EXPIRATION_SECONDS = 24 * 60 * 60;
+const MAX_REFRESH_TOKEN_EXPIRATION_SECONDS = 366 * 24 * 60 * 60;
 const MAX_PROJECTS_PER_ORGANIZATION = 100;
 const MAX_TOKEN_BYTES = 4096;
 const MAX_TOKEN_CANDIDATES_PER_TYPE = 4;
@@ -887,8 +889,12 @@ function validateOptionalExpiration(body: JsonObject): void {
   }
   if (
     hasAccessExpiration &&
-    (nonNegativeInteger(body.expires_in) !== 28_800 ||
-      nonNegativeInteger(body.refresh_token_expires_in) !== 15_897_600)
+    (nonNegativeInteger(body.expires_in) < 1 ||
+      nonNegativeInteger(body.expires_in) >
+        MAX_ACCESS_TOKEN_EXPIRATION_SECONDS ||
+      nonNegativeInteger(body.refresh_token_expires_in) < 1 ||
+      nonNegativeInteger(body.refresh_token_expires_in) >
+        MAX_REFRESH_TOKEN_EXPIRATION_SECONDS)
   ) {
     throw invalidResponse();
   }

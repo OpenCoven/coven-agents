@@ -90,6 +90,29 @@ test("user authorization proves an exact accessible installation and revokes its
   ]);
 });
 
+test("user authorization accepts bounded provider expiration durations", async () => {
+  const requests: CapturedRequest[] = [];
+  const client = clientFor(
+    sequenceFetch(requests, [
+      jsonResponse({
+        ...tokenBody(),
+        expires_in: 28_799,
+        refresh_token_expires_in: 15_897_599,
+      }),
+      jsonResponse(installationsBody([INSTALLATION_ID])),
+      new Response(null, { status: 204 }),
+    ])
+  );
+
+  const authority = await client.proveInstallationAccess(proofInput());
+
+  assert.equal(authority.user.login, "BunsDev");
+  assert.deepEqual(revokedCredentials(requests).sort(), [
+    `ghr_${"B".repeat(32)}`,
+    USER_TOKEN,
+  ]);
+});
+
 test("user authorization enumerates exact installation repositories and derives safe collaborator ceilings", async () => {
   for (const [role, permissions] of [
     [
