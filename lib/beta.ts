@@ -58,6 +58,16 @@ const EXEMPT_PATHS = new Set([
 export type BetaGate = {
   allowlist: string[];
   enabled: boolean;
+  /**
+   * Whether the open beta campaign is admitting people. When it is, any signed
+   * in identity is invited and the allowlist stops being the guest list.
+   *
+   * Read from the campaign's own switch rather than a third `BETA_MODE` value,
+   * because two flags can disagree and this pair would disagree expensively:
+   * a campaign granting minutes behind a closed allowlist would hand people
+   * free run time and then bounce them at the door.
+   */
+  open: boolean;
 };
 
 function normalizeEmail(value: string): string {
@@ -76,6 +86,7 @@ function normalizeEmail(value: string): string {
  */
 export function readBetaGate(env: {
   BETA_ALLOWLIST?: string;
+  BETA_CAMPAIGN_ENABLED?: string;
   BETA_MODE?: string;
 }): BetaGate {
   return {
@@ -84,6 +95,7 @@ export function readBetaGate(env: {
       .map(normalizeEmail)
       .filter(Boolean),
     enabled: env.BETA_MODE === "on",
+    open: env.BETA_CAMPAIGN_ENABLED === "on",
   };
 }
 
@@ -134,6 +146,10 @@ export function isAllowedIdentity(
     return true;
   }
 
+  if (gate.open) {
+    return Boolean(email);
+  }
+
   return (
     Boolean(email) && gate.allowlist.includes(normalizeEmail(email as string))
   );
@@ -142,10 +158,12 @@ export function isAllowedIdentity(
 /**
  * Whether this request may proceed while the beta is closed.
  *
- * An enabled gate with an empty allowlist denies everyone. That is the whole
- * point of failing closed: an unset or mistyped `BETA_ALLOWLIST` must lock the
- * door rather than remove it, because the opposite default silently publishes
- * the app to anyone holding the URL.
+ * An enabled gate with an empty allowlist denies everyone, unless the open
+ * campaign is running. That is the whole point of failing closed: an unset or
+ * mistyped `BETA_ALLOWLIST` must lock the door rather than remove it, because
+ * the opposite default silently publishes the app to anyone holding the URL.
+ * Opening the door to everyone is a deliberate act with its own switch, its
+ * own account cap and its own minute budget — never the consequence of a typo.
  *
  * A signed-out visitor is denied. The demo session is stateless and needs no
  * sign-in, so without this the beta would not be closed at all — anyone
@@ -167,6 +185,13 @@ export function betaVerdict(
 
   if (!email) {
     return "deny";
+  }
+
+  // An open campaign invites everyone who signed in. The gate is still closed
+  // to signed-out visitors: the campaign hands out minutes per account, and an
+  // account is the only thing those minutes can be counted against.
+  if (gate.open) {
+    return "allow";
   }
 
   // Exact match on the normalized address. A substring test would let

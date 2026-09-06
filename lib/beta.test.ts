@@ -258,3 +258,38 @@ test("the Stripe webhook is exempt from the gate", () => {
 test("a lookalike stripe path is not exempt", () => {
   assert.equal(isBetaExempt("/api/stripeish"), false);
 });
+
+test("an open campaign invites everyone who signed in", () => {
+  const gate = readBetaGate({
+    BETA_ALLOWLIST: "",
+    BETA_CAMPAIGN_ENABLED: "on",
+    BETA_MODE: "on",
+  });
+  assert.equal(gate.open, true);
+  assert.equal(betaVerdict(gate, "/", "stranger@example.com"), "allow");
+  assert.equal(isAllowedIdentity(gate, "stranger@example.com"), true);
+});
+
+test("an open campaign still turns signed-out visitors away", () => {
+  // The campaign counts minutes per account, and an account is the only thing
+  // those minutes can be counted against.
+  const gate = readBetaGate({
+    BETA_ALLOWLIST: "",
+    BETA_CAMPAIGN_ENABLED: "on",
+    BETA_MODE: "on",
+  });
+  assert.equal(betaVerdict(gate, "/", null), "deny");
+  assert.equal(isAllowedIdentity(gate, null), false);
+});
+
+test("the campaign only opens the gate for the exact string 'on'", () => {
+  for (const flag of [undefined, "", "off", "true", "ON"]) {
+    const gate = readBetaGate({
+      BETA_ALLOWLIST: "invited@example.com",
+      BETA_CAMPAIGN_ENABLED: flag,
+      BETA_MODE: "on",
+    });
+    assert.equal(gate.open, false, `flag ${JSON.stringify(flag)}`);
+    assert.equal(betaVerdict(gate, "/", "stranger@example.com"), "deny");
+  }
+});

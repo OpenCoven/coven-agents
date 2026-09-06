@@ -979,9 +979,11 @@ test("production dispatches only a currently subscribed matching authority", asy
   assert.equal(dispatchedClaim, current);
   assert.equal(dispatchedClaim.authority, current.authority);
   assert.deepEqual(context, {
+    costUnits: 15,
     globalDailyCap: 500,
     keySecret: "production-test-key",
     periodStart: new Date("2026-08-01T00:00:00.000Z"),
+    tenantMonthlyCap: 300,
   });
 });
 
@@ -1057,9 +1059,13 @@ test("production revalidation returns the current billing-period context", async
 
   assert.deepEqual(result, { kind: "started", runId: current.run.id });
   assert.deepEqual(refreshedContext, {
+    // A paying subscriber is admitted with the full bucket, in full-length
+    // runs. The campaign is off in this environment, so nothing else applies.
+    costUnits: 15,
     globalDailyCap: 500,
     keySecret: "production-test-key",
     periodStart: new Date("2026-09-01T00:00:00.000Z"),
+    tenantMonthlyCap: 300,
   });
   assert.equal(accountReads, 2);
 });

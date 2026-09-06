@@ -8,12 +8,19 @@ import { isCanonicalUuid } from "./session";
 import { userTypeFor } from "./subscription";
 
 type RefreshableToken = {
+  campaignExpiresAt?: string | null;
+  campaignGrantedAt?: string | null;
   subscribedUntil?: string | null;
   type?: unknown;
 };
 
+function claimDate(raw: string | null | undefined): Date | null {
+  const parsed = raw ? new Date(raw) : null;
+  return parsed && !Number.isNaN(parsed.getTime()) ? parsed : null;
+}
+
 /**
- * Recomputes a token's plan from the subscription date it carries.
+ * Recomputes a token's plan from the entitlement dates it carries.
  *
  * `type` used to be written once, when `jwt()` received a `user` — that is,
  * only at sign-in. Nothing recomputed it afterwards, so a subscription that
@@ -21,10 +28,15 @@ type RefreshableToken = {
  * happened to expire. A subscriber session is what may write to the owner's
  * database, so that was access outliving payment.
  *
- * Carrying `subscribedUntil` in the token and deriving `type` from it on every
- * callback makes expiry exact and costs no database read. The date is the
+ * Carrying the dates in the token and deriving `type` from them on every
+ * callback makes expiry exact and costs no database read. The dates are the
  * source of truth; a `type` already in the token is never trusted, because a
  * stale one is precisely the bug being fixed.
+ *
+ * The campaign grant is carried for the same reason and decays the same way.
+ * Omitting it here would be the identical bug in the other direction: a
+ * participant's session would fall back to `demo` on the first callback after
+ * sign-in, losing the tenant their run history lives under.
  *
  * This fixes expiry in the token. Mid-session subscription upgrades are
  * rendered from server-page database authority instead of rewriting the
@@ -34,16 +46,29 @@ export function refreshTokenType<T extends RefreshableToken>(
   token: T,
   now: Date
 ): T & { type: "demo" | "subscriber" } {
-  const raw = token.subscribedUntil;
-  const parsed = raw ? new Date(raw) : null;
-  const subscribedUntil =
-    parsed && !Number.isNaN(parsed.getTime()) ? parsed : null;
-
-  return { ...token, type: userTypeFor({ subscribedUntil }, now) };
+  return {
+    ...token,
+    type: userTypeFor(
+      {
+        campaignExpiresAt: claimDate(token.campaignExpiresAt),
+        campaignGrantedAt: claimDate(token.campaignGrantedAt),
+        subscribedUntil: claimDate(token.subscribedUntil),
+      },
+      now
+    ),
+  };
 }
 
 type StoredUserClaims = {
   authVersion: number;
+  /**
+   * Optional so that every caller constructing a claims object does not have
+   * to name a field it has no opinion on. Absent reads the same as an
+   * unenrolled account, which is what a caller that does not know about the
+   * campaign means.
+   */
+  campaignExpiresAt?: Date | null;
+  campaignGrantedAt?: Date | null;
   image: string | null;
   subscribedUntil: Date | null;
 };
@@ -56,6 +81,8 @@ export function claimsFromStoredUser(
   return {
     ...token,
     authVersion: user.authVersion,
+    campaignExpiresAt: user.campaignExpiresAt?.toISOString() ?? null,
+    campaignGrantedAt: user.campaignGrantedAt?.toISOString() ?? null,
     picture: user.image,
     subscribedUntil: user.subscribedUntil?.toISOString() ?? null,
     type: userTypeFor(user, now),

@@ -78,6 +78,7 @@ export async function proxy(request: NextRequest) {
   // and other future routes are gated like ordinary requests.
   const gate = readBetaGate({
     BETA_ALLOWLIST: process.env.BETA_ALLOWLIST,
+    BETA_CAMPAIGN_ENABLED: process.env.BETA_CAMPAIGN_ENABLED,
     BETA_MODE: process.env.BETA_MODE,
   });
 

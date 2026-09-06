@@ -92,6 +92,7 @@ function run(overrides: Partial<RunnerRunRecord> = {}): RunnerRunRecord {
     dispatchLeaseExpiresAt: new Date("2026-01-01T00:01:00.000Z"),
     dispatchLeaseToken: "lease-a",
     dispatchState: "dispatching",
+    entitlementMinutes: null,
     error: null,
     executionPermission: "unrestricted",
     executionProvenance: null,
@@ -512,6 +513,7 @@ test("runner rows normalize raw PostgreSQL timestamp columns", async () => {
       cancellationRequestedAt,
       completedAt,
       dispatchState: "terminal",
+      entitlementMinutes: null,
       startedAt,
       status: "completed",
     }),
@@ -1305,6 +1307,7 @@ test("event ids advance from the locked run cursor and update atomically", async
   const now = new Date("2026-01-01T00:00:01.000Z");
   const current = run({
     dispatchState: "running",
+    entitlementMinutes: null,
     logCursor: 41,
     startedAt: now,
     status: "running",
@@ -1312,6 +1315,7 @@ test("event ids advance from the locked run cursor and update atomically", async
   });
   const updated = run({
     dispatchState: "running",
+    entitlementMinutes: null,
     logCursor: 42,
     startedAt: now,
     status: "running",
@@ -1404,6 +1408,7 @@ test("dispatch event batches atomically advance one provider cursor", async () =
   const current = run({
     daytonaLogCursor: 10,
     dispatchState: "running",
+    entitlementMinutes: null,
     logCursor: 3,
     startedAt: new Date("2026-01-01T00:00:01.000Z"),
     status: "running",
@@ -1469,6 +1474,7 @@ test("dispatch batches retain the newest events beyond the retention limit", asy
   const current = run({
     daytonaLogCursor: 10,
     dispatchState: "running",
+    entitlementMinutes: null,
     logCursor: 3,
     startedAt: new Date("2026-01-01T00:00:01.000Z"),
     status: "running",
@@ -1583,6 +1589,7 @@ test("a failed second batch event rolls back cursor and every event before retry
   const current = run({
     daytonaLogCursor: 10,
     dispatchState: "running",
+    entitlementMinutes: null,
     logCursor: 3,
     startedAt: new Date("2026-01-01T00:00:01.000Z"),
     status: "running",
@@ -1693,6 +1700,7 @@ test("a log-only reconciliation advances Daytona cursor without inventing an eve
   const current = run({
     daytonaLogCursor: 10,
     dispatchState: "running",
+    entitlementMinutes: null,
     startedAt: new Date("2026-01-01T00:00:01.000Z"),
     status: "running",
   });
@@ -1727,6 +1735,7 @@ test("a log-only reconciliation advances Daytona cursor without inventing an eve
 test("event retention atomically prunes count and byte overflow while preserving the newest row", async () => {
   const current = run({
     dispatchState: "running",
+    entitlementMinutes: null,
     logCursor: MAX_EVENTS_PER_RUN,
     startedAt: new Date("2026-01-01T00:00:00.000Z"),
     status: "running",
@@ -1787,6 +1796,7 @@ test("finalization retains the terminal event when the live history is at capaci
   const startedAt = new Date("2026-01-01T00:00:00.000Z");
   const current = run({
     dispatchState: "running",
+    entitlementMinutes: null,
     logCursor: MAX_EVENTS_PER_RUN,
     startedAt,
     status: "running",
@@ -1794,6 +1804,7 @@ test("finalization retains the terminal event when the live history is at capaci
   const finalized = run({
     completedAt: new Date("2026-01-01T00:00:01.000Z"),
     dispatchState: "terminal",
+    entitlementMinutes: null,
     logCursor: MAX_EVENTS_PER_RUN + 1,
     startedAt,
     status: "completed",
@@ -1897,6 +1908,7 @@ test("database-clock lease fences and dispatch state prevent event appends", asy
   const expired = scripted([
     run({
       dispatchState: "running",
+      entitlementMinutes: null,
       startedAt: new Date("2026-01-01T00:00:00.000Z"),
       status: "running",
     }),
@@ -1905,6 +1917,7 @@ test("database-clock lease fences and dispatch state prevent event appends", asy
     run({
       dispatchLeaseExpiresAt: new Date("2026-01-01T00:02:00.000Z"),
       dispatchState: "terminal",
+      entitlementMinutes: null,
       startedAt: new Date("2026-01-01T00:00:00.000Z"),
       status: "completed",
     }),
@@ -1947,12 +1960,14 @@ test("all live lease mutations predicate against the database clock", async () =
   const dispatching = run();
   const running = run({
     dispatchState: "running",
+    entitlementMinutes: null,
     startedAt: new Date("2026-01-01T00:00:01.000Z"),
     status: "running",
   });
   const terminal = run({
     completedAt: new Date("2026-01-01T00:00:02.000Z"),
     dispatchState: "terminal",
+    entitlementMinutes: null,
     startedAt: running.startedAt,
     status: "completed",
     version: running.version + 1,
@@ -2001,6 +2016,7 @@ test("dispatch transitions atomically maintain the agent status", async () => {
   const current = run();
   const running = run({
     dispatchState: "running",
+    entitlementMinutes: null,
     startedAt: new Date("2026-01-01T00:00:01.000Z"),
     status: "running",
     version: current.version + 1,
@@ -2030,6 +2046,7 @@ test("expired dispatch recovery requeues only ID-free rows with a database-clock
     dispatchLeaseExpiresAt: null,
     dispatchLeaseToken: null,
     dispatchState: "queued",
+    entitlementMinutes: null,
     startedAt: null,
     version: current.version + 1,
   });
@@ -2233,6 +2250,7 @@ test("expired attempt recovery requires exact cleanup before requeue", async () 
     dispatchLeaseExpiresAt: null,
     dispatchLeaseToken: null,
     dispatchState: "queued",
+    entitlementMinutes: null,
     version: releasedRun.version + 1,
   });
   const requeue = scripted([releasedRun], [{ id: current.id }], [requeued]);
@@ -2297,6 +2315,7 @@ test("an expired attached command is adopted before its logs are reconciled", as
     daytonaCommandId: "command",
     daytonaSessionId: daytonaRunSessionName(run().id, attemptId),
     dispatchState: "running",
+    entitlementMinutes: null,
     startedAt: new Date("2026-01-01T00:00:01.000Z"),
     status: "running",
   });
@@ -2349,6 +2368,7 @@ test("confirmed attempt cleanup releases ownership and requeues atomically", asy
     dispatchLeaseExpiresAt: null,
     dispatchLeaseToken: null,
     dispatchState: "queued",
+    entitlementMinutes: null,
     version: 9,
   });
   const authority = {
@@ -2422,6 +2442,7 @@ test("terminal cleanup retains ownership until the exact attempt is released", a
     daytonaCommandId: "command",
     daytonaSessionId: daytonaRunSessionName(run().id, attemptId),
     dispatchState: "terminal",
+    entitlementMinutes: null,
     executionProvenance,
     status: "completed",
   });
@@ -2467,6 +2488,7 @@ test("terminal lease cleanup refuses unresolved provider ownership", async () =>
   const terminal = run({
     completedAt: new Date("2026-01-01T00:00:01.000Z"),
     dispatchState: "terminal",
+    entitlementMinutes: null,
     status: "cancelled",
   });
   const authority = {
@@ -2495,6 +2517,7 @@ test("terminal lease cleanup clears only its exact provider-free lease fence", a
   const terminal = run({
     completedAt: new Date("2026-01-01T00:00:01.000Z"),
     dispatchState: "terminal",
+    entitlementMinutes: null,
     status: "cancelled",
   });
   const cleaned = run({
@@ -2554,6 +2577,7 @@ test("terminal cleanup reacquires an expired exact attempt before retrying provi
     daytonaCommandId: "command",
     daytonaSessionId: daytonaRunSessionName(run().id, attemptId),
     dispatchState: "terminal",
+    entitlementMinutes: null,
     status: "failed",
     version: 8,
   });
@@ -2881,6 +2905,7 @@ test("operator sandbox recovery deletes only a fenced decommissioning agent", as
 test("principal mutations bind every affected row to the principal tenant", async () => {
   const current = run({
     dispatchState: "running",
+    entitlementMinutes: null,
     startedAt: new Date("2026-01-01T00:00:00.000Z"),
     status: "running",
   });
@@ -2992,6 +3017,7 @@ test("fair dispatch selection locks scheduler and enforces tenant and agent capa
     dispatchLeaseExpiresAt: null,
     dispatchLeaseToken: null,
     dispatchState: "queued",
+    entitlementMinutes: null,
     version: 1,
   });
   const claimed = run({
@@ -2999,6 +3025,7 @@ test("fair dispatch selection locks scheduler and enforces tenant and agent capa
     dispatchLeaseExpiresAt: new Date("2026-01-01T00:01:00.000Z"),
     dispatchLeaseToken: "lease-a",
     dispatchState: "dispatching",
+    entitlementMinutes: null,
     version: 2,
   });
   const { statements, store } = scripted(
@@ -3061,6 +3088,7 @@ test("queue selection stays globally FIFO until the consecutive tenant cap requi
     dispatchLeaseExpiresAt: null,
     dispatchLeaseToken: null,
     dispatchState: "queued",
+    entitlementMinutes: null,
   });
   const claimed = run({
     ...queued,
@@ -3099,6 +3127,7 @@ test("authority revalidation claims queued work without scheduler capacity", asy
     dispatchLeaseExpiresAt: null,
     dispatchLeaseToken: null,
     dispatchState: "queued",
+    entitlementMinutes: null,
     version: 1,
   });
   const claimed = run({
@@ -3106,6 +3135,7 @@ test("authority revalidation claims queued work without scheduler capacity", asy
     dispatchLeaseExpiresAt: new Date("2026-01-01T00:01:00.000Z"),
     dispatchLeaseToken: "lease-revalidation",
     dispatchState: "dispatching",
+    entitlementMinutes: null,
     version: 2,
   });
   const { statements, store } = scripted([queued], [claimed]);
@@ -3165,6 +3195,7 @@ test("dispatch authority cannot access unleased, expired, or another run", async
 test("dispatch sandbox and event mutations are fenced and derive their agent", async () => {
   const running = run({
     dispatchState: "running",
+    entitlementMinutes: null,
     startedAt: new Date("2026-01-01T00:00:00.000Z"),
     status: "running",
   });
@@ -3572,6 +3603,7 @@ test("queued cancellation enters a schema-valid leased cleanup state", async () 
     dispatchLeaseExpiresAt: null,
     dispatchLeaseToken: null,
     dispatchState: "queued",
+    entitlementMinutes: null,
   });
   const requested = run({
     ...queued,
@@ -3579,6 +3611,7 @@ test("queued cancellation enters a schema-valid leased cleanup state", async () 
     dispatchLeaseExpiresAt: new Date("2026-01-01T00:01:00.000Z"),
     dispatchLeaseToken: "cancel-lease",
     dispatchState: "dispatching",
+    entitlementMinutes: null,
     version: queued.version + 1,
   });
   const { statements, store } = scripted([queued], [requested]);
@@ -3643,6 +3676,7 @@ test("terminal reset requirements append a safe fenced diagnostic without cleari
     daytonaCommandId: "command",
     daytonaSessionId: daytonaRunSessionName(run().id, attemptId),
     dispatchState: "terminal",
+    entitlementMinutes: null,
     status: "failed",
   });
   const updated = run({ ...terminal, logCursor: 4, version: 8 });
@@ -3750,6 +3784,7 @@ test("terminal attempt cleanup can reserve a fenced sandbox reset", async () => 
     daytonaCommandId: "command",
     daytonaSessionId: daytonaRunSessionName(run().id, attemptId),
     dispatchState: "terminal",
+    entitlementMinutes: null,
     status: "failed",
   });
   const currentAgent = agent({
@@ -3795,6 +3830,7 @@ test("a proven unstarted dispatch releases its exact lease for the next queue cl
     dispatchLeaseExpiresAt: null,
     dispatchLeaseToken: null,
     dispatchState: "queued",
+    entitlementMinutes: null,
     version: current.version + 1,
   });
   const authority = {
@@ -3826,6 +3862,7 @@ test("active queued, dispatching, running, and cancelling runs block agent updat
     run({
       cancellationRequestedAt: new Date("2026-01-01T00:00:01.000Z"),
       dispatchState: "running",
+      entitlementMinutes: null,
       status: "running",
     }),
   ];
@@ -4000,6 +4037,7 @@ test("terminal events serialize nullable errors from raw database rows", async (
   const current: Record<string, unknown> = {
     ...run({
       dispatchState: "running",
+      entitlementMinutes: null,
       startedAt,
       status: "running",
     }),
@@ -4009,6 +4047,7 @@ test("terminal events serialize nullable errors from raw database rows", async (
     ...run({
       completedAt: new Date("2026-01-01T00:00:02.000Z"),
       dispatchState: "terminal",
+      entitlementMinutes: null,
       startedAt,
       status: "completed",
       version: 8,
@@ -4712,6 +4751,7 @@ test("zero queue capacity atomically claims an immediately eligible run", async 
     dispatchLeaseExpiresAt: null,
     dispatchLeaseToken: null,
     dispatchState: "queued",
+    entitlementMinutes: null,
     version: 0,
   });
   const accepted = run({
@@ -4724,6 +4764,7 @@ test("zero queue capacity atomically claims an immediately eligible run", async 
     dispatchLeaseExpiresAt: new Date("2026-01-01T00:01:00.000Z"),
     dispatchLeaseToken: "lease-a",
     dispatchState: "dispatching",
+    entitlementMinutes: null,
     version: 2,
   });
   const { statements, store } = scripted(
@@ -4790,6 +4831,7 @@ test("zero queue rejection restores sandbox trust when its run is discarded", as
     dispatchLeaseExpiresAt: null,
     dispatchLeaseToken: null,
     dispatchState: "queued",
+    entitlementMinutes: null,
     executionPermission: "unrestricted",
     version: 0,
   });

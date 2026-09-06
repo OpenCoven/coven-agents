@@ -2,12 +2,19 @@ import { randomUUID } from "node:crypto";
 import NextAuth, { type DefaultSession, type Session } from "next-auth";
 import type { DefaultJWT } from "next-auth/jwt";
 import GitHub from "next-auth/providers/github";
+import { enrollInCampaignIfEligible } from "@/lib/auth/campaign-enrollment";
+import { fetchGithubAccountCreatedAt } from "@/lib/auth/github-account-age";
 import { fetchGithubEmail } from "@/lib/auth/github-email-fetch";
 import {
   authVersionMatches,
   validAuthVersion,
 } from "@/lib/auth/session-revocation";
-import { findOrCreateFederatedUser, findUserById } from "@/lib/db/queries";
+import { readCampaignPolicy } from "@/lib/billing/campaign";
+import {
+  enrollCampaignParticipant,
+  findOrCreateFederatedUser,
+  findUserById,
+} from "@/lib/db/queries";
 import { ChatbotError } from "@/lib/errors";
 import { isCanonicalUuid } from "@/lib/session";
 import {
@@ -35,6 +42,8 @@ declare module "next-auth" {
 
   interface User {
     authVersion?: number;
+    campaignExpiresAt?: Date | null;
+    campaignGrantedAt?: Date | null;
     email?: string | null;
     id?: string;
     subscribedUntil?: Date | null;
@@ -45,6 +54,13 @@ declare module "next-auth" {
 declare module "next-auth/jwt" {
   interface JWT extends DefaultJWT {
     authVersion?: number;
+    /**
+     * Carried for the same reason as `subscribedUntil`: `type` is recomputed
+     * from these on every callback, so a grant left off the token would decay
+     * a campaign participant to `demo` on their first request after sign-in.
+     */
+    campaignExpiresAt?: string | null;
+    campaignGrantedAt?: string | null;
     id: string;
     /** Carried so `type` can be recomputed without a database read. */
     subscribedUntil?: string | null;
@@ -96,6 +112,33 @@ export const {
         }
 
         const row = await findOrCreateFederatedUser(email);
+        /**
+         * The open beta campaign is decided here, at sign-in, because this is
+         * the only moment we hold a GitHub access token — and the account's
+         * age, which is the campaign's defence against farmed accounts, can
+         * only be read with one. It never throws: an ineligible or failed
+         * enrollment simply leaves the account without campaign minutes,
+         * whereas an exception here is a person who cannot sign in.
+         */
+        const now = new Date();
+        const enrollment = await enrollInCampaignIfEligible(
+          {
+            accessToken: account.access_token,
+            now,
+            policy: readCampaignPolicy(process.env),
+            user: row,
+          },
+          {
+            enroll: enrollCampaignParticipant,
+            fetchAccountCreatedAt: fetchGithubAccountCreatedAt,
+          }
+        );
+        const granted =
+          enrollment.kind === "enrolled" ||
+          enrollment.kind === "already_enrolled"
+            ? enrollment.user
+            : row;
+
         token.email = row.email;
         token.id = row.id;
         token.authVersion = row.authVersion;
@@ -104,8 +147,12 @@ export const {
         // the settings form is what keeps it current between sign-ins.
         token.picture = row.image ?? null;
         token.subscribedUntil = row.subscribedUntil?.toISOString() ?? null;
+        token.campaignExpiresAt =
+          granted.campaignExpiresAt?.toISOString() ?? null;
+        token.campaignGrantedAt =
+          granted.campaignGrantedAt?.toISOString() ?? null;
 
-        return refreshTokenType(token, new Date());
+        return refreshTokenType(token, now);
       }
 
       if (user) {
@@ -116,6 +163,8 @@ export const {
         // kept subscriber entitlements — and a subscriber session is what may
         // write to the owner's database — until the token happened to expire.
         token.subscribedUntil = user.subscribedUntil?.toISOString() ?? null;
+        token.campaignExpiresAt = user.campaignExpiresAt?.toISOString() ?? null;
+        token.campaignGrantedAt = user.campaignGrantedAt?.toISOString() ?? null;
       }
 
       // Recomputed on every callback, so expiry is exact and costs no read.

@@ -281,6 +281,13 @@
       "when": 1788419955692,
       "tag": "0039_minute_pack_reconciliation",
       "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1788704198939,
+      "tag": "0040_beta_campaign",
+      "breakpoints": true
     }
   ]
 }

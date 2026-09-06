@@ -18,6 +18,13 @@ export type UsageSnapshot = {
   packMinutes: number;
   remaining: number;
   resetsAt: Date | null;
+  /**
+   * Which entitlement these minutes come from. It changes the words, not just
+   * the numbers: a subscription bucket renews every month, a beta grant
+   * expires once and never comes back. Telling a participant their minutes
+   * "renew" would be a promise nothing in the system intends to keep.
+   */
+  source: "campaign" | "subscription";
   used: number;
 };
 
@@ -56,6 +63,7 @@ function parseUsage(value: unknown): UsageSnapshot | null {
     packMinutes,
     remaining: Math.max(0, allowance - used),
     resetsAt: resetsAt && !Number.isNaN(resetsAt.getTime()) ? resetsAt : null,
+    source: body.source === "campaign" ? "campaign" : "subscription",
     used,
   };
 }
@@ -274,27 +282,32 @@ export function UsageLedger({
   const pct = Math.min(100, Math.round((usage.used / usage.allowance) * 100));
   const days = daysUntil(usage.resetsAt);
   const renews = usage.resetsAt ? longDate(usage.resetsAt) : null;
+  const campaign = usage.source === "campaign";
   const message =
     state === "paused"
       ? "Runs are paused platform-wide right now. Your minutes are not affected."
       : state === "full"
-        ? `Monthly minutes used up.${renews ? ` New runs start again on ${renews}` : " New runs start again next period"}, or right away after a top-up.`
+        ? campaign
+          ? "Beta minutes used up. Subscribe to keep running agents."
+          : `Monthly minutes used up.${renews ? ` New runs start again on ${renews}` : " New runs start again next period"}, or right away after a top-up.`
         : state === "warning"
-          ? `About ${usage.remaining} minutes left this month.`
+          ? campaign
+            ? `About ${usage.remaining} beta minutes left.`
+            : `About ${usage.remaining} minutes left this month.`
           : null;
 
   return (
     <div className="oc-usage-ledger" data-state={state} data-variant={variant}>
       <div className="oc-usage-ledger__heading">
-        <span>Run time this month</span>
+        <span>{campaign ? "Beta run time" : "Run time this month"}</span>
         {renews ? (
           <span>
-            Renews{" "}
+            {campaign ? "Expires" : "Renews"}{" "}
             <time dateTime={usage.resetsAt?.toISOString()}>{renews}</time>
             {days !== null && days <= 45 ? ` · ${days}d` : ""}
           </span>
         ) : (
-          <span>Monthly</span>
+          <span>{campaign ? "Open beta" : "Monthly"}</span>
         )}
       </div>
       <div className="oc-usage-ledger__value">
@@ -302,7 +315,7 @@ export function UsageLedger({
         <span>of {usage.allowance} minutes</span>
       </div>
       <div
-        aria-label="Minutes used this month"
+        aria-label={campaign ? "Beta minutes used" : "Minutes used this month"}
         aria-valuemax={usage.allowance}
         aria-valuemin={0}
         aria-valuenow={usage.used}

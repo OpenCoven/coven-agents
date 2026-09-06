@@ -11,7 +11,8 @@ import {
   requireNonemptyAbuseKeySecret,
 } from "@/lib/abuse/config";
 import { sessionAuthorityMatches } from "@/lib/auth/session-revocation";
-import { periodStart } from "@/lib/billing/period";
+import { readCampaignPolicy } from "@/lib/billing/campaign";
+import { runEntitlementFor } from "@/lib/billing/entitlement";
 import type { databaseFor } from "@/lib/db/access";
 import type { SubscriberSession } from "@/lib/session";
 import type { RunnerAdmissionLimits, RunnerDispatchResult } from "./admission";
@@ -50,9 +51,16 @@ const EMPTY_RECONCILIATION_COUNTS: RunnerReconciliationResult = {
 export type ProductionDatabase = ReturnType<typeof databaseFor>;
 
 type CredentialContext = Readonly<{
+  /**
+   * Minutes this run reserves, and therefore how long it may run. Spread into
+   * the admission input by `credentialInput`, so a campaign run is admitted
+   * with its own smaller number without any special case at the call site.
+   */
+  costUnits: number;
   globalDailyCap: number;
   keySecret: string;
   periodStart: Date;
+  tenantMonthlyCap: number;
 }>;
 
 type CredentialContextDecision =
@@ -63,6 +71,8 @@ type CredentialContextDecision =
 type ProductionDispatchAccount = Readonly<{
   authVersion: number;
   billingPeriodStart: Date | null;
+  campaignExpiresAt?: Date | null;
+  campaignGrantedAt?: Date | null;
   subscribedUntil: Date | null;
 }>;
 
@@ -246,22 +256,32 @@ async function credentialContextForRun(
   ) {
     return { kind: "authority_revoked" };
   }
-  const currentPeriod = periodStart(
-    account.subscribedUntil,
-    account.billingPeriodStart
+  const environment = dependencies.environment ?? process.env;
+  /**
+   * Two entitlement sources, one decision. A paid subscription is 300 minutes
+   * in 15-minute runs; an open-beta grant is its configured total in shorter
+   * runs. Anything else has no entitlement and is refused here rather than
+   * later, which is what `authority_revoked` has always meant for an account
+   * with no live subscription.
+   */
+  const entitlement = runEntitlementFor(
+    account,
+    now,
+    readCampaignPolicy(environment)
   );
-  if (!currentPeriod) {
+  if (!entitlement) {
     return { kind: "authority_revoked" };
   }
-  const environment = dependencies.environment ?? process.env;
   try {
     return {
       context: {
+        costUnits: entitlement.costUnits,
         globalDailyCap: globalDailyRunCapFromEnv(
           environment.GLOBAL_DAILY_RUN_CAP
         ),
         keySecret: requireNonemptyAbuseKeySecret(environment.ABUSE_KEY_SECRET),
-        periodStart: currentPeriod,
+        periodStart: entitlement.periodStart,
+        tenantMonthlyCap: entitlement.tenantMonthlyCap,
       },
       kind: "allowed",
     };

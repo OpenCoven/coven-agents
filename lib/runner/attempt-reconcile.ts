@@ -270,6 +270,25 @@ function secureToken(): string {
   return randomBytes(32).toString("base64url");
 }
 
+/**
+ * A run's own time limit in milliseconds, or null when it carries none.
+ *
+ * Guards the value rather than trusting the column: a non-positive or
+ * non-integer entitlement would either terminate every run immediately or
+ * produce a NaN comparison that never terminates one. Both are worse than the
+ * process-wide fallback.
+ */
+function runEntitlementMs(run: {
+  entitlementMinutes?: number | null;
+}): number | null {
+  const minutes = run.entitlementMinutes;
+  return typeof minutes === "number" &&
+    Number.isSafeInteger(minutes) &&
+    minutes > 0
+    ? minutes * 60_000
+    : null;
+}
+
 async function mapBounded<T, Result>(
   values: readonly T[],
   concurrency: number,
@@ -705,7 +724,15 @@ async function reconcileAttachedProcess(
         now: completedAt,
         policy: {
           ...RUNNER_MID_RUN_ENTITLEMENT_POLICY,
-          maxDurationMs: maxRunDurationMs,
+          /**
+           * The run's own admitted minutes bound it, not the process-wide
+           * limit. A campaign run reserves 5 minutes and must stop at 5; a
+           * subscriber run reserves 15 and stops at 15. Falling back to the
+           * process limit keeps runs admitted before this column existed, and
+           * dispatches the reconciler itself adopted, behaving exactly as they
+           * did before.
+           */
+          maxDurationMs: runEntitlementMs(liveRun) ?? maxRunDurationMs,
         },
         startedAt: liveRun.startedAt,
       }) === "max_duration_elapsed";
