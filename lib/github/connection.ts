@@ -176,6 +176,15 @@ export type GitHubConnectionDependencies = Readonly<{
   idempotencyStore: IdempotencyStore;
   now?: () => Date;
   randomBytes?: (size: number) => Uint8Array;
+  reportFailure?: (failure: GitHubConnectionFailureDiagnostic) => void;
+}>;
+
+export type GitHubConnectionFailureDiagnostic = Readonly<{
+  code: string;
+  providerRequestId: string | null;
+  retryable: boolean;
+  stage: "user_authorization";
+  status: number;
 }>;
 
 export type GitHubConnectionHandlers = Readonly<{
@@ -1216,6 +1225,7 @@ async function completeUserAuthorization(
         redirectUri: input.callbackUrl,
       });
   } catch (error) {
+    reportFailure(input.dependencies, "user_authorization", error);
     return {
       code: callbackErrorCode(error),
       kind: "error",
@@ -1965,6 +1975,40 @@ function callbackErrorCode(error: unknown): GitHubErrorCode {
     return "rate_limited";
   }
   return "github_provider_unavailable";
+}
+
+function reportFailure(
+  dependencies: GitHubConnectionDependencies,
+  stage: GitHubConnectionFailureDiagnostic["stage"],
+  error: unknown
+): void {
+  if (!dependencies.reportFailure) {
+    return;
+  }
+  if (!(error instanceof GitHubProviderError)) {
+    dependencies.reportFailure({
+      code: "github_provider_unexpected",
+      providerRequestId: null,
+      retryable: false,
+      stage,
+      status: 500,
+    });
+    return;
+  }
+  dependencies.reportFailure({
+    code: /^[a-z][a-z0-9_]{0,63}$/u.test(error.code)
+      ? error.code
+      : "github_provider_unexpected",
+    providerRequestId: error.requestId,
+    retryable: error.retryable,
+    stage,
+    status:
+      Number.isInteger(error.status) &&
+      error.status >= 400 &&
+      error.status <= 599
+        ? error.status
+        : 500,
+  });
 }
 
 function errorResponse(

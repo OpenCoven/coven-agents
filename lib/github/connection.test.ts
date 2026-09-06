@@ -1436,6 +1436,50 @@ test("transient provider failures are sanitized and cannot repeat a consumed OAu
   assert.equal(store.replacements.length, 0);
 });
 
+test("OAuth proof failures report only bounded provider diagnostics", async () => {
+  const diagnostics: unknown[] = [];
+  const handlers = createGitHubConnectionHandlers(
+    dependenciesWithUserAuthorization(
+      {
+        reportFailure: (failure) => {
+          diagnostics.push(failure);
+        },
+      },
+      {
+        proveInstallationAccess: () =>
+          Promise.reject(
+            new GitHubProviderError("github_provider_invalid_response", {
+              requestId: "ABC1:DEF2:123456:789ABC:01234567",
+              retryable: false,
+              status: 502,
+            })
+          ),
+      }
+    )
+  );
+  const authorization = await beginUserAuthorization(handlers);
+
+  const response = await handlers.callback(
+    oauthCallbackRequest(authorization.state),
+    null
+  );
+
+  assert.equal(response.status, 503);
+  assert.deepEqual(diagnostics, [
+    {
+      code: "github_provider_invalid_response",
+      providerRequestId: "ABC1:DEF2:123456:789ABC:01234567",
+      retryable: false,
+      stage: "user_authorization",
+      status: 502,
+    },
+  ]);
+  assert.doesNotMatch(
+    JSON.stringify(diagnostics),
+    /oauth-code|oauth-state|installation-local-token/u
+  );
+});
+
 test("a near-expiry OAuth callback keeps its consumed record through slow bounded processing and cleanup", async () => {
   let currentTime = NOW;
   const idempotency = new MemoryIdempotencyStore();
