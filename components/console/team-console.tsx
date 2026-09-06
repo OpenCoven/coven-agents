@@ -19,21 +19,26 @@ import {
   ChevronRight,
   CircleCheckBig,
   CircleStop,
+  Clock3,
   Download,
   Github,
   ListChecks,
   Pencil,
+  Play,
   Plus,
   RefreshCw,
   ShieldCheck,
   Sparkles,
   Trash2,
   UsersRound,
+  Workflow,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
+import { FamiliarPortrait } from "@/components/console/familiar-portrait";
 import { TEMPLATES } from "@/lib/agents/formations";
+import { executionProfileForAgent } from "@/lib/console/agent-profile";
 import {
   isGitHubProjectCapabilityCurrent,
   visibleGitHubProjectCapabilityExpiry,
@@ -218,48 +223,92 @@ function TeamSequence({
   );
   return (
     <div className="oc-team-sequence">
-      <div className="oc-team-rail__label">
-        <span>Sequence</span>
-        <span>
-          {ordered.length} {ordered.length === 1 ? "member" : "members"}
+      <div className="oc-team-sequence__head">
+        <div>
+          <Eyebrow>Execution plan</Eyebrow>
+          <h3>The handoff, before you launch</h3>
+          <p>
+            Each stage receives the mission and the evidence produced by the
+            stage before it.
+          </p>
+        </div>
+        <span className="oc-team-sequence__count">
+          <Workflow aria-hidden="true" size={13} />
+          {ordered.length} {ordered.length === 1 ? "stage" : "stages"}
         </span>
       </div>
       <ol className="oc-team-sequence__list">
         {ordered.map((member, index) => {
           const agent = agents.find(({ id }) => id === member.agentId);
+          const profile = agent ? executionProfileForAgent(agent) : null;
           const carried = member.skillIds
             .map((id) => skills.find((skill) => skill.id === id))
             .filter((skill): skill is SkillResource => skill !== undefined);
           return (
             <li className="oc-team-sequence__step" key={member.id}>
-              <span className="oc-team-sequence__index">{index + 1}</span>
-              <div className="oc-team-sequence__body">
-                <span className="oc-team-sequence__name">
-                  <strong>
-                    {agent
-                      ? sanitizeEvidenceText(agent.name)
-                      : "Profile unavailable"}
-                  </strong>
-                  {member.required ? null : <em>may be skipped</em>}
-                </span>
+              <span aria-hidden="true" className="oc-team-sequence__rail">
+                <span>{String(index + 1).padStart(2, "0")}</span>
+              </span>
+              <article className="oc-team-sequence__card">
+                <header>
+                  {agent && profile ? (
+                    <FamiliarPortrait
+                      fallbackLabel={sanitizeEvidenceText(agent.name)}
+                      familiarId={agent.familiarId}
+                      profileId={profile.id}
+                      selected={false}
+                      size={40}
+                    />
+                  ) : (
+                    <span
+                      aria-hidden="true"
+                      className="oc-team-sequence__portrait-fallback"
+                    >
+                      <Bot size={17} />
+                    </span>
+                  )}
+                  <span className="oc-team-sequence__identity">
+                    <strong>
+                      {agent
+                        ? sanitizeEvidenceText(agent.name)
+                        : "Profile unavailable"}
+                    </strong>
+                    <small>
+                      Stage {index + 1} of {ordered.length}
+                    </small>
+                  </span>
+                  <span
+                    className="oc-team-sequence__requirement"
+                    data-required={member.required ? "true" : "false"}
+                  >
+                    {member.required ? (
+                      <CircleCheckBig aria-hidden="true" size={11} />
+                    ) : null}
+                    {member.required ? "Required" : "May be skipped"}
+                  </span>
+                </header>
                 <p>{sanitizeEvidenceText(member.responsibility)}</p>
                 {carried.length > 0 ? (
-                  <span className="oc-team-sequence__skills">
+                  <div className="oc-team-sequence__skills">
+                    <span>
+                      <Sparkles aria-hidden="true" size={11} />
+                      Skills
+                    </span>
                     {carried.map((skill) => (
                       <code key={skill.id}>
                         {sanitizeEvidenceText(skill.name)}
                       </code>
                     ))}
-                  </span>
+                  </div>
                 ) : null}
-              </div>
+              </article>
             </li>
           );
         })}
       </ol>
       <p className="oc-team-sequence__note">
-        Each member reads the mission, then the evidence the member before it
-        returned. A required step that fails stops the run.
+        <ShieldCheck aria-hidden="true" size={13} />A failed required stage
+        stops the run before the next handoff.
       </p>
     </div>
   );
@@ -1760,7 +1809,18 @@ export function TeamConsole({
         ) : selectedTeam ? (
           <div className="oc-team-workspace">
             <header className="oc-team-workspace__head">
-              <div>
+              <div className="oc-team-workspace__identity">
+                <div className="oc-team-workspace__meta">
+                  <span>
+                    <UsersRound aria-hidden="true" size={12} />
+                    {selectedTeam.members.length}{" "}
+                    {selectedTeam.members.length === 1 ? "stage" : "stages"}
+                  </span>
+                  <span>
+                    <Workflow aria-hidden="true" size={12} />
+                    Sequential handoffs
+                  </span>
+                </div>
                 <h2>{sanitizeEvidenceText(selectedTeam.name)}</h2>
                 <p>{sanitizeEvidenceText(selectedTeam.description)}</p>
               </div>
@@ -1832,6 +1892,20 @@ export function TeamConsole({
               </p>
             ) : null}
             <div className="oc-team-mission">
+              <div className="oc-team-mission__head">
+                <span className="oc-team-mission__icon">
+                  <Play aria-hidden="true" size={16} />
+                </span>
+                <div>
+                  <Eyebrow>Mission brief</Eyebrow>
+                  <h3>What should this team accomplish?</h3>
+                  <p>
+                    Give the team a clear outcome, relevant repository context,
+                    and the evidence you expect back.
+                  </p>
+                </div>
+                <kbd>Ctrl/⌘ + Enter</kbd>
+              </div>
               <Field label="Mission">
                 <textarea
                   onChange={(event) => setMission(event.currentTarget.value)}
@@ -1856,10 +1930,10 @@ export function TeamConsole({
               </Field>
               <p className="oc-team-mission__hint">
                 <span>
-                  Every member reads this same instruction, in order.{" "}
+                  The same brief follows every handoff.{" "}
                   {mission.trim()
-                    ? "Press ⌘↵ to start."
-                    : "Draft one if you would rather edit than write."}
+                    ? "Review the sequence below, then launch."
+                    : "Start from scratch or draft a structured mission."}
                 </span>
                 {/*
                   The limit is 40,000 characters and a mission is a few
@@ -1976,11 +2050,19 @@ export function TeamConsole({
                 </div>
                 {loadingRuns ? <p>Loading run history.</p> : null}
                 {!loadingRuns && runs.length === 0 ? (
-                  <p>
-                    {runsFailed
-                      ? "Run history could not be loaded. Any runs you started are unaffected."
-                      : "No coordinated runs yet."}
-                  </p>
+                  <div className="oc-team-run-empty">
+                    <span>
+                      <Clock3 aria-hidden="true" size={16} />
+                    </span>
+                    <strong>
+                      {runsFailed ? "History unavailable" : "No runs yet"}
+                    </strong>
+                    <p>
+                      {runsFailed
+                        ? "Run history could not be loaded. Any runs you started are unaffected."
+                        : "Launch the mission above and its progress will appear here."}
+                    </p>
+                  </div>
                 ) : null}
                 {nextRunCursor ? (
                   <Btn
