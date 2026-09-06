@@ -9,6 +9,7 @@ import {
   type DaytonaProcessSandbox,
 } from "./process";
 import {
+  assertReplacementSnapshotReady,
   classifyDaytonaProviderError,
   type DaytonaSandboxConfiguration,
   type DaytonaSandboxService,
@@ -229,6 +230,21 @@ async function recoverSandbox(
     return persisted.kind === "updated" ? "recovered" : "deferred";
   }
   if (agent.sandboxLifecycle === "resetting") {
+    // A row reaches `resetting` because a reprovision decided to replace the
+    // workspace, but this scanner finishes that decision on a later tick and
+    // in a different process. Re-prove the replacement here rather than trust
+    // the earlier decision: the snapshot can be deleted, fail its build, or
+    // be repointed between the two. Deferring leaves the row stuck and
+    // visible, which is strictly better than deleting a workspace that
+    // nothing can rebuild.
+    try {
+      await assertReplacementSnapshotReady(dependencies.sandboxConfiguration, {
+        daytona: dependencies.daytona,
+        store: dependencies.store,
+      } as never);
+    } catch {
+      return "deferred";
+    }
     let sandbox: Sandbox | null;
     try {
       sandbox = await findSandboxForRecovery(agent, dependencies.daytona);

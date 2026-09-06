@@ -317,7 +317,9 @@ function sandboxConfigurationMatches(
  * Absence of the snapshot service fails closed. A caller that cannot prove the
  * replacement is usable does not get to delete.
  */
-async function assertReplacementSnapshotReady(
+const SNAPSHOT_ACTIVE_STATE = "active";
+
+export async function assertReplacementSnapshotReady(
   configuration: DaytonaSandboxConfiguration,
   dependencies: DaytonaSandboxDependencies
 ): Promise<void> {
@@ -332,8 +334,10 @@ async function assertReplacementSnapshotReady(
   let snapshot: Readonly<{
     cpu?: number;
     disk?: number;
+    mem?: number;
     memory?: number;
     name: string;
+    state?: string;
   }>;
   try {
     snapshot = await snapshots.get(configuration.snapshotName);
@@ -348,13 +352,31 @@ async function assertReplacementSnapshotReady(
     );
   }
 
+  // `snapshot.get` resolves for building, pending, error and build_failed
+  // alike, so existence is not usability. A create against anything but an
+  // active snapshot fails, and by then the workspace is already gone.
+  if (
+    snapshot.state !== undefined &&
+    snapshot.state !== SNAPSHOT_ACTIVE_STATE
+  ) {
+    throw new DaytonaSandboxLifecycleError(
+      `Refusing to delete a persistent sandbox: replacement snapshot "${configuration.snapshotName}" is not active (state: ${snapshot.state}).`,
+      { kind: "cleanup_needed", retryable: false }
+    );
+  }
+
   // A sandbox cannot exceed what its snapshot carries, so a snapshot built
   // below policy silently reproduces the drift this replacement exists to
-  // remove. Only fields the provider actually reports are compared; it omits
-  // some (memory is absent from the snapshot view), and an absent field is not
-  // evidence of a mismatch.
+  // remove. Daytona reports memory as `mem` on a snapshot and `memory` on a
+  // sandbox; reading only the latter made this check dead code. An absent
+  // field is still not evidence of a mismatch.
+  const reported = {
+    cpu: snapshot.cpu,
+    disk: snapshot.disk,
+    memory: snapshot.mem ?? snapshot.memory,
+  };
   const shortfalls = (["cpu", "disk", "memory"] as const).filter((field) => {
-    const provided = snapshot[field];
+    const provided = reported[field];
     return provided !== undefined && provided < configuration.resources[field];
   });
   if (shortfalls.length > 0) {
@@ -956,6 +978,11 @@ async function resetMismatchedSandboxAndReprovision(
   dependencies: DaytonaSandboxDependencies,
   persistence: DaytonaSandboxPersistence
 ): Promise<{ agent: RunnerAgentRecord; sandbox: Sandbox }> {
+  // Before anything durable happens. `beginReset` commits the agent row to
+  // `resetting`, and the recovery scanner deletes `resetting` sandboxes on the
+  // next tick — so throwing after this line does not save the workspace, it
+  // only postpones its destruction by one reconcile.
+  await assertReplacementSnapshotReady(configuration, dependencies);
   const resetting = await persistence.beginReset(reserved);
   if (resetting.kind !== "updated") {
     throw new DaytonaSandboxLifecycleError(
@@ -965,7 +992,6 @@ async function resetMismatchedSandboxAndReprovision(
       { retryable: true }
     );
   }
-  await assertReplacementSnapshotReady(configuration, dependencies);
   try {
     await deleteMismatchedSandbox(sandbox);
   } catch (error) {

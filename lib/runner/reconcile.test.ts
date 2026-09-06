@@ -26,8 +26,8 @@ const SANDBOX_CONFIGURATION = {
   autoDeleteInterval: -1 as const,
   autoStopInterval: 15,
   configurationId: "current-configuration",
-  resources: { cpu: 2, disk: 20, memory: 4 },
-  snapshotName: "coven-agents-copilot-1",
+  resources: { cpu: 2, disk: 10, memory: 4 },
+  snapshotName: "coven-agents-copilot-2",
   target: "us" as const,
   ttlMinutes: 0 as const,
 };
@@ -3076,4 +3076,57 @@ test("reconciliation appends only fresh logs and terminalizes a settled command"
     terminalized: 1,
     terminalLeaseCleaned: 0,
   });
+});
+
+/**
+ * A row reaches `resetting` because some earlier reprovision decided to
+ * replace the workspace, but this scanner finishes that decision later and in
+ * another process. If it deleted on the strength of that earlier decision, a
+ * snapshot deleted or repointed in between would cost the workspace with
+ * nothing able to rebuild it. Deferring leaves the row stuck and visible,
+ * which is strictly better.
+ */
+test("cron recovery defers a reset it cannot complete instead of deleting the workspace", async () => {
+  const calls: string[] = [];
+  const pending = agent({
+    daytonaSandboxId: "stale-sandbox",
+    sandboxGeneration: 2,
+    sandboxLifecycle: "resetting",
+    version: 2,
+  });
+
+  const result = await reconcileDaytonaSandboxes({
+    daytona: {
+      create: () => {
+        throw new Error("reconciliation must not create");
+      },
+      get: () =>
+        ({
+          delete: () => {
+            calls.push("delete");
+            return Promise.resolve();
+          },
+          id: "stale-sandbox",
+        }) as never,
+      snapshot: {
+        get: () => Promise.reject(new DaytonaNotFoundError("snapshot absent")),
+      },
+    },
+    operator,
+    sandboxConfiguration: SANDBOX_CONFIGURATION,
+    store: {
+      attachDaytonaSandboxForRecovery: () => {
+        throw new Error("must not attach");
+      },
+      finishDaytonaSandboxResetForRecovery: () => {
+        calls.push("reset");
+        throw new Error("must not finish a reset it could not perform");
+      },
+      scanDaytonaSandboxRecoveries: () => Promise.resolve([pending]),
+      scanDaytonaWarmRecoveries: () => Promise.resolve([]),
+    } as never,
+  });
+
+  assert.deepEqual(calls, [], "no deletion and no reset completion");
+  assert.deepEqual(result, { deferred: 1, failures: 0, recovered: 0 });
 });

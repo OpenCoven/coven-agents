@@ -55,7 +55,8 @@ const policySnapshot = (
 ): NonNullable<DaytonaSandboxService["snapshot"]> => ({
   get: (requested) =>
     requested === name
-      ? Promise.resolve({ cpu: 2, disk: 10, memory: 4, name })
+      ? // Daytona's snapshot DTO names memory `mem` and always reports state.
+        Promise.resolve({ cpu: 2, disk: 10, mem: 4, name, state: "active" })
       : Promise.reject(new DaytonaNotFoundError("snapshot absent")),
 });
 
@@ -2474,6 +2475,7 @@ test("a stale ambiguous recovery cannot delete a sandbox owned by a newer durabl
         daytona: {
           create: () => Promise.reject(new Error("must not create")),
           get: () => Promise.resolve(newer),
+          snapshot: policySnapshot(),
         },
         store: store({
           beginDaytonaSandboxReset: () =>
@@ -2685,6 +2687,12 @@ test("a workspace is never deleted when the replacement snapshot is missing", as
     "an unresolvable snapshot must stop the reprovision"
   );
   assert.ok(
+    !calls.includes("begin-reset"),
+    `the reset must not begin: a committed "resetting" row is deleted by the
+     recovery scanner on the next tick, so refusing after it only postpones
+     the destruction. Got: ${calls.join(", ")}`
+  );
+  assert.ok(
     !calls.includes("delete"),
     `the workspace must survive an unusable replacement, got: ${calls.join(", ")}`
   );
@@ -2827,6 +2835,12 @@ test("a caller that cannot verify the snapshot may not delete either", async () 
     "absence of a snapshot service must fail closed, not permit deletion"
   );
   assert.ok(
+    !calls.includes("begin-reset"),
+    `the reset must not begin: a committed "resetting" row is deleted by the
+     recovery scanner on the next tick, so refusing after it only postpones
+     the destruction. Got: ${calls.join(", ")}`
+  );
+  assert.ok(
     !calls.includes("delete"),
     `the workspace must survive an unusable replacement, got: ${calls.join(", ")}`
   );
@@ -2923,7 +2937,18 @@ test("a workspace is never deleted for a snapshot that is below policy", async (
         snapshot: {
           // Generation-1 sizing: the snapshot resolves, but a sandbox built
           // from it would land straight back in drift.
-          get: (name) => Promise.resolve({ cpu: 1, disk: 3, memory: 1, name }),
+          // Real provider shape: memory is reported as `mem`. Making it the
+          // ONLY shortfall means a guard that reads `memory` alone — which is
+          // what the SDK's write-side type suggests — fails this test instead
+          // of silently enforcing nothing.
+          get: (name) =>
+            Promise.resolve({
+              cpu: 2,
+              disk: 10,
+              mem: 1,
+              name,
+              state: "active",
+            }),
         },
       },
       store: store({
@@ -2969,8 +2994,14 @@ test("a workspace is never deleted for a snapshot that is below policy", async (
 
   await assert.rejects(
     attempt,
-    /is below policy \(cpu, disk, memory\)/u,
+    /is below policy \(memory\)/u,
     "replacing a workspace with an undersized one is not a repair"
+  );
+  assert.ok(
+    !calls.includes("begin-reset"),
+    `the reset must not begin: a committed "resetting" row is deleted by the
+     recovery scanner on the next tick, so refusing after it only postpones
+     the destruction. Got: ${calls.join(", ")}`
   );
   assert.ok(
     !calls.includes("delete"),
@@ -3074,9 +3105,12 @@ test("a field the provider omits is not treated as a shortfall", async () => {
             : Promise.reject(new DaytonaNotFoundError("replacement absent"));
         },
         snapshot: {
-          // Daytona's snapshot view omits memory. Reading absence as zero
-          // would refuse every legitimate reprovision in production.
-          get: (name) => Promise.resolve({ cpu: 2, disk: 10, name }),
+          // A field the provider does not report must not read as zero. This
+          // is deliberately NOT `mem`: Daytona always reports mem, cpu, disk
+          // and state on a snapshot, so the realistic absence is a field a
+          // future API version stops sending.
+          get: (name) =>
+            Promise.resolve({ cpu: 2, disk: 10, name, state: "active" }),
         },
       },
       store: store({
@@ -3124,5 +3158,165 @@ test("a field the provider omits is not treated as a shortfall", async () => {
   assert.ok(
     calls.includes("delete") && calls.includes("create"),
     `the reprovision must proceed, got: ${calls.join(", ")}`
+  );
+});
+
+/**
+ * Existence is not usability: snapshot.get resolves for building, error and
+ * build_failed alike. The likeliest real state during a botched cutover is a
+ * snapshot that resolves but failed to build.
+ */
+test("a workspace is never deleted for a snapshot that is not active", async () => {
+  const calls: string[] = [];
+  const currentAgent = agent({
+    daytonaSandboxId: "stored",
+    sandboxGeneration: 2,
+    sandboxLifecycle: "ready",
+    version: 4,
+  });
+  const resettingAgent = agent({
+    ...currentAgent,
+    sandboxGeneration: 3,
+    sandboxLifecycle: "resetting",
+    version: 5,
+  });
+  const resetAgent = agent({
+    ...resettingAgent,
+    daytonaSandboxId: null,
+    sandboxLifecycle: "unprovisioned",
+    version: 6,
+  });
+  const reservedAgent = agent({
+    ...resetAgent,
+    sandboxGeneration: 4,
+    sandboxLifecycle: "provisioning",
+    version: 7,
+  });
+  const attachedAgent = agent({
+    ...reservedAgent,
+    daytonaSandboxId: "replacement",
+    sandboxLifecycle: "ready",
+    version: 8,
+  });
+  const oldSandbox = Object.assign(
+    sandbox(SandboxState.STOPPED, {
+      delete: () => {
+        calls.push("delete");
+        return Promise.resolve();
+      },
+    }),
+    { labels: { configurationId: "old-configuration" } }
+  );
+  const replacement = Object.assign(sandbox(SandboxState.STARTED), {
+    id: "replacement",
+    labels: {
+      ...daytonaSandboxLabels(principal.tenant, currentAgent.id),
+      configurationId: "new-configuration",
+      sandboxGeneration: String(reservedAgent.sandboxGeneration),
+    },
+  });
+  const configuration = {
+    ...config,
+    configurationId: "new-configuration",
+    domainAllowList: "api.github.com,app.example",
+    gatewayHostname: "app.example",
+  };
+
+  const attempt = ensureDaytonaSandboxForDispatch(
+    { kind: "runner-operator" },
+    {
+      expectedVersion: 1,
+      leaseToken: "dispatch-lease",
+      runId: "00000000-0000-4000-8000-000000000002",
+    } as never,
+    configuration,
+    {
+      daytona: {
+        create: (parameters) => {
+          calls.push("create");
+          assert.equal(
+            parameters.labels?.configurationId,
+            configuration.configurationId
+          );
+          return Promise.resolve(replacement);
+        },
+        get: (identifier) => {
+          calls.push(`get:${identifier}`);
+          return identifier === "stored"
+            ? Promise.resolve(oldSandbox)
+            : Promise.reject(new DaytonaNotFoundError("replacement absent"));
+        },
+        snapshot: {
+          // Generation-1 sizing: the snapshot resolves, but a sandbox built
+          // from it would land straight back in drift.
+          get: (name) =>
+            Promise.resolve({
+              cpu: 2,
+              disk: 10,
+              mem: 4,
+              name,
+              state: "build_failed",
+            }),
+        },
+      },
+      store: store({
+        attachDaytonaSandboxForDispatch: () => {
+          calls.push("attach");
+          return Promise.resolve({
+            kind: "updated" as const,
+            value: attachedAgent,
+          });
+        },
+        beginDaytonaSandboxResetForDispatch: () => {
+          calls.push("begin-reset");
+          return Promise.resolve({
+            kind: "updated" as const,
+            value: resettingAgent,
+          });
+        },
+        finishDaytonaSandboxResetForDispatch: () => {
+          calls.push("finish-reset");
+          return Promise.resolve({
+            kind: "updated" as const,
+            value: resetAgent,
+          });
+        },
+        getDispatchAgent: () => {
+          calls.push("get-dispatch");
+          return Promise.resolve({
+            agent: currentAgent,
+            kind: "found" as const,
+            run: {} as never,
+          });
+        },
+        reserveDaytonaSandboxForDispatch: () => {
+          calls.push("reserve");
+          return Promise.resolve({
+            kind: "reserved" as const,
+            value: reservedAgent,
+          });
+        },
+      }),
+    }
+  );
+
+  await assert.rejects(
+    attempt,
+    /is not active \(state: build_failed\)/u,
+    "a snapshot that exists but cannot serve a create is not a replacement"
+  );
+  assert.ok(
+    !calls.includes("begin-reset"),
+    `the reset must not begin: a committed "resetting" row is deleted by the
+     recovery scanner on the next tick, so refusing after it only postpones
+     the destruction. Got: ${calls.join(", ")}`
+  );
+  assert.ok(
+    !calls.includes("delete"),
+    `the workspace must survive an unusable replacement, got: ${calls.join(", ")}`
+  );
+  assert.ok(
+    !calls.includes("create"),
+    "nothing may be created after refusing to delete"
   );
 });
