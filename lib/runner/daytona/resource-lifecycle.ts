@@ -204,9 +204,11 @@ export function daytonaPersistentResourceLifecycle(
       const output = await resetDaytonaSandboxForCancellation(
         dependencies.operator,
         authority,
+        dependencies.configuration(),
         {
           daytona: dependencies.daytona(),
           lifecycle: dependencies.lifecycle,
+          observe: dependencies.observe,
           store: dependencies.store,
         }
       );
