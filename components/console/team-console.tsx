@@ -15,10 +15,13 @@ import {
 import {
   ArrowDown,
   ArrowUp,
+  Bot,
   ChevronRight,
+  CircleCheckBig,
   CircleStop,
   Download,
   Github,
+  ListChecks,
   Pencil,
   Plus,
   RefreshCw,
@@ -1485,13 +1488,14 @@ export function TeamConsole({
             <Eyebrow>Custom sequence</Eyebrow>
             <h2>Create a team</h2>
             <p>
-              Order profiles into a durable sequence, attach reusable skills,
-              and decide whether a failed member stops the run.
+              Build a clear handoff between agents. Each member runs in order,
+              using the responsibility and skills you assign here.
             </p>
             <div className="oc-team-form__grid">
               <Field label="Name">
                 <input
                   onChange={(event) => setTeamName(event.currentTarget.value)}
+                  placeholder="e.g. Release readiness crew"
                   value={teamName}
                 />
               </Field>
@@ -1500,9 +1504,19 @@ export function TeamConsole({
                   onChange={(event) =>
                     setTeamDescription(event.currentTarget.value)
                   }
+                  placeholder="What should this team accomplish?"
                   value={teamDescription}
                 />
               </Field>
+            </div>
+            <div className="oc-team-sequence-heading">
+              <span>
+                <ListChecks aria-hidden="true" size={15} />
+              </span>
+              <div>
+                <strong>Execution sequence</strong>
+                <small>Agents run from top to bottom.</small>
+              </div>
             </div>
             <div className="oc-team-member-editor">
               {members.map((member, index) => {
@@ -1510,37 +1524,51 @@ export function TeamConsole({
                   agents.find(({ id }) => id === member.agentId)?.name ??
                   `member ${index + 1}`;
                 return (
-                  <fieldset key={member.draftId}>
+                  <fieldset
+                    aria-label={`Team member ${index + 1}: ${memberName}`}
+                    key={member.draftId}
+                  >
                     <legend className="oc-team-member-editor__legend">
-                      Team member {index + 1}: {memberName}
+                      Stage {String(index + 1).padStart(2, "0")} · {memberName}
                     </legend>
                     <div className="oc-team-member-editor__head">
-                      <span>{String(index + 1).padStart(2, "0")}</span>
-                      <select
-                        aria-label={`Agent for team member ${index + 1}`}
-                        onChange={(event) => {
-                          const agentId = event.currentTarget.value;
-                          setMembers((current) =>
-                            current.map((value, position) =>
-                              position === index ? { ...value, agentId } : value
-                            )
-                          );
-                        }}
-                        value={member.agentId}
-                      >
-                        {agents.map((agent) => (
-                          <option
-                            disabled={members.some(
-                              (value, position) =>
-                                position !== index && value.agentId === agent.id
-                            )}
-                            key={agent.id}
-                            value={agent.id}
-                          >
-                            {sanitizeEvidenceText(agent.name)}
-                          </option>
-                        ))}
-                      </select>
+                      <span className="oc-team-member-editor__step">
+                        {String(index + 1).padStart(2, "0")}
+                      </span>
+                      <label className="oc-team-member-editor__agent">
+                        <span>
+                          <Bot aria-hidden="true" size={14} />
+                          Agent
+                        </span>
+                        <select
+                          aria-label={`Agent for team member ${index + 1}`}
+                          onChange={(event) => {
+                            const agentId = event.currentTarget.value;
+                            setMembers((current) =>
+                              current.map((value, position) =>
+                                position === index
+                                  ? { ...value, agentId }
+                                  : value
+                              )
+                            );
+                          }}
+                          value={member.agentId}
+                        >
+                          {agents.map((agent) => (
+                            <option
+                              disabled={members.some(
+                                (value, position) =>
+                                  position !== index &&
+                                  value.agentId === agent.id
+                              )}
+                              key={agent.id}
+                              value={agent.id}
+                            >
+                              {sanitizeEvidenceText(agent.name)}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
                       <button
                         aria-label={`Move ${memberName} up`}
                         disabled={index === 0}
@@ -1555,6 +1583,7 @@ export function TeamConsole({
                             )
                           )
                         }
+                        title="Move this stage up"
                         type="button"
                       >
                         <ArrowUp size={13} />
@@ -1573,6 +1602,7 @@ export function TeamConsole({
                             )
                           )
                         }
+                        title="Move this stage down"
                         type="button"
                       >
                         <ArrowDown size={13} />
@@ -1585,32 +1615,48 @@ export function TeamConsole({
                             current.filter((_, position) => position !== index)
                           )
                         }
+                        title="Remove this stage"
                         type="button"
                       >
                         <X size={13} />
                       </button>
                     </div>
-                    <textarea
-                      aria-label={`Responsibility for member ${index + 1}`}
-                      onChange={(event) => {
-                        const responsibility = event.currentTarget.value;
-                        setMembers((current) =>
-                          current.map((value, position) =>
-                            position === index
-                              ? {
-                                  ...value,
-                                  responsibility,
-                                }
-                              : value
-                          )
-                        );
-                      }}
-                      rows={2}
-                      value={member.responsibility}
-                    />
+                    <label className="oc-team-member-editor__responsibility">
+                      <span>Responsibility</span>
+                      <textarea
+                        aria-label={`Responsibility for member ${index + 1}`}
+                        onChange={(event) => {
+                          const responsibility = event.currentTarget.value;
+                          setMembers((current) =>
+                            current.map((value, position) =>
+                              position === index
+                                ? {
+                                    ...value,
+                                    responsibility,
+                                  }
+                                : value
+                            )
+                          );
+                        }}
+                        rows={2}
+                        value={member.responsibility}
+                      />
+                    </label>
+                    <div className="oc-team-member-editor__skills-heading">
+                      <span>
+                        <ListChecks aria-hidden="true" size={13} />
+                        Skills and behavior
+                      </span>
+                      <small>
+                        Choose reusable instructions for this stage.
+                      </small>
+                    </div>
                     <div className="oc-team-member-editor__skills">
                       {skills.map((skill) => (
-                        <label key={skill.id}>
+                        <label
+                          className="oc-team-member-editor__skill"
+                          key={skill.id}
+                        >
                           <input
                             aria-label={`Attach ${skill.name} to ${memberName}`}
                             checked={member.skillIds.includes(skill.id)}
@@ -1637,7 +1683,7 @@ export function TeamConsole({
                           {sanitizeEvidenceText(skill.name)}
                         </label>
                       ))}
-                      <label>
+                      <label className="oc-team-member-editor__required">
                         <input
                           aria-label={`${memberName} is a required step`}
                           checked={member.required}
@@ -1652,6 +1698,7 @@ export function TeamConsole({
                           }
                           type="checkbox"
                         />
+                        <CircleCheckBig aria-hidden="true" size={13} />
                         Required step
                       </label>
                     </div>
