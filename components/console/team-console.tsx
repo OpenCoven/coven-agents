@@ -1976,7 +1976,12 @@ export function TeamConsole({
                 </Btn>
               </div>
             </div>
-            <div className="oc-team-run-layout">
+            <div
+              className="oc-team-run-layout"
+              data-empty={
+                !loadingRuns && runs.length === 0 ? "true" : undefined
+              }
+            >
               <aside className="oc-team-run-list">
                 <div className="oc-team-rail__label">
                   <span>Run history</span>
