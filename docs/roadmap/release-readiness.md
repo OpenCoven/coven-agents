@@ -20,6 +20,8 @@ Do not promote when:
 - private Beads-to-Project reconciliation has not completed with a final no-op
   preview;
 - release audience configuration is ambiguous;
+- an enabled beta campaign carries an unapproved account cap, minute grant,
+  or account-age floor;
 - database migration compatibility is unproved;
 - subscriber or tenant authority can be supplied by request input;
 - checkout or credential controls remain enabled after current subscription
@@ -44,7 +46,8 @@ Do not promote when:
 - Stripe restricted key, webhook signing secret, recurring Price, and
   default-off Checkout launch flag
 - distinct cron, manual reconciliation, and diagnostic credentials
-- explicit `RELEASE_AUDIENCE` and matching beta configuration
+- explicit `RELEASE_AUDIENCE`, matching beta configuration, and a complete
+  beta campaign switch and bounds whenever the campaign is on
 
 Validate without printing secrets:
 
@@ -257,6 +260,64 @@ Repository build evidence does not prove a deployment occurred.
   production capability broker.
 - Cancellation, crash recovery, terminal projection, and retained-child
   cleanup must be exercised against release-equivalent PostgreSQL.
+
+## Beta campaign audience
+
+The open beta campaign grants bounded run minutes to any account that signs in
+with GitHub. It is an entitlement source distinct from a subscription: a
+participant is a real account with a real tenant whose minutes come from a
+grant rather than from Stripe, so `subscribedUntil` is never written and
+reconciliation never sees a subscription date with no subscription behind it.
+
+Six variables govern it. `BETA_CAMPAIGN_ENABLED` must be exactly `on`; any
+other value, and any missing or malformed number, disables the whole campaign
+rather than substituting a default.
+
+| Variable | Bound |
+| --- | --- |
+| `BETA_CAMPAIGN_ENABLED` | whether the campaign admits anyone at all |
+| `BETA_CAMPAIGN_MINUTES` | total run time one account may ever spend |
+| `BETA_CAMPAIGN_RUN_MINUTES` | reservation and duration bound for one campaign run; must not exceed `BETA_CAMPAIGN_MINUTES` |
+| `BETA_CAMPAIGN_MAX_ACCOUNTS` | how many accounts may ever enroll |
+| `BETA_CAMPAIGN_MIN_ACCOUNT_AGE_DAYS` | minimum GitHub account age at enrollment |
+| `BETA_CAMPAIGN_GRANT_DAYS` | how long an issued grant stays spendable |
+
+Worst-case exposure is `BETA_CAMPAIGN_MAX_ACCOUNTS` multiplied by
+`BETA_CAMPAIGN_MINUTES` of run time, plus the idle sandbox tail each run leaves
+behind. Reason about that product, not the per-account grant alone, when
+approving the cap.
+
+The same switch opens the beta gate, deliberately. Splitting the audience
+decision across two flags lets them disagree, and this pair would disagree
+expensively: a campaign granting minutes behind a closed allowlist hands people
+free run time and then bounces them at the door.
+
+Before enabling:
+
+1. Confirm the campaign migration is applied and the `User` grant columns and
+   `RunnerRun."entitlementMinutes"` exist.
+2. Run `pnpm validate:release`. It refuses a campaign that is switched on with
+   a missing, non-positive, or self-contradicting number.
+3. Confirm the cap and the account-age floor carry the approved values. The age
+   floor is the only check standing between an open campaign and account
+   farming, and it fails closed on an unreadable creation date.
+4. Deploy with `BETA_CAMPAIGN_ENABLED=off` and prove a signed-out request is
+   still refused and that no account holds a grant.
+5. Set `BETA_CAMPAIGN_ENABLED=on` and redeploy. Environment values are baked in
+   at deploy time, so changing the variable alone does not take effect.
+6. Prove one enrollment end to end: an account under the age floor is refused,
+   an account over it is granted, its run is bounded by
+   `BETA_CAMPAIGN_RUN_MINUTES`, and its usage reads against the campaign
+   allowance rather than the subscriber monthly cap.
+7. Prove the cap. Enrollment stops at `BETA_CAMPAIGN_MAX_ACCOUNTS`, but sign-in
+   still succeeds past that point and the account simply holds no grant.
+   Confirm that state is acceptable to present before opening.
+
+To close the campaign, return `BETA_CAMPAIGN_ENABLED` to `off` and redeploy.
+Disabling stops new enrollment; it does not confiscate minutes already granted,
+which keep expiring on their own schedule. It does close the gate, so an
+enrolled account absent from `BETA_ALLOWLIST` keeps spendable minutes it can no
+longer reach. Drain or accept that population before closing.
 
 ## Stripe webhook delivery
 
