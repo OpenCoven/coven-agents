@@ -36,9 +36,22 @@ export function CommandPalette({
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useRef<HTMLDialogElement>(null);
 
   useEffect(() => {
+    const previousFocus =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    const dialog = dialogRef.current;
+    dialog?.showModal();
     inputRef.current?.focus();
+    return () => {
+      dialog?.close();
+      if (previousFocus?.isConnected) {
+        previousFocus.focus();
+      }
+    };
   }, []);
 
   const matches = useMemo(() => {
@@ -53,10 +66,6 @@ export function CommandPalette({
     );
   }, [items, query]);
 
-  useEffect(() => {
-    setActive(0);
-  }, []);
-
   const choose = (index: number) => {
     const item = matches[index];
     if (item) {
@@ -66,15 +75,48 @@ export function CommandPalette({
   };
 
   return (
-    <div
+    // biome-ignore lint/a11y/noNoninteractiveElementInteractions: the modal owns Tab cycling between its controls.
+    <dialog
+      aria-label="Search runs, agents, and commands"
+      className="oc-command-palette"
+      onCancel={(event) => {
+        event.preventDefault();
+        onClose();
+      }}
+      onKeyDown={(event) => {
+        if (event.key !== "Tab") {
+          return;
+        }
+        const controls = [
+          ...event.currentTarget.querySelectorAll<HTMLElement>(
+            'input, button:not([tabindex="-1"])'
+          ),
+        ];
+        const [first] = controls;
+        const last = controls.at(-1);
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last?.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first?.focus();
+        }
+      }}
+      ref={dialogRef}
       style={{
         alignItems: "flex-start",
         background: "oklch(0 0 0 / 0.42)",
-        display: "flex",
+        border: 0,
+        color: "var(--text-primary)",
+        height: "100%",
         inset: 0,
         justifyContent: "center",
+        margin: 0,
+        maxHeight: "none",
+        maxWidth: "none",
         padding: "12vh 16px 16px",
-        position: "absolute",
+        position: "fixed",
+        width: "100%",
         zIndex: 70,
       }}
     >
@@ -88,12 +130,10 @@ export function CommandPalette({
           inset: 0,
           position: "absolute",
         }}
+        tabIndex={-1}
         type="button"
       />
       <div
-        aria-label="Search runs, agents, and commands"
-        aria-modal="true"
-        role="dialog"
         style={{
           background: "var(--bg-elevated)",
           border: "1px solid var(--border-strong)",
@@ -109,7 +149,10 @@ export function CommandPalette({
       >
         <input
           aria-label="Search"
-          onChange={(event) => setQuery(event.target.value)}
+          onChange={(event) => {
+            setQuery(event.target.value);
+            setActive(0);
+          }}
           onKeyDown={(event) => {
             if (event.key === "Escape") {
               onClose();
@@ -135,7 +178,6 @@ export function CommandPalette({
             borderBottom: hairline,
             color: "var(--text-primary)",
             font: "400 14px/1 var(--font-ui)",
-            outline: "none",
             padding: "16px 18px",
           }}
           value={query}
@@ -201,6 +243,6 @@ export function CommandPalette({
           )}
         </div>
       </div>
-    </div>
+    </dialog>
   );
 }

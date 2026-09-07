@@ -27,7 +27,7 @@ export default function Page() {
         authenticated subscriber console.
       </p>
       {/* The boundary, stated where a stranger first meets the product. */}
-      <p className="font-mono text-[11px] text-muted-foreground/70">
+      <p className="font-mono text-[11px] text-muted-foreground">
         Agents run in isolated Daytona sandboxes — never on your machine.
       </p>
 

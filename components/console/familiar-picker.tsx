@@ -64,7 +64,7 @@ export function FamiliarPicker({
                 : "var(--bg-sunken)",
               border: selected
                 ? "1px solid var(--accent-presence)"
-                : "1px solid var(--border)",
+                : "1px solid var(--border-hairline)",
               borderRadius: "var(--radius-control)",
               color: "var(--text-primary)",
               cursor: disabled ? "not-allowed" : "pointer",

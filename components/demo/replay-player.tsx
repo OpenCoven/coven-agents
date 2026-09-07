@@ -36,14 +36,14 @@ function EvidenceBlock({
 }) {
   return (
     <div className="mt-3">
-      <div className="mb-1.5 font-mono text-[10px] text-white/35 uppercase tracking-[0.16em]">
+      <div className="mb-1.5 font-mono text-[10px] text-[var(--text-muted)] uppercase tracking-[0.16em]">
         {label}
       </div>
       <pre
         className={`overflow-x-auto whitespace-pre-wrap break-words rounded-lg border p-3 font-mono text-xs leading-5 ${
           tone === "error"
-            ? "border-red-300/10 bg-red-400/[0.06] text-red-100/80"
-            : "border-white/8 bg-black/25 text-white/65"
+            ? "border-[var(--danger-border)] bg-[var(--danger-bg)] text-[var(--danger-text)]"
+            : "border-[var(--border-hairline)] bg-[var(--code-surface)] text-[var(--text-secondary)]"
         }`}
       >
         {children}
@@ -56,13 +56,13 @@ function EventBody({ event }: { event: RunEvent }) {
   switch (event.type) {
     case "accepted":
       return (
-        <p className="mt-2 text-white/50 text-xs">
+        <p className="mt-2 text-[var(--text-muted)] text-xs">
           Run {sanitizeEvidenceText(event.runId)} was accepted.
         </p>
       );
     case "status":
       return (
-        <p className="mt-2 text-white/65 text-sm">
+        <p className="mt-2 text-[var(--text-secondary)] text-sm">
           Agent status changed to{" "}
           <span className="font-medium text-white">{event.status}</span>.
         </p>
@@ -89,14 +89,14 @@ function EventBody({ event }: { event: RunEvent }) {
               {sanitizeEvidenceText(event.evidence.stderr)}
             </EvidenceBlock>
           ) : null}
-          <p className="mt-2 text-white/40 text-xs">
+          <p className="mt-2 text-[var(--text-muted)] text-xs">
             Exit code: {event.evidence.exitCode ?? "not reported"}
           </p>
         </>
       );
     case "file":
       return (
-        <p className="mt-2 break-all font-mono text-violet-100/70 text-xs">
+        <p className="mt-2 break-all font-mono text-[var(--text-muted)] text-xs">
           {event.evidence.operation} {sanitizeEvidencePath(event.evidence.path)}
           {event.evidence.byteLength === undefined
             ? ""
@@ -106,7 +106,7 @@ function EventBody({ event }: { event: RunEvent }) {
     case "completed":
       return (
         <>
-          <p className="mt-2 text-white/65 text-sm">
+          <p className="mt-2 text-[var(--text-secondary)] text-sm">
             Run completed with {event.run.commandEvidence.length} command
             {event.run.commandEvidence.length === 1 ? "" : "s"} and{" "}
             {event.run.fileEvidence.length} file operation
@@ -122,10 +122,10 @@ function EventBody({ event }: { event: RunEvent }) {
     case "failed":
       return (
         <>
-          <p className="mt-2 text-red-100/80 text-sm">
+          <p className="mt-2 text-[var(--danger-text)] text-sm">
             {sanitizeEvidenceText(event.error.message)}
           </p>
-          <p className="mt-2 font-mono text-red-200/45 text-xs">
+          <p className="mt-2 font-mono text-[var(--color-danger)] text-xs">
             {sanitizeEvidenceText(event.error.code)}
             {event.error.retryable ? " · retryable" : ""}
           </p>
@@ -144,31 +144,47 @@ function EventBody({ event }: { event: RunEvent }) {
 function eventPresentation(event: RunEvent) {
   switch (event.type) {
     case "accepted":
-      return { icon: Play, label: "Run accepted", tone: "text-sky-300" };
+      return {
+        icon: Play,
+        label: "Run accepted",
+        tone: "text-[var(--text-muted)]",
+      };
     case "status":
-      return { icon: Activity, label: "Status update", tone: "text-amber-300" };
+      return {
+        icon: Activity,
+        label: "Status update",
+        tone: "text-[var(--color-warning)]",
+      };
     case "output":
-      return { icon: Activity, label: "Agent output", tone: "text-violet-300" };
+      return {
+        icon: Activity,
+        label: "Agent output",
+        tone: "text-[var(--accent-presence)]",
+      };
     case "command":
       return {
         icon: Terminal,
         label: "Command finished",
-        tone: "text-cyan-300",
+        tone: "text-[var(--accent-signal)]",
       };
     case "file":
       return {
         icon: FileCode2,
         label: "File changed",
-        tone: "text-violet-300",
+        tone: "text-[var(--accent-presence)]",
       };
     case "completed":
       return {
         icon: CheckCircle2,
         label: "Run completed",
-        tone: "text-violet-300",
+        tone: "text-[var(--color-success)]",
       };
     case "failed":
-      return { icon: CircleX, label: "Run failed", tone: "text-red-300" };
+      return {
+        icon: CircleX,
+        label: "Run failed",
+        tone: "text-[var(--color-danger)]",
+      };
     default:
       return assertNever(event);
   }
@@ -180,7 +196,7 @@ function EventCard({ event }: { event: RunEvent }) {
 
   return (
     <li
-      className="rounded-xl border border-white/8 bg-white/[0.035] p-4 shadow-lg shadow-black/10"
+      className="rounded-xl border border-[var(--border-hairline)] bg-[var(--bg-raised)] p-4 shadow-lg shadow-black/10"
       role={event.type === "failed" ? "alert" : undefined}
     >
       <div className="flex items-center justify-between gap-4">
@@ -188,7 +204,9 @@ function EventCard({ event }: { event: RunEvent }) {
           <Icon aria-hidden="true" className={`size-4 ${presentation.tone}`} />
           <h3 className="font-medium text-sm">{presentation.label}</h3>
         </div>
-        <span className="font-mono text-[10px] text-white/25">#{event.id}</span>
+        <span className="font-mono text-[10px] text-[var(--text-muted)]">
+          #{event.id}
+        </span>
       </div>
       <EventBody event={event} />
     </li>
@@ -231,21 +249,21 @@ export function ReplayPlayer({ transcript }: { transcript: DemoTranscript }) {
   return (
     <section
       aria-labelledby="replay-heading"
-      className="overflow-hidden rounded-2xl border border-white/10 bg-black/20 shadow-2xl shadow-black/25 backdrop-blur-sm"
+      className="overflow-hidden rounded-2xl border border-[var(--border-hairline)] bg-[var(--bg-panel)] shadow-2xl shadow-black/25 backdrop-blur-sm"
     >
-      <div className="flex items-center justify-between gap-4 border-white/8 border-b px-4 py-3 sm:px-5">
+      <div className="flex items-center justify-between gap-4 border-[var(--border-hairline)] border-b px-4 py-3 sm:px-5">
         <div>
           <h2 className="font-medium text-sm" id="replay-heading">
             Replay timeline
           </h2>
-          <p className="mt-0.5 text-white/35 text-xs">
+          <p className="mt-0.5 text-[var(--text-muted)] text-xs">
             {visibleEvents.length} of {playback.steps.length} recorded events
           </p>
         </div>
         {isComplete ? (
           <Button
             aria-label="Replay guest run"
-            className="border-white/10 bg-white/5 text-white hover:bg-white/10 focus-visible:border-white focus-visible:ring-[3px] focus-visible:ring-white/70"
+            className="border-[var(--border-hairline)] bg-[var(--bg-raised)] text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
             onClick={restart}
             size="sm"
             variant="outline"
@@ -254,8 +272,8 @@ export function ReplayPlayer({ transcript }: { transcript: DemoTranscript }) {
             Replay
           </Button>
         ) : (
-          <span className="flex items-center gap-2 text-violet-200/60 text-xs">
-            <span className="size-1.5 animate-pulse rounded-full bg-violet-300" />
+          <span className="flex items-center gap-2 text-[var(--text-muted)] text-xs">
+            <span className="size-1.5 animate-pulse rounded-full bg-[var(--accent-presence)]" />
             Replaying
           </span>
         )}
@@ -272,7 +290,7 @@ export function ReplayPlayer({ transcript }: { transcript: DemoTranscript }) {
       </ol>
       {isComplete ? (
         <p
-          className="border-white/8 border-t px-5 py-3 text-violet-200/60 text-xs"
+          className="border-[var(--border-hairline)] border-t px-5 py-3 text-[var(--text-muted)] text-xs"
           role="status"
         >
           Recorded run complete.

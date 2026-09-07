@@ -150,21 +150,28 @@ test("the client player plans the transcript before scheduling playback", () => 
   assert.match(replayPlayer, /Replay guest run/);
 });
 
-test("the replay button shows a high-contrast keyboard focus ring", () => {
-  const replayPlayer = read(replayPlayerUrl);
+test("the replay inherits the console keyboard focus contract", () => {
+  const consoleCss = read(new URL("../app/console.css", import.meta.url));
 
+  assert.match(read(demoRootUrl), /<main className="oc-console /);
   assert.match(
-    replayPlayer,
-    /aria-label="Replay guest run"[\s\S]*?className="[^"]*focus-visible:border-white\s+focus-visible:ring-\[3px\]\s+focus-visible:ring-white\/70/
+    consoleCss,
+    /\.oc-console :focus-visible\s*\{\s*outline: 2px solid var\(--ring-focus\)/
   );
+  assert.doesNotMatch(read(replayPlayerUrl), /focus-visible:outline-none/);
 });
 
-test("the demo uses the purple brand palette", () => {
+test("the demo shares brand identity and semantic state tokens with the console", () => {
   const sources = [read(demoRootUrl), read(replayPlayerUrl)].join("\n");
+  const consoleCss = read(new URL("../app/console.css", import.meta.url));
 
-  assert.match(sources, /rgba\(147,134,208,0\.2\)/);
-  assert.match(sources, /violet-300/);
-  assert.doesNotMatch(sources, /emerald-/);
+  assert.match(consoleCss, /--accent-presence: #9386d0/);
+  assert.match(sources, /var\(--accent-presence\)/);
+  assert.match(
+    read(replayPlayerUrl),
+    /label: "Run completed",\s*tone: "text-\[var\(--color-success\)\]"/
+  );
+  assert.doesNotMatch(sources, /(?:violet|emerald)-/);
 });
 
 test("curated guest data is not described as a live recording", () => {

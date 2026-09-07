@@ -100,7 +100,9 @@ function Tile({
           </span>
         ) : null}
       </span>
-      <span style={{ ...type_.meta, whiteSpace: "normal" }}>{sub}</span>
+      <span style={{ ...type_.meta, lineHeight: 1.5, whiteSpace: "normal" }}>
+        {sub}
+      </span>
     </div>
   );
 }
@@ -284,7 +286,9 @@ function EmptyLedger({
       >
         {note}
       </p>
-      <span style={{ ...type_.meta, whiteSpace: "normal" }}>needs {needs}</span>
+      <span style={{ ...type_.meta, lineHeight: 1.5, whiteSpace: "normal" }}>
+        needs {needs}
+      </span>
     </div>
   );
 }
@@ -649,11 +653,16 @@ export function Warden({ operator }: { operator: string }) {
                 {accounts.length} of {data?.accounts.length ?? 0}
               </span>
             </div>
-            <span style={{ ...type_.meta, whiteSpace: "normal" }}>
-              emails masked server-side — the address never reaches this page ·
-              search is account id only, partial email search is deliberately
-              unsupported
-            </span>
+            <p
+              style={{
+                ...type_.body,
+                color: "var(--text-muted)",
+                fontSize: 12,
+              }}
+            >
+              Email addresses are masked. Search by account ID; partial email
+              search is unavailable.
+            </p>
 
             <div
               className="oc-admin-table-scroll"

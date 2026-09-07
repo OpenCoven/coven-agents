@@ -99,12 +99,22 @@
   border-color: var(--border-hairline);
 }
 
-/* globals.css strips the focus ring off every button and input. Inside the
-   console that would leave keyboard navigation with nothing to follow, so
-   the ring is put back rather than the global rule being relaxed. */
+/* Keep keyboard focus aligned with the console accent and compact spacing. */
 .oc-console :focus-visible {
   outline: 2px solid var(--ring-focus);
   outline-offset: 2px;
+}
+
+.oc-command-palette[open] {
+  display: flex;
+}
+
+.oc-command-palette input:focus-visible {
+  outline-offset: -3px;
+}
+
+.oc-command-palette::backdrop {
+  background: transparent;
 }
 
 .oc-console button {
@@ -4274,7 +4284,7 @@
     padding: 14px 16px;
   }
 
-  .oc-settings > div {
+  .oc-settings-layout {
     flex-direction: column;
   }
 

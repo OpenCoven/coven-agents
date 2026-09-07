@@ -1,12 +1,6 @@
 import { Analytics } from "@vercel/analytics/next";
 import type { Metadata } from "next";
-import {
-  EB_Garamond,
-  Geist,
-  Geist_Mono,
-  Inter,
-  JetBrains_Mono,
-} from "next/font/google";
+import { EB_Garamond, Inter, JetBrains_Mono } from "next/font/google";
 import { ThemeProvider } from "@/components/theme-provider";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
@@ -23,30 +17,9 @@ export const metadata: Metadata = {
   },
 };
 
-export const viewport = {
-  maximumScale: 1,
-};
-
 const analyticsEnabled = process.env.VERCEL === "1";
 
-const geist = Geist({
-  display: "swap",
-  subsets: ["latin"],
-  variable: "--font-geist",
-});
-
-const geistMono = Geist_Mono({
-  display: "swap",
-  subsets: ["latin"],
-  variable: "--font-geist-mono",
-});
-
-/**
- * The run console's three faces: Inter for the interface, JetBrains Mono for
- * anything the machine produced, EB Garamond for the one question each
- * composer asks. Declared here because `next/font` has to run at module scope
- * in a server file; only the console applies them.
- */
+/** Shared brand typography: interface, machine output, and display. */
 const inter = Inter({
   display: "swap",
   subsets: ["latin"],
@@ -68,8 +41,8 @@ const ebGaramond = EB_Garamond({
   weight: ["400", "500"],
 });
 
-const LIGHT_THEME_COLOR = "hsl(0 0% 100%)";
-const DARK_THEME_COLOR = "hsl(240deg 10% 3.92%)";
+const LIGHT_THEME_COLOR = "#f5f4f8";
+const DARK_THEME_COLOR = "#0b0b0d";
 const THEME_COLOR_SCRIPT = `\
 (function() {
   var html = document.documentElement;
@@ -95,7 +68,7 @@ export default function RootLayout({
 }>) {
   return (
     <html
-      className={`${geist.variable} ${geistMono.variable} ${inter.variable} ${jetbrainsMono.variable} ${ebGaramond.variable}`}
+      className={`${inter.variable} ${jetbrainsMono.variable} ${ebGaramond.variable}`}
       /**
        * The OpenCoven palette, applied once at the root so every surface --
        * console, chat, auth -- inherits it. The theme provider puts `.dark`

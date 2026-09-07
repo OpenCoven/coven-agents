@@ -209,6 +209,43 @@ test.describe("Run console", () => {
     expect(protectedRequests).toEqual([]);
   });
 
+  test("filtering the command palette resets its keyboard selection", async ({
+    page,
+  }) => {
+    await page.goto("/agents");
+    await page.getByRole("button", { name: "Search or run a command" }).click();
+    const search = page.getByRole("textbox", { exact: true, name: "Search" });
+    await search.press("ArrowDown");
+    await search.press("ArrowDown");
+    await search.fill("Open settings");
+    await search.press("Enter");
+    await expect(
+      page.getByRole("heading", { name: "Sign in to manage your account" })
+    ).toBeVisible();
+  });
+
+  test("the command palette keeps keyboard focus inside and restores its trigger", async ({
+    page,
+  }) => {
+    await page.goto("/agents");
+    const trigger = page.getByRole("button", {
+      name: "Search or run a command",
+    });
+    await trigger.click();
+    const dialog = page.getByRole("dialog", {
+      name: "Search runs, agents, and commands",
+    });
+    const search = page.getByRole("textbox", { exact: true, name: "Search" });
+    await expect(search).toBeFocused();
+    await search.press("Shift+Tab");
+    expect(
+      await dialog.evaluate((el) => el.contains(document.activeElement))
+    ).toBe(true);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(trigger).toBeFocused();
+  });
+
   test("an authenticated subscriber prewarms once through the same-origin API", async ({
     context,
     page,
@@ -557,7 +594,7 @@ test.describe("Run console", () => {
     await expect(paths.getByRole("button")).toHaveCount(3);
     await expect(
       paths.getByRole("button", { name: /Start from a role/ })
-    ).toContainText("1 profile · ~5 seconds");
+    ).toContainText("1 profile · one action");
     await expect(
       paths.getByRole("button", { name: /Create a crew/ })
     ).toContainText("2–3 profiles · one action");
@@ -567,7 +604,7 @@ test.describe("Run console", () => {
     await expect(
       page.getByRole("heading", { name: "Start from a role" })
     ).toHaveCount(0);
-    await expect(paths).not.toContainText(/(^|\s)[123](\s|$)/);
+    await expect(paths.getByText(/^[123]$/)).toHaveCount(0);
 
     await paths.getByRole("button", { name: /Start from a role/ }).click();
     await expect(page.getByText("How read-only is enforced")).toBeVisible();
@@ -586,7 +623,9 @@ test.describe("Run console", () => {
     );
     await page.getByRole("button", { name: "All paths" }).click();
     await paths.getByRole("button", { name: /Create a crew/ }).click();
-    await expect(page.getByText("Proposed: sequenced mode")).toBeVisible();
+    await expect(
+      page.getByText("A crew is a complementary", { exact: false })
+    ).toBeVisible();
   });
 
   test("returning to all paths preserves the Forge draft and restores focus", async ({
@@ -2628,6 +2667,7 @@ test.describe("Run console", () => {
     await page.getByRole("button", { name: "Remove" }).click();
     await started;
 
+    await context.clearCookies();
     sessionOverride = null;
     const sessionRefresh = page.waitForResponse(async (response) => {
       if (new URL(response.url()).pathname !== "/api/auth/session") {
@@ -2637,6 +2677,10 @@ test.describe("Run console", () => {
     });
     await notifySessionChange(page);
     await sessionRefresh;
+    await expect(
+      page.getByRole("button", { exact: true, name: "signed out" })
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Account and settings" }).click();
     await expect(
       page.getByRole("heading", { name: "Sign in to manage your account" })
     ).toBeVisible();

@@ -378,6 +378,7 @@ export function RunConsole({
   const latestSessionIdentityRef = useRef(sessionIdentity);
   const prewarmedIdentitiesRef = useRef(new Set<string>());
   const resolvedSessionIdentityRef = useRef<string | null>(null);
+  const resolvedAccountIdRef = useRef<string | null>(null);
   const refreshGenerationRef = useRef(0);
   const sessionAbortRef = useRef<AbortController | null>(null);
   const sessionGenerationRef = useRef(0);
@@ -549,10 +550,12 @@ export function RunConsole({
     refreshGenerationRef.current += 1;
     const generation = sessionGenerationRef.current;
     const previousResolvedIdentity = resolvedSessionIdentityRef.current;
+    const previousAccountId = resolvedAccountIdRef.current;
     const resolvedIdentity =
       session.status === "loading" ? null : sessionIdentity;
     if (resolvedIdentity) {
       resolvedSessionIdentityRef.current = resolvedIdentity;
+      resolvedAccountIdRef.current = accountId ?? null;
     }
     activeSessionIdentityRef.current = sessionIdentity;
     sessionAbortRef.current?.abort();
@@ -577,7 +580,15 @@ export function RunConsole({
       resolvedIdentity &&
       previousResolvedIdentity !== resolvedIdentity
     ) {
-      setView("composer");
+      // Settings owns its authority transition and clears sensitive state.
+      // Keep it mounted so refusals and Billing focus changes remain visible.
+      setView((current) =>
+        current === "settings" &&
+        accountId !== null &&
+        previousAccountId === accountId
+          ? current
+          : "composer"
+      );
     }
 
     if (session.status === "loading") {
@@ -1792,7 +1803,6 @@ export function RunConsole({
                                     borderRadius: "var(--radius-control)",
                                     color: "var(--text-primary)",
                                     font: "500 13px/1 var(--font-ui)",
-                                    outline: "none",
                                     padding: "6px 9px",
                                     width: 220,
                                   }}
@@ -2537,7 +2547,7 @@ function EmptyConsole({
               <span>03</span>
               <div>
                 <strong>Prove</strong>
-                <p>The environment closes; a redacted receipt remains.</p>
+                <p>The run closes; a redacted receipt remains.</p>
               </div>
             </li>
           </ol>
