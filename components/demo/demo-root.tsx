@@ -21,23 +21,22 @@ function formatPreparedAt(value: string) {
 
 function DemoFrame({ children }: { children: React.ReactNode }) {
   return (
-    <main className="relative min-h-dvh overflow-hidden bg-[#08060d] text-[#f3f0fa]">
-      <div className="pointer-events-none fixed inset-0 bg-[radial-gradient(circle_at_65%_-20%,rgba(147,134,208,0.2),transparent_38%),linear-gradient(rgba(255,255,255,0.018)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.018)_1px,transparent_1px)] bg-[size:auto,42px_42px,42px_42px]" />
-      <header className="relative border-white/8 border-b bg-black/20 backdrop-blur-xl">
-        <div className="mx-auto flex max-w-5xl items-center justify-between gap-4 px-5 py-4 sm:px-8">
+    <main className="oc-console relative min-h-dvh overflow-hidden">
+      <header className="relative border-[var(--border-hairline)] border-b bg-[var(--bg-panel)]">
+        <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-4 px-5 py-4 sm:px-8">
           <div className="flex items-center gap-3">
-            <div className="grid size-9 place-items-center rounded-xl border border-violet-300/25 bg-violet-300/10 text-violet-300">
+            <div className="grid size-9 place-items-center rounded-xl border border-[var(--border-strong)] bg-[var(--fill-info)] text-[var(--accent-presence)]">
               <BrandMark className="size-4" />
             </div>
             <div>
               <div className="font-semibold tracking-[-0.02em]">OpenCoven</div>
-              <div className="font-mono text-[10px] text-violet-200/60 uppercase tracking-[0.22em]">
+              <div className="font-mono text-[10px] text-[var(--text-muted)] uppercase tracking-[0.22em]">
                 Curated guest preview
               </div>
             </div>
           </div>
           <Link
-            className="rounded-lg border border-violet-300/25 bg-violet-300/10 px-3 py-2 font-medium text-violet-100 text-xs transition-colors hover:border-violet-200/45 hover:bg-violet-300/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-200/70"
+            className="rounded-lg border border-[var(--border-strong)] bg-[var(--fill-info)] px-3 py-2 font-medium text-[var(--accent-presence)] text-xs transition-colors hover:border-[var(--accent-presence)] hover:bg-[var(--bg-hover)]"
             href="/login"
             prefetch={false}
           >
@@ -60,23 +59,28 @@ function DemoUnavailable({
     <DemoFrame>
       <section
         aria-labelledby="demo-unavailable-title"
-        className="mx-auto max-w-xl rounded-2xl border border-white/10 bg-white/[0.035] p-7 shadow-2xl shadow-black/20 backdrop-blur-sm sm:p-9"
+        className="mx-auto max-w-xl rounded-2xl border border-[var(--border-hairline)] bg-[var(--bg-raised)] p-7 shadow-2xl shadow-black/20 sm:p-9"
       >
         <Badge
-          className="border-violet-300/20 bg-violet-300/10 text-violet-100"
+          className="border-[var(--border-strong)] bg-[var(--fill-info)] text-[var(--accent-presence)]"
           variant="outline"
         >
           Safe guest replay
         </Badge>
         <h1
-          className="mt-5 text-2xl font-semibold tracking-[-0.03em]"
+          className="mt-5 font-serif text-3xl tracking-[-0.02em]"
           id="demo-unavailable-title"
         >
           {title}
         </h1>
-        <p className="mt-3 text-sm text-white/60">{description}</p>
-        <div className="mt-6 flex items-center gap-2 border-white/8 border-t pt-5 text-white/45 text-xs">
-          <ShieldCheck aria-hidden="true" className="size-4 text-violet-300" />
+        <p className="mt-3 text-sm text-[var(--text-secondary)]">
+          {description}
+        </p>
+        <div className="mt-6 flex items-center gap-2 border-[var(--border-hairline)] border-t pt-5 text-[var(--text-muted)] text-xs">
+          <ShieldCheck
+            aria-hidden="true"
+            className="size-4 text-[var(--accent-presence)]"
+          />
           This page never falls through to a live agent run.
         </div>
       </section>
@@ -91,22 +95,22 @@ function CuratedRun({ transcript }: { transcript: DemoTranscript }) {
     <DemoFrame>
       <section aria-labelledby="demo-task">
         <Badge
-          className="border-violet-300/20 bg-violet-300/10 text-violet-200"
+          className="border-[var(--border-strong)] bg-[var(--fill-info)] text-[var(--accent-presence)]"
           variant="outline"
         >
           Safe guest replay
         </Badge>
         <h1
-          className="mt-5 max-w-3xl text-balance text-3xl font-semibold tracking-[-0.04em] sm:text-4xl"
+          className="mt-5 max-w-3xl text-balance font-serif text-4xl tracking-[-0.02em] sm:text-5xl"
           id="demo-task"
         >
           {sanitizeEvidenceText(transcript.task)}
         </h1>
-        <p className="mt-4 max-w-2xl text-sm text-white/60 sm:text-base">
+        <p className="mt-4 max-w-2xl text-sm text-[var(--text-secondary)] sm:text-base">
           This is a deterministic example built from sanitized evidence. It
           makes no live runner, authentication, or database request.
         </p>
-        <div className="mt-5 flex items-center gap-2 font-mono text-violet-100/55 text-xs">
+        <div className="mt-5 flex items-center gap-2 font-mono text-[var(--text-muted)] text-xs">
           <Clock3 aria-hidden="true" className="size-3.5" />
           <span>Prepared</span>
           <time dateTime={transcript.recordedAt}>{preparedAt} UTC</time>

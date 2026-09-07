@@ -345,14 +345,13 @@ test.describe("Subscriber checkout", () => {
     await page.goto("/account");
     await page.getByRole("tab", { name: "Billing" }).click();
     await expect(page.getByText("Subscription active")).toBeVisible();
-    await expect(page.locator(".oc-subscription-card time")).toHaveAttribute(
-      "datetime",
-      "2099-01-01T00:00:00.000Z"
-    );
+    await expect(
+      page.locator(".oc-subscription-paid-through time")
+    ).toHaveAttribute("datetime", "2099-01-01T00:00:00.000Z");
     await expect(checkoutButton(page)).toHaveCount(0);
     await expect(
-      page.getByRole("button", { name: /manage|cancel/i })
-    ).toHaveCount(0);
+      page.getByRole("button", { exact: true, name: "Manage subscription" })
+    ).toBeVisible();
 
     await openConsoleSettings(page);
     await page.getByRole("tab", { name: "Billing" }).click();
@@ -685,10 +684,9 @@ test.describe("Subscriber checkout", () => {
     await page.goto("/account?source=ledger&checkout=success#allowance");
 
     await expect(page.getByText("Subscription active")).toBeVisible();
-    await expect(page.locator(".oc-subscription-card time")).toHaveAttribute(
-      "datetime",
-      "2099-01-01T00:00:00.000Z"
-    );
+    await expect(
+      page.locator(".oc-subscription-paid-through time")
+    ).toHaveAttribute("datetime", "2099-01-01T00:00:00.000Z");
     await expect(page).toHaveURL("/account?source=ledger#allowance");
   });
 
@@ -738,10 +736,9 @@ test.describe("Subscriber checkout", () => {
     await expect(billing).toBeVisible();
     await billing.click();
     await expect(page.getByText("Subscription active")).toBeVisible();
-    await expect(page.locator(".oc-subscription-card time")).toHaveAttribute(
-      "datetime",
-      "2099-01-01T00:00:00.000Z"
-    );
+    await expect(
+      page.locator(".oc-subscription-paid-through time")
+    ).toHaveAttribute("datetime", "2099-01-01T00:00:00.000Z");
   });
 
   test("console credential controls lock, clear, and re-enable with effective authority", async ({
@@ -1549,7 +1546,7 @@ test.describe("Subscriber checkout", () => {
     });
 
     await page.goto("/account");
-    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await expect(page.getByText("Stored", { exact: true })).toBeVisible();
     const initialCredentialGets = credentialGets;
 
     secondUserActive = true;
@@ -1562,10 +1559,10 @@ test.describe("Subscriber checkout", () => {
 
     await expect(page.getByLabel("GitHub Copilot CLI")).toBeVisible();
     await expect.poll(() => credentialGets > initialCredentialGets).toBe(true);
-    await expect(page.getByText("Connected", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Stored", { exact: true })).toHaveCount(0);
 
     releaseSecondCredentials();
-    await expect(page.getByText("Connected", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Stored", { exact: true })).toHaveCount(0);
   });
 
   test("an older account credential snapshot cannot overwrite a successful save", async ({
@@ -1597,12 +1594,12 @@ test.describe("Subscriber checkout", () => {
     await expect(credential).toBeVisible();
     await credential.fill("saved-after-initial-read");
     await page.getByRole("button", { exact: true, name: "Save" }).click();
-    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await expect(page.getByText("Stored", { exact: true })).toBeVisible();
 
     releaseInitialGet();
     await page.waitForTimeout(100);
 
-    await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+    await expect(page.getByText("Stored", { exact: true })).toBeVisible();
   });
 
   for (const initialMismatch of ["auth-version", "user"] as const) {
@@ -2398,10 +2395,9 @@ test.describe("Subscriber checkout", () => {
     await page.goto("/account");
     await page.getByRole("tab", { name: "Billing" }).click();
     await expect(page.getByText("Subscription active")).toBeVisible();
-    await expect(page.locator(".oc-subscription-card time")).toHaveAttribute(
-      "datetime",
-      "2099-01-01T00:00:00.000Z"
-    );
+    await expect(
+      page.locator(".oc-subscription-paid-through time")
+    ).toHaveAttribute("datetime", "2099-01-01T00:00:00.000Z");
 
     currentSession = sessionFor("demo", {
       email: "second@example.invalid",
@@ -2415,7 +2411,9 @@ test.describe("Subscriber checkout", () => {
 
     await expect(checkoutButton(page)).toBeVisible();
     await expect(page.getByText("Subscription active")).toHaveCount(0);
-    await expect(page.locator(".oc-subscription-card time")).toHaveCount(0);
+    await expect(
+      page.locator(".oc-subscription-paid-through time")
+    ).toHaveCount(0);
   });
 
   test("desktop console settings expose vertical keyboard-operable ARIA tabs", async ({

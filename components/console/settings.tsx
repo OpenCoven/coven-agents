@@ -82,7 +82,6 @@ const inputStyle: React.CSSProperties = {
   borderRadius: "var(--radius-control)",
   color: "var(--text-primary)",
   font: "400 12px/1.4 var(--font-mono)",
-  outline: "none",
   padding: "9px 11px",
   width: "100%",
 };
@@ -780,7 +779,10 @@ export function Settings({
         minWidth: 0,
       }}
     >
-      <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
+      <div
+        className="oc-settings-layout"
+        style={{ display: "flex", flex: 1, minHeight: 0 }}
+      >
         <nav
           aria-label="Console settings navigation"
           className="oc-settings-nav"

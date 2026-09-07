@@ -268,7 +268,6 @@ const inputStyle: React.CSSProperties = {
   borderRadius: "var(--radius-control)",
   color: "var(--text-primary)",
   font: "400 13px/1.4 var(--font-ui)",
-  outline: "none",
   padding: "9px 11px",
   width: "100%",
 };
@@ -669,17 +668,29 @@ export function CreateAgent({
                     value={workspace}
                   />
                 </Field>
-                <Field
-                  hint="Choose a curated identity now, or keep it matched to the profile."
-                  label="Familiar"
+                <fieldset
+                  style={{ border: 0, margin: 0, minWidth: 0, padding: 0 }}
                 >
+                  <legend style={{ marginBottom: 7 }}>
+                    <Eyebrow>Familiar</Eyebrow>
+                  </legend>
                   <FamiliarPicker
                     automaticProfileId="custom"
                     disabled={busy}
                     onChange={setFamiliarId}
                     value={familiarId}
                   />
-                </Field>
+                  <p
+                    style={{
+                      color: "var(--text-muted)",
+                      font: "400 11px/1.5 var(--font-ui)",
+                      margin: "7px 0 0",
+                    }}
+                  >
+                    Choose a curated identity now, or keep it matched to the
+                    profile.
+                  </p>
+                </fieldset>
                 <Field
                   hint="What the agent must and must not do. This is the contract."
                   label="Operating contract"

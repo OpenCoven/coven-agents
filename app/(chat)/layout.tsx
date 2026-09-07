@@ -7,6 +7,7 @@ import { Toaster } from "sonner";
 import { BrandMark } from "@/components/brand/brand-mark";
 import { AppSidebar } from "@/components/chat/app-sidebar";
 import { DataStreamProvider } from "@/components/chat/data-stream-provider";
+import { ChatMotionProvider } from "@/components/chat/motion-provider";
 import { ChatShell } from "@/components/chat/shell";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { ActiveChatProvider } from "@/hooks/use-active-chat";
@@ -51,7 +52,7 @@ async function SidebarShell({ children }: { children: React.ReactNode }) {
             subscribers.
           </p>
           <Link
-            className="mt-5 inline-flex h-10 items-center rounded-[8px] bg-[var(--oc-accent)] px-4 font-medium text-[13px] text-white transition-opacity hover:opacity-90"
+            className="mt-5 inline-flex h-10 items-center rounded-[8px] bg-[var(--oc-accent)] px-4 font-medium text-[13px] text-[var(--oc-accent-ink)] transition-opacity hover:opacity-90"
             href={signedIn ? "/account" : "/login"}
           >
             {signedIn ? "Open account settings" : "Sign in with GitHub"}
@@ -62,24 +63,26 @@ async function SidebarShell({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <SidebarProvider defaultOpen={!isCollapsed}>
-      <AppSidebar user={session?.user} />
-      <SidebarInset>
-        <Toaster
-          position="top-center"
-          theme="system"
-          toastOptions={{
-            className:
-              "!bg-card !text-foreground !border-border/50 !shadow-[var(--shadow-float)]",
-          }}
-        />
-        <Suspense fallback={<div className="flex h-dvh" />}>
-          <ActiveChatProvider>
-            <ChatShell />
-          </ActiveChatProvider>
-        </Suspense>
-        {children}
-      </SidebarInset>
-    </SidebarProvider>
+    <ChatMotionProvider>
+      <SidebarProvider defaultOpen={!isCollapsed}>
+        <AppSidebar user={session?.user} />
+        <SidebarInset>
+          <Toaster
+            position="top-center"
+            theme="system"
+            toastOptions={{
+              className:
+                "!bg-card !text-foreground !border-border/50 !shadow-[var(--shadow-float)]",
+            }}
+          />
+          <Suspense fallback={<div className="flex h-dvh" />}>
+            <ActiveChatProvider>
+              <ChatShell />
+            </ActiveChatProvider>
+          </Suspense>
+          {children}
+        </SidebarInset>
+      </SidebarProvider>
+    </ChatMotionProvider>
   );
 }
