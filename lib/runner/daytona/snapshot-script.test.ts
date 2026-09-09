@@ -65,3 +65,70 @@ test("snapshot CLI errors never echo provider credentials or unbounded input", a
   assert.ok(messages.every((message) => message.length < 256));
   assert.equal(messages.join("").includes("test-api-key"), false);
 });
+
+test("snapshot CLI identifies invalid configuration without exposing values", async () => {
+  const messages: string[] = [];
+  const code = await runDaytonaSnapshot(
+    {
+      DAYTONA_SNAPSHOT: "coven-agents-copilot-2",
+      NODE_ENV: "test",
+    },
+    {
+      error: (message) => messages.push(message),
+      log: (message) => messages.push(message),
+    },
+    ["--verify"]
+  );
+
+  assert.equal(code, 1);
+  assert.deepEqual(messages, [
+    "Daytona snapshot configuration is invalid: Missing required Daytona environment variable: DAYTONA_API_KEY.",
+  ]);
+});
+
+test("snapshot CLI reports the bounded resource mismatch", async () => {
+  const messages: string[] = [];
+  const code = await runDaytonaSnapshot(
+    {
+      DAYTONA_API_KEY: "test-api-key",
+      DAYTONA_SNAPSHOT: "coven-agents-copilot-2",
+      NODE_ENV: "test",
+    },
+    {
+      error: (message) => messages.push(message),
+      log: (message) => messages.push(message),
+    },
+    ["--verify"],
+    {
+      create: () => Promise.reject(new Error("must not mutate")),
+      get: (name) =>
+        Promise.resolve({
+          cpu: 1,
+          disk: 3,
+          mem: 1,
+          name,
+          state: "active",
+        }),
+    }
+  );
+
+  assert.equal(code, 1);
+  assert.deepEqual(messages, [
+    "Daytona snapshot verification failed: Daytona snapshot does not match the active resource policy (cpu, disk, memory). Build a new immutable generation.",
+  ]);
+});
+
+test("snapshot CLI reports invalid arguments with the supported usage", async () => {
+  const messages: string[] = [];
+  const code = await runDaytonaSnapshot(
+    { NODE_ENV: "test" },
+    {
+      error: (message) => messages.push(message),
+      log: (message) => messages.push(message),
+    },
+    ["--replace"]
+  );
+
+  assert.equal(code, 1);
+  assert.deepEqual(messages, ["Usage: daytona-snapshot.ts [--verify]"]);
+});

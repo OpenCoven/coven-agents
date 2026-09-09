@@ -5,8 +5,27 @@ import {
   daytonaClientConfiguration,
   daytonaSnapshotConfiguration,
   provisionDaytonaSnapshot,
+  sanitizeDaytonaBuildLog,
   verifyDaytonaSnapshot,
 } from "../lib/runner/daytona/image";
+
+const MAX_ERROR_DETAIL_CHARACTERS = 180;
+
+function safeErrorDetail(
+  error: unknown,
+  apiKey: string | undefined,
+  fallback: string
+): string {
+  if (!(error instanceof Error)) {
+    return fallback;
+  }
+  const sanitized = (
+    apiKey ? sanitizeDaytonaBuildLog(error.message, apiKey) : error.message
+  )
+    .replace(/\s+/gu, " ")
+    .trim();
+  return sanitized ? sanitized.slice(0, MAX_ERROR_DETAIL_CHARACTERS) : fallback;
+}
 
 export async function runDaytonaSnapshot(
   environment: NodeJS.ProcessEnv = process.env,
@@ -14,14 +33,37 @@ export async function runDaytonaSnapshot(
   args: readonly string[] = process.argv.slice(2),
   snapshotService?: DaytonaSnapshotService
 ): Promise<number> {
+  if (args.length > 1 || (args.length === 1 && args[0] !== "--verify")) {
+    output.error("Usage: daytona-snapshot.ts [--verify]");
+    return 1;
+  }
+
+  let configuration: ReturnType<typeof daytonaSnapshotConfiguration>;
   try {
-    if (args.length > 1 || (args.length === 1 && args[0] !== "--verify")) {
-      throw new Error("Usage: daytona-snapshot.ts [--verify]");
-    }
-    const configuration = daytonaSnapshotConfiguration(environment);
-    const service =
+    configuration = daytonaSnapshotConfiguration(environment);
+  } catch (error) {
+    output.error(
+      `Daytona snapshot configuration is invalid: ${safeErrorDetail(
+        error,
+        environment.DAYTONA_API_KEY,
+        "Review the required Daytona environment variables."
+      )}`
+    );
+    return 1;
+  }
+
+  let service: DaytonaSnapshotService;
+  try {
+    service =
       snapshotService ??
       new Daytona(daytonaClientConfiguration(configuration)).snapshot;
+  } catch {
+    output.error("Daytona client initialization failed.");
+    return 1;
+  }
+
+  const operation = args[0] === "--verify" ? "verification" : "provisioning";
+  try {
     const snapshot =
       args[0] === "--verify"
         ? await verifyDaytonaSnapshot(configuration, service)
@@ -32,9 +74,13 @@ export async function runDaytonaSnapshot(
 
     output.log(`Daytona snapshot "${snapshot.name}" is active.`);
     return 0;
-  } catch {
+  } catch (error) {
     output.error(
-      "Daytona snapshot provisioning or verification failed. Check configuration, resource policy, and provider availability."
+      `Daytona snapshot ${operation} failed: ${safeErrorDetail(
+        error,
+        configuration.apiKey,
+        "Check resource policy and provider availability."
+      )}`
     );
     return 1;
   }
