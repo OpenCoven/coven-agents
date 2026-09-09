@@ -541,7 +541,7 @@ test("the cutover attestation separates repository and production evidence", () 
   const attestation = readFileSync(cutoverAttestationUrl, "utf8");
 
   for (const heading of [
-    "# Daytona Cutover Attestation and Runbook",
+    "# Daytona cutover attestation and runbook",
     "## Verified repository evidence",
     "## Production cutover and retirement evidence",
     "## Production evidence and remaining release exercises",
