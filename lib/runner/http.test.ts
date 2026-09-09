@@ -183,6 +183,11 @@ function service(overrides: Partial<RunnerService> = {}): RunnerService {
       exitCode: 0,
       ok: true,
       output: "coven-agents",
+      snapshot: {
+        name: "coven-agents-copilot-2",
+        resources: { cpu: 2, disk: 10, memory: 4 },
+        target: "us",
+      },
     }),
     dispatchClaim: async (claimed) => ({
       kind: "started",
@@ -449,6 +454,11 @@ function orderedOperatorHandlers(
         exitCode: 0,
         ok: true,
         output: "coven-agents",
+        snapshot: {
+          name: "coven-agents-copilot-2",
+          resources: { cpu: 2, disk: 10, memory: 4 },
+          target: "us",
+        },
       });
     },
     inventoryResources: () => {
@@ -2108,6 +2118,11 @@ test("diagnostics and reconciliation use only their operator service and safe ou
     exitCode: 0,
     ok: true,
     output: "coven-agents",
+    snapshot: {
+      name: "coven-agents-copilot-2",
+      resources: { cpu: 2, disk: 10, memory: 4 },
+      target: "us",
+    },
   });
   assert.equal(reconcile.status, 200);
   assert.deepEqual(await reconcile.json(), counts());

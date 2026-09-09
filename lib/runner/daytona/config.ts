@@ -3,6 +3,7 @@ import {
   DAYTONA_SANDBOX_RESOURCE_POLICY_CAPS,
   DAYTONA_SANDBOX_RESOURCE_POLICY_DEFAULTS,
 } from "./resource-policy";
+import { isDaytonaVersionedSnapshotName } from "./snapshot-name";
 
 export {
   DAYTONA_PROVIDER_RESOURCE_MAXIMA,
@@ -22,8 +23,6 @@ export const DAYTONA_SANDBOX_RESOURCE_POLICY_ENVIRONMENT_KEYS = [
   "DAYTONA_SANDBOX_DISK_GIB",
   "DAYTONA_SANDBOX_MEMORY_GIB",
 ] as const;
-
-const VERSIONED_SNAPSHOT_NAME = /^coven-agents-copilot-\d+$/u;
 
 export type DaytonaSnapshotConfiguration = Readonly<{
   apiKey: string;
@@ -114,7 +113,7 @@ export function daytonaSnapshotConfiguration(
   if (target !== "eu" && target !== "us") {
     throw new Error('DAYTONA_TARGET must be "us" or "eu".');
   }
-  if (!VERSIONED_SNAPSHOT_NAME.test(snapshotName)) {
+  if (!isDaytonaVersionedSnapshotName(snapshotName)) {
     throw new Error(
       "DAYTONA_SNAPSHOT must be a versioned coven-agents-copilot-N name."
     );

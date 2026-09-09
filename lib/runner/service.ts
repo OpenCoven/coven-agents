@@ -73,6 +73,15 @@ export type RunnerDiagnosticResult = Readonly<{
   exitCode: number;
   ok: boolean;
   output: string;
+  snapshot: Readonly<{
+    name: string;
+    resources: Readonly<{
+      cpu: number;
+      disk: number;
+      memory: number;
+    }>;
+    target: "eu" | "us";
+  }>;
 }>;
 
 export {

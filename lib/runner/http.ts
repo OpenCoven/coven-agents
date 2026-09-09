@@ -38,6 +38,10 @@ import type {
   RunnerSecretAuthorization,
   RunnerSubscriberAuthorization,
 } from "./auth";
+import {
+  DAYTONA_MAX_SNAPSHOT_NAME_LENGTH,
+  isDaytonaVersionedSnapshotName,
+} from "./daytona/snapshot-name";
 import { RunnerServiceError } from "./errors";
 import type {
   RunnerDiagnosticResult,
@@ -62,6 +66,22 @@ const diagnosticResponseSchema = z
     exitCode: z.number().int().min(0).max(255),
     ok: z.boolean(),
     output: z.string().max(1024),
+    snapshot: z
+      .object({
+        name: z
+          .string()
+          .max(DAYTONA_MAX_SNAPSHOT_NAME_LENGTH)
+          .refine(isDaytonaVersionedSnapshotName),
+        resources: z
+          .object({
+            cpu: z.number().int().positive(),
+            disk: z.number().int().positive(),
+            memory: z.number().int().positive(),
+          })
+          .strict(),
+        target: z.enum(["eu", "us"]),
+      })
+      .strict(),
   })
   .strict();
 const resourceInventoryResponseSchema = z

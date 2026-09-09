@@ -8,6 +8,7 @@ import {
   DaytonaTimeoutError,
 } from "@daytona/sdk";
 import { daytonaClient } from "./daytona/client";
+import { verifyDaytonaSnapshot } from "./daytona/image";
 import {
   type DaytonaSandboxConfiguration,
   daytonaSandboxConfiguration,
@@ -19,6 +20,7 @@ const DIAGNOSTIC_DEADLINE_MILLISECONDS = 240_000;
 const DIAGNOSTIC_CREATE_TIMEOUT_MILLISECONDS = 60_000;
 const DIAGNOSTIC_DELETE_TIMEOUT_MILLISECONDS = 60_000;
 const DIAGNOSTIC_EXECUTION_TIMEOUT_MILLISECONDS = 30_000;
+const DIAGNOSTIC_SNAPSHOT_TIMEOUT_MILLISECONDS = 60_000;
 
 export type RunnerDiagnosticSandbox = Readonly<{
   delete: (timeoutSeconds: number) => Promise<void>;
@@ -55,7 +57,7 @@ export type RunnerDiagnosticFailure = Readonly<{
     | "timeout"
     | "unknown";
   providerCode?: string;
-  stage: "configuration" | "create" | "delete" | "execute";
+  stage: "configuration" | "create" | "delete" | "execute" | "snapshot";
   statusCode?: number;
 }>;
 
@@ -76,11 +78,23 @@ type DaytonaDiagnosticClient = Readonly<{
     parameters: CreateSandboxFromSnapshotParams,
     options?: Readonly<{ timeout?: number }>
   ) => Promise<DaytonaDiagnosticSdkSandbox>;
+  snapshot: Readonly<{
+    get: (name: string) => Promise<
+      Readonly<{
+        cpu?: number;
+        disk?: number;
+        mem?: number;
+        memory?: number;
+        name: string;
+        state: string;
+      }>
+    >;
+  }>;
 }>;
 
 export type DaytonaDiagnosticDependencies = Readonly<{
   client?: () => DaytonaDiagnosticClient;
-  configuration?: () => Pick<DaytonaSandboxConfiguration, "snapshotName">;
+  configuration?: () => DaytonaSandboxConfiguration;
   deadline?: DiagnosticDeadlineDependencies;
   reportFailure?: (failure: RunnerDiagnosticFailure) => void;
 }>;
@@ -271,12 +285,12 @@ function safeDiagnosticExitCode(value: number): number {
   return Number.isSafeInteger(value) && value >= 0 && value <= 255 ? value : 1;
 }
 
-export async function runEphemeralDiagnostic(
-  dependencies: EphemeralDiagnosticDependencies
-): Promise<RunnerDiagnosticResult> {
-  const deadline = new DiagnosticDeadline(dependencies.deadline);
+async function runEphemeralDiagnosticWithDeadline(
+  dependencies: EphemeralDiagnosticDependencies,
+  deadline: DiagnosticDeadline
+): Promise<Omit<RunnerDiagnosticResult, "snapshot">> {
   let sandbox: RunnerDiagnosticSandbox | undefined;
-  let result: RunnerDiagnosticResult | undefined;
+  let result: Omit<RunnerDiagnosticResult, "snapshot"> | undefined;
   let stage: RunnerDiagnosticFailure["stage"] = "create";
 
   try {
@@ -327,11 +341,20 @@ export async function runEphemeralDiagnostic(
   return result;
 }
 
+export function runEphemeralDiagnostic(
+  dependencies: EphemeralDiagnosticDependencies
+): Promise<Omit<RunnerDiagnosticResult, "snapshot">> {
+  return runEphemeralDiagnosticWithDeadline(
+    dependencies,
+    new DiagnosticDeadline(dependencies.deadline)
+  );
+}
+
 export async function diagnoseDaytonaSandbox(
   name: string,
   dependencies: DaytonaDiagnosticDependencies = {}
 ): Promise<RunnerDiagnosticResult> {
-  let configuration: Pick<DaytonaSandboxConfiguration, "snapshotName">;
+  let configuration: DaytonaSandboxConfiguration;
   let client: DaytonaDiagnosticClient;
   try {
     configuration =
@@ -344,36 +367,65 @@ export async function diagnoseDaytonaSandbox(
       "Daytona diagnostic is unavailable."
     );
   }
-  return await runEphemeralDiagnostic({
-    create: async (timeoutSeconds) => {
-      const sandbox = await client.create(
+  const deadline = new DiagnosticDeadline(dependencies.deadline);
+  try {
+    await deadline.run(DIAGNOSTIC_SNAPSHOT_TIMEOUT_MILLISECONDS, () =>
+      verifyDaytonaSnapshot(
         {
-          ephemeral: true,
-          name,
-          public: false,
-          snapshot: configuration.snapshotName,
-          ttlMinutes: 5,
+          resources: configuration.resources,
+          snapshotName: configuration.snapshotName,
         },
-        { timeout: timeoutSeconds }
-      );
-      return {
-        delete: (deleteTimeoutSeconds) =>
-          sandbox.delete(deleteTimeoutSeconds, true),
-        execute: async (executeTimeoutSeconds) => {
-          const command = await sandbox.process.executeCommand(
-            "printf coven-agents",
-            undefined,
-            undefined,
-            executeTimeoutSeconds
-          );
-          return {
-            exitCode: command.exitCode,
-            result: command.result ?? null,
-          };
-        },
-      };
+        client.snapshot
+      )
+    );
+  } catch (error) {
+    dependencies.reportFailure?.(diagnosticFailure(error, "snapshot"));
+    throw retryableServiceError(
+      "diagnostic_unavailable",
+      "Daytona diagnostic is unavailable."
+    );
+  }
+  const result = await runEphemeralDiagnosticWithDeadline(
+    {
+      create: async (timeoutSeconds) => {
+        const sandbox = await client.create(
+          {
+            ephemeral: true,
+            name,
+            public: false,
+            snapshot: configuration.snapshotName,
+            ttlMinutes: 5,
+          },
+          { timeout: timeoutSeconds }
+        );
+        return {
+          delete: (deleteTimeoutSeconds) =>
+            sandbox.delete(deleteTimeoutSeconds, true),
+          execute: async (executeTimeoutSeconds) => {
+            const command = await sandbox.process.executeCommand(
+              "printf coven-agents",
+              undefined,
+              undefined,
+              executeTimeoutSeconds
+            );
+            return {
+              exitCode: command.exitCode,
+              result: command.result ?? null,
+            };
+          },
+        };
+      },
+      deadline: dependencies.deadline,
+      reportFailure: dependencies.reportFailure,
     },
-    deadline: dependencies.deadline,
-    reportFailure: dependencies.reportFailure,
-  });
+    deadline
+  );
+  return {
+    ...result,
+    snapshot: {
+      name: configuration.snapshotName,
+      resources: configuration.resources,
+      target: configuration.target,
+    },
+  };
 }
