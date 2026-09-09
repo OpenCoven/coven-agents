@@ -396,12 +396,29 @@ test("Daytona diagnostics use the exact precomputed name and bounded operations"
             return Promise.resolve();
           },
           process: {
+            createSession: (sessionId: string) => {
+              calls.push(`create-session:${sessionId}`);
+              return Promise.resolve();
+            },
+            deleteSession: (sessionId: string) => {
+              calls.push(`delete-session:${sessionId}`);
+              return Promise.resolve();
+            },
             executeCommand: (...args: unknown[]) => {
               calls.push("execute");
-              executeArguments = args;
+              if (args[0] === "printf coven-agents") {
+                executeArguments = args;
+              }
               return Promise.resolve({
+                exitCode: args[0] === "printf coven-agents" ? 0 : 42,
+                result: args[0] === "printf coven-agents" ? "coven-agents" : "",
+              });
+            },
+            executeSessionCommand: (sessionId: string) => {
+              calls.push(`session-command:${sessionId}`);
+              return Promise.resolve({
+                cmdId: "containment-command",
                 exitCode: 0,
-                result: "coven-agents",
               });
             },
           },
@@ -424,6 +441,11 @@ test("Daytona diagnostics use the exact precomputed name and bounded operations"
   });
 
   assert.deepEqual(result, {
+    containment: {
+      credentialRemoved: true,
+      detachedDescendantObserved: true,
+      reusePolicy: "sandbox_reset_required",
+    },
     exitCode: 0,
     ok: true,
     output: "coven-agents",
@@ -433,7 +455,11 @@ test("Daytona diagnostics use the exact precomputed name and bounded operations"
       target: "us",
     },
   });
-  assert.deepEqual(calls, ["snapshot", "create", "execute", "delete"]);
+  assert.deepEqual(calls.slice(0, 3), ["snapshot", "create", "execute"]);
+  assert.ok(calls[3]?.startsWith("create-session:coven-probe-"));
+  assert.ok(calls[4]?.startsWith("session-command:coven-probe-"));
+  assert.ok(calls[5]?.startsWith("delete-session:coven-probe-"));
+  assert.deepEqual(calls.slice(6), ["execute", "delete"]);
   assert.deepEqual(createParameters, {
     ephemeral: true,
     name: "coven-diagnostic-precomputed",
@@ -458,6 +484,102 @@ test("Daytona diagnostics have no provider-internal random name fallback", () =>
   );
 
   assert.doesNotMatch(source, /randomUUID|createName/u);
+});
+
+test("Daytona diagnostics prove detached-child observation and credential cleanup", async () => {
+  const calls: string[] = [];
+
+  const result = await diagnoseDaytonaSandbox("coven-diagnostic-containment", {
+    client: () => ({
+      ...diagnosticSnapshotClient(),
+      create: () =>
+        Promise.resolve({
+          delete: () => Promise.resolve(),
+          process: {
+            createSession: (sessionId: string) => {
+              calls.push(`create-session:${sessionId}`);
+              return Promise.resolve();
+            },
+            deleteSession: (sessionId: string) => {
+              calls.push(`delete-session:${sessionId}`);
+              return Promise.resolve();
+            },
+            executeCommand: (command: string) => {
+              calls.push(`command:${command}`);
+              return Promise.resolve(
+                command === "printf coven-agents"
+                  ? { exitCode: 0, result: "coven-agents" }
+                  : { exitCode: 42, result: "" }
+              );
+            },
+            executeSessionCommand: (
+              sessionId: string,
+              request: Readonly<{
+                command: string;
+                runAsync: boolean;
+                suppressInputEcho: true;
+              }>
+            ) => {
+              calls.push(`session-command:${sessionId}:${request.command}`);
+              return Promise.resolve({
+                cmdId: "containment-command",
+                exitCode: 0,
+              });
+            },
+          },
+        }),
+    }),
+    configuration: () => DIAGNOSTIC_CONFIGURATION,
+  });
+
+  assert.deepEqual(result.containment, {
+    credentialRemoved: true,
+    detachedDescendantObserved: true,
+    reusePolicy: "sandbox_reset_required",
+  });
+  assert.ok(calls.some((call) => call.startsWith("create-session:")));
+  assert.ok(calls.some((call) => call.startsWith("delete-session:")));
+  assert.ok(calls.some((call) => call.startsWith("session-command:")));
+  assert.ok(calls.some((call) => call.includes("setsid sh -c")));
+  assert.ok(calls.some((call) => call.includes("/ready")));
+});
+
+test("Daytona diagnostics reject an unconfirmed detached-child launch", async () => {
+  let deleted = false;
+
+  await assert.rejects(
+    diagnoseDaytonaSandbox("coven-diagnostic-unconfirmed-child", {
+      client: () => ({
+        ...diagnosticSnapshotClient(),
+        create: () =>
+          Promise.resolve({
+            delete: () => {
+              deleted = true;
+              return Promise.resolve();
+            },
+            process: {
+              createSession: () => Promise.resolve(),
+              deleteSession: () => Promise.resolve(),
+              executeCommand: (command: string) =>
+                Promise.resolve(
+                  command === "printf coven-agents"
+                    ? { exitCode: 0, result: "coven-agents" }
+                    : { exitCode: 0, result: "" }
+                ),
+              executeSessionCommand: () =>
+                Promise.resolve({
+                  cmdId: "containment-command",
+                  exitCode: 41,
+                }),
+            },
+          }),
+      }),
+      configuration: () => DIAGNOSTIC_CONFIGURATION,
+    }),
+    RunnerServiceError
+  );
+
+  assert.equal(deleted, true);
 });
 
 test("Daytona diagnostics bound create when the adapter ignores its timeout", async () => {
@@ -527,8 +649,12 @@ test("Daytona diagnostics share one deadline across snapshot lookup and create",
         return Promise.resolve({
           delete: () => Promise.resolve(),
           process: {
+            createSession: () => Promise.resolve(),
+            deleteSession: () => Promise.resolve(),
             executeCommand: () =>
               Promise.resolve({ exitCode: 0, result: "coven-agents" }),
+            executeSessionCommand: () =>
+              Promise.resolve({ cmdId: "containment-command", exitCode: 0 }),
           },
         });
       },

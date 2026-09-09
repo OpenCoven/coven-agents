@@ -70,6 +70,11 @@ export type RunnerWarmSandboxResult = RunnerResourcePrewarmResult;
 export type RunnerPrewarmOptions = RunnerResourcePrewarmOptions;
 
 export type RunnerDiagnosticResult = Readonly<{
+  containment: Readonly<{
+    credentialRemoved: true;
+    detachedDescendantObserved: boolean;
+    reusePolicy: "sandbox_reset_required";
+  }>;
   exitCode: number;
   ok: boolean;
   output: string;
