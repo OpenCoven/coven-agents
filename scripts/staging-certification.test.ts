@@ -144,7 +144,16 @@ function successfulHandlers(): FetchHandler[] {
       headers: { location: "/login?beta=1" },
       status: 307,
     }),
-    json({ exitCode: 0, ok: true, output: "coven-agents" }),
+    json({
+      exitCode: 0,
+      ok: true,
+      output: "coven-agents",
+      snapshot: {
+        name: "coven-agents-copilot-2",
+        resources: { cpu: 2, disk: 10, memory: 4 },
+        target: "us",
+      },
+    }),
     json({
       applied: 0,
       conflicts: 0,
@@ -236,6 +245,11 @@ test("collects bounded staging evidence in deterministic credential-isolated ord
   assert.equal(receipt.capturedAt, fixedNow.toISOString());
   assert.equal(receipt.checks.closedBetaRefusal.outcome, "refused");
   assert.equal(receipt.checks.sandboxDiagnostic.outcome, "passed");
+  assert.deepEqual(receipt.checks.sandboxDiagnostic.snapshot, {
+    name: "coven-agents-copilot-2",
+    resources: { cpu: 2, disk: 10, memory: 4 },
+    target: "us",
+  });
   assert.equal(receipt.checks.resourceInventory.before.ambiguous, 4);
   assert.equal(receipt.checks.resourceInventory.after.ambiguous, 4);
   assert.deepEqual(
@@ -318,6 +332,35 @@ test("does not certify a diagnostic when JSON has a failure status", async () =>
   assert.equal(receipt.checks.sandboxDiagnostic.outcome, "unexpected_response");
   assert.equal(receipt.checks.sandboxDiagnostic.status, 503);
   assert.equal(receipt.evidenceFlags.diagnosticLifecycleCertified, false);
+});
+
+test("does not certify successful HTTP diagnostics with invalid receipts", async () => {
+  const { collectStagingCertification, parseStagingCertificationArguments } =
+    await subject();
+  await Promise.all(
+    [200, 202].map(async (status) => {
+      const handlers = successfulHandlers();
+      handlers[2] = json(
+        { exitCode: 0, ok: true, output: "coven-agents" },
+        status
+      );
+
+      const receipt = await collectStagingCertification(
+        parseStagingCertificationArguments(options()),
+        environment,
+        {
+          fetch: queuedFetch(handlers),
+          now: () => fixedNow,
+        }
+      );
+
+      assert.equal(
+        receipt.checks.sandboxDiagnostic.outcome,
+        "unexpected_response"
+      );
+      assert.equal(receipt.evidenceFlags.diagnosticLifecycleCertified, false);
+    })
+  );
 });
 
 test("categorizes malformed, oversized, and timed-out responses without raw output", async () => {

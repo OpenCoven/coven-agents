@@ -107,6 +107,11 @@ function service(overrides: Partial<RunnerService> = {}): RunnerService {
       exitCode: 0,
       ok: true,
       output: "coven-agents",
+      snapshot: {
+        name: "coven-agents-copilot-2",
+        resources: { cpu: 2, disk: 10, memory: 4 },
+        target: "us",
+      },
     }),
     dispatchClaim: async (claimed) => ({
       kind: "started",
@@ -607,6 +612,11 @@ async function executeFixture(): Promise<void> {
     exitCode: 0,
     ok: true,
     output: "coven-agents",
+    snapshot: {
+      name: "coven-agents-copilot-2",
+      resources: { cpu: 2, disk: 10, memory: 4 },
+      target: "us",
+    },
   });
   assert.equal(state.diagnosticAbuseCalls, 1);
   assert.equal(state.diagnosticAuthorizationCalls, 1);

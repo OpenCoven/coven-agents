@@ -384,7 +384,10 @@ function snapshotState(state: string): string {
 }
 
 export async function verifyDaytonaSnapshot(
-  configuration: DaytonaSnapshotConfiguration,
+  configuration: Pick<
+    DaytonaSnapshotConfiguration,
+    "resources" | "snapshotName"
+  >,
   snapshotService: Pick<DaytonaSnapshotService, "get">
 ): Promise<DaytonaSnapshot> {
   let snapshot: DaytonaSnapshot;

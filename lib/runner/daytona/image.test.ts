@@ -142,6 +142,18 @@ test("validates Daytona snapshot configuration and passes API URL, key, and targ
       ),
     /DAYTONA_SNAPSHOT must be a versioned coven-agents-copilot-N name\./u
   );
+  assert.throws(
+    () =>
+      daytonaSnapshotConfiguration(
+        environment({
+          DAYTONA_API_KEY: API_KEY,
+          DAYTONA_API_URL: configuration.apiUrl,
+          DAYTONA_SNAPSHOT: `coven-agents-copilot-${"1".repeat(65)}`,
+          DAYTONA_TARGET: "us",
+        })
+      ),
+    /DAYTONA_SNAPSHOT must be a versioned coven-agents-copilot-N name\./u
+  );
 
   const configured = daytonaSnapshotConfiguration(
     environment({

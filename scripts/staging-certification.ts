@@ -5,6 +5,10 @@ import { link, open, rm, stat, unlink } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
+import {
+  DAYTONA_MAX_SNAPSHOT_NAME_LENGTH,
+  isDaytonaVersionedSnapshotName,
+} from "../lib/runner/daytona/snapshot-name";
 import { looksLikeRealSecret, scanText } from "./secret-scan";
 
 export const MAX_STAGING_CERTIFICATION_RESPONSE_BYTES = 65_536;
@@ -127,13 +131,45 @@ const closedBetaRefusalSchema = checkResponseSchema
     location: z.literal("/login?beta=1").optional(),
   })
   .strict();
+const diagnosticSnapshotSchema = z
+  .object({
+    name: z
+      .string()
+      .max(DAYTONA_MAX_SNAPSHOT_NAME_LENGTH)
+      .refine(isDaytonaVersionedSnapshotName),
+    resources: z
+      .object({
+        cpu: z.number().int().positive(),
+        disk: z.number().int().positive(),
+        memory: z.number().int().positive(),
+      })
+      .strict(),
+    target: z.enum(["eu", "us"]),
+  })
+  .strict();
 const diagnosticCheckSchema = checkResponseSchema
   .extend({
     exitCode: z.literal(0).optional(),
     ok: z.literal(true).optional(),
     output: z.literal("coven-agents").optional(),
+    snapshot: diagnosticSnapshotSchema.optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    if (
+      value.outcome === "passed" &&
+      (value.status !== 200 ||
+        value.exitCode !== 0 ||
+        value.ok !== true ||
+        value.output !== "coven-agents" ||
+        value.snapshot === undefined)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "A passed diagnostic must contain the exact receipt.",
+      });
+    }
+  });
 const stripeCheckSchema = checkResponseSchema
   .extend({
     execution: z.literal("executed").optional(),
@@ -567,6 +603,7 @@ const diagnosticResponseSchema = z
     exitCode: z.literal(0),
     ok: z.literal(true),
     output: z.literal("coven-agents"),
+    snapshot: diagnosticSnapshotSchema,
   })
   .strict();
 const stripeResponseSchema = z
@@ -614,9 +651,15 @@ function expectedCheck<T extends z.infer<typeof checkResponseSchema>>(
 ): T {
   const check = checkResponse(response, method, route);
   const body = parseResponse(response, schema);
-  return body && response.status === 200
-    ? enrich(body, { ...check, outcome: "passed" })
-    : (check as T);
+  if (body && response.status === 200) {
+    return enrich(body, { ...check, outcome: "passed" });
+  }
+  return {
+    ...check,
+    ...(response.outcome === "passed"
+      ? { outcome: "unexpected_response" as const }
+      : {}),
+  } as T;
 }
 
 function credentialProbe(
@@ -784,6 +827,7 @@ export async function collectStagingCertification(
         exitCode: value.exitCode,
         ok: value.ok,
         output: value.output,
+        snapshot: value.snapshot,
       };
     }
   );
@@ -888,7 +932,9 @@ export async function collectStagingCertification(
     containsCredentialMaterial: false,
     evidenceFlags: {
       approvalsCompleted: false,
-      diagnosticLifecycleCertified: diagnosticCheck.outcome === "passed",
+      diagnosticLifecycleCertified:
+        diagnosticCheck.outcome === "passed" &&
+        diagnosticCheck.snapshot !== undefined,
       observationWindowCompleted: false,
       persistentSandboxLifecycleCertified: false,
       resourceDispositionCertified: false,
