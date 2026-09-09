@@ -11,7 +11,7 @@ import {
 
 const MAX_ERROR_DETAIL_CHARACTERS = 180;
 
-function safeErrorDetail(
+export function safeDaytonaSnapshotErrorDetail(
   error: unknown,
   apiKey: string | undefined,
   fallback: string
@@ -43,7 +43,7 @@ export async function runDaytonaSnapshot(
     configuration = daytonaSnapshotConfiguration(environment);
   } catch (error) {
     output.error(
-      `Daytona snapshot configuration is invalid: ${safeErrorDetail(
+      `Daytona snapshot configuration is invalid: ${safeDaytonaSnapshotErrorDetail(
         error,
         environment.DAYTONA_API_KEY,
         "Review the required Daytona environment variables."
@@ -76,7 +76,7 @@ export async function runDaytonaSnapshot(
     return 0;
   } catch (error) {
     output.error(
-      `Daytona snapshot ${operation} failed: ${safeErrorDetail(
+      `Daytona snapshot ${operation} failed: ${safeDaytonaSnapshotErrorDetail(
         error,
         configuration.apiKey,
         "Check resource policy and provider availability."
