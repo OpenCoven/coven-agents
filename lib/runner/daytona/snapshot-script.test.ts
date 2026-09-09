@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { runDaytonaSnapshot } from "../../../scripts/daytona-snapshot";
+import {
+  runDaytonaSnapshot,
+  safeDaytonaSnapshotErrorDetail,
+} from "../../../scripts/daytona-snapshot";
 
 test("snapshot CLI verify is read-only and checks the existing profile", async () => {
   await Promise.all(
@@ -64,4 +67,83 @@ test("snapshot CLI errors never echo provider credentials or unbounded input", a
   assert.equal(code, 1);
   assert.ok(messages.every((message) => message.length < 256));
   assert.equal(messages.join("").includes("test-api-key"), false);
+});
+
+test("snapshot CLI error details redact the API key and bound provider output", () => {
+  const detail = safeDaytonaSnapshotErrorDetail(
+    new Error(`prefix test-api-key ${"x".repeat(100_000)}`),
+    "test-api-key",
+    "fallback"
+  );
+
+  assert.equal(detail.includes("test-api-key"), false);
+  assert.equal(detail.includes("[REDACTED]"), true);
+  assert.ok(detail.length <= 180);
+});
+
+test("snapshot CLI identifies invalid configuration without exposing values", async () => {
+  const messages: string[] = [];
+  const code = await runDaytonaSnapshot(
+    {
+      DAYTONA_SNAPSHOT: "coven-agents-copilot-2",
+      NODE_ENV: "test",
+    },
+    {
+      error: (message) => messages.push(message),
+      log: (message) => messages.push(message),
+    },
+    ["--verify"]
+  );
+
+  assert.equal(code, 1);
+  assert.deepEqual(messages, [
+    "Daytona snapshot configuration is invalid: Missing required Daytona environment variable: DAYTONA_API_KEY.",
+  ]);
+});
+
+test("snapshot CLI reports the bounded resource mismatch", async () => {
+  const messages: string[] = [];
+  const code = await runDaytonaSnapshot(
+    {
+      DAYTONA_API_KEY: "test-api-key",
+      DAYTONA_SNAPSHOT: "coven-agents-copilot-2",
+      NODE_ENV: "test",
+    },
+    {
+      error: (message) => messages.push(message),
+      log: (message) => messages.push(message),
+    },
+    ["--verify"],
+    {
+      create: () => Promise.reject(new Error("must not mutate")),
+      get: (name) =>
+        Promise.resolve({
+          cpu: 1,
+          disk: 3,
+          mem: 1,
+          name,
+          state: "active",
+        }),
+    }
+  );
+
+  assert.equal(code, 1);
+  assert.deepEqual(messages, [
+    "Daytona snapshot verification failed: Daytona snapshot does not match the active resource policy (cpu, disk, memory). Build a new immutable generation.",
+  ]);
+});
+
+test("snapshot CLI reports invalid arguments with the supported usage", async () => {
+  const messages: string[] = [];
+  const code = await runDaytonaSnapshot(
+    { NODE_ENV: "test" },
+    {
+      error: (message) => messages.push(message),
+      log: (message) => messages.push(message),
+    },
+    ["--replace"]
+  );
+
+  assert.equal(code, 1);
+  assert.deepEqual(messages, ["Usage: daytona-snapshot.ts [--verify]"]);
 });
