@@ -9,6 +9,7 @@ import {
 import { ChevronsUpDown, PanelLeft, Plus, Search } from "lucide-react";
 import { useRef, useState } from "react";
 import { BrandMark } from "@/components/brand/brand-mark";
+import { FamiliarPortrait } from "@/components/console/familiar-portrait";
 import {
   AccountAvatar,
   StatusDot,
@@ -20,7 +21,8 @@ import {
   type as type_,
   well,
 } from "@/components/console/styles";
-import { formatAge, glyphFor } from "@/lib/console/format";
+import { executionProfileForAgent } from "@/lib/console/agent-profile";
+import { formatAge } from "@/lib/console/format";
 import type { ConsoleRun } from "@/lib/console/types";
 
 /**
@@ -61,6 +63,7 @@ type RailProps = {
   /** The browser's clock, or 0 before it is known. */
   now: number;
   onToggle: () => void;
+  failedRunHistoryAgentIds: ReadonlySet<string>;
   pendingRunHistoryAgentIds: ReadonlySet<string>;
   runs: ConsoleRun[];
   selectedAgentId: string | null;
@@ -89,10 +92,15 @@ function AgentGlyph({
   selected: boolean;
   size?: number;
 }) {
+  const profile = executionProfileForAgent(agent);
   return (
-    <span style={well(selected, size)}>
-      {glyphFor(sanitizeEvidenceText(agent.name))}
-    </span>
+    <FamiliarPortrait
+      fallbackLabel={sanitizeEvidenceText(agent.name)}
+      familiarId={agent.familiarId}
+      profileId={profile.id}
+      selected={selected}
+      size={size}
+    />
   );
 }
 
@@ -471,6 +479,9 @@ export function AgentRail(props: RailProps) {
             ...section.agents.map((agent) => {
               const isOpen = agent.id === props.selectedAgentId;
               const agentRuns = runsByAgent.get(agent.id) ?? [];
+              const historyFailed = props.failedRunHistoryAgentIds.has(
+                agent.id
+              );
               const historyPending = props.pendingRunHistoryAgentIds.has(
                 agent.id
               );
@@ -550,7 +561,9 @@ export function AgentRail(props: RailProps) {
                         <p>
                           {historyPending
                             ? "Loading recent runs…"
-                            : "No runs in this session."}
+                            : historyFailed
+                              ? "Recent runs could not be loaded."
+                              : "No runs in this session."}
                         </p>
                       ) : (
                         agentRuns.map((run) => (

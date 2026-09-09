@@ -9,6 +9,7 @@ import {
   type DaytonaProcessSandbox,
 } from "./process";
 import {
+  assertReplacementSnapshotReady,
   classifyDaytonaProviderError,
   type DaytonaSandboxConfiguration,
   type DaytonaSandboxService,
@@ -191,6 +192,19 @@ async function recoverSandbox(
         dependencies.sandboxConfiguration
       )
     ) {
+      // This branch replaces a workspace whose provisioning identity no longer
+      // matches, which after a configurationId change is every sandbox in the
+      // fleet. It deletes before recreating, so it needs the same proof the
+      // foreground reprovision needs: guarding only the `resetting` branch
+      // left the identical defect live one branch over.
+      try {
+        await assertReplacementSnapshotReady(
+          dependencies.sandboxConfiguration,
+          { daytona: dependencies.daytona }
+        );
+      } catch (error) {
+        return classifySandboxRecoveryFailure(error);
+      }
       const resetting =
         await dependencies.store.beginDaytonaSandboxResetForRecovery(
           dependencies.operator,
@@ -229,6 +243,24 @@ async function recoverSandbox(
     return persisted.kind === "updated" ? "recovered" : "deferred";
   }
   if (agent.sandboxLifecycle === "resetting") {
+    // A row reaches `resetting` because a reprovision decided to replace the
+    // workspace, but this scanner finishes that decision on a later tick and
+    // in a different process. Re-prove the replacement here rather than trust
+    // the earlier decision: the snapshot can be deleted, fail its build, or
+    // be repointed between the two. Deferring leaves the row stuck and
+    // visible, which is strictly better than deleting a workspace that
+    // nothing can rebuild.
+    try {
+      await assertReplacementSnapshotReady(dependencies.sandboxConfiguration, {
+        daytona: dependencies.daytona,
+      });
+    } catch (error) {
+      // Same reasoning as the identity-mismatch branch: "deferred" cannot be
+      // told apart from "not yet stale", and the batch summary reports
+      // "recovered" whenever any other row succeeds, so a fleet wedged behind
+      // an unbuildable snapshot would look healthy on every tick.
+      return classifySandboxRecoveryFailure(error);
+    }
     let sandbox: Sandbox | null;
     try {
       sandbox = await findSandboxForRecovery(agent, dependencies.daytona);

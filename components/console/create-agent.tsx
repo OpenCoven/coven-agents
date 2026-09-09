@@ -2,7 +2,11 @@
 
 "use client";
 
-import type { CreateAgentInput, Runtime } from "@opencoven/agent-contracts";
+import type {
+  CreateAgentInput,
+  FamiliarId,
+  Runtime,
+} from "@opencoven/agent-contracts";
 import { HARNESS_SPECS } from "@opencoven/harness";
 import {
   ArrowLeft,
@@ -12,17 +16,17 @@ import {
   UsersRound,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { FamiliarPicker } from "@/components/console/familiar-picker";
+import { FamiliarPortrait } from "@/components/console/familiar-portrait";
 import { Btn, Eyebrow } from "@/components/console/primitives";
 import {
   hairline,
   tabular,
   truncate,
   type as type_,
-  well,
 } from "@/components/console/styles";
 import { FORMATIONS, type Formation, TEMPLATES } from "@/lib/agents/formations";
 import { executionProfileForTemplate } from "@/lib/console/agent-profile";
-import { glyphFor } from "@/lib/console/format";
 
 /**
  * Forging an execution profile.
@@ -49,7 +53,7 @@ const PATHS = [
     icon: BriefcaseBusiness,
     id: "role",
     label: "Start from a role",
-    outcome: "1 profile · ~5 seconds",
+    outcome: "1 profile · one action",
   },
   {
     description: "Create a complementary set for a specific kind of work.",
@@ -264,7 +268,6 @@ const inputStyle: React.CSSProperties = {
   borderRadius: "var(--radius-control)",
   color: "var(--text-primary)",
   font: "400 13px/1.4 var(--font-ui)",
-  outline: "none",
   padding: "9px 11px",
   width: "100%",
 };
@@ -284,6 +287,7 @@ export function CreateAgent({
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [instructions, setInstructions] = useState("");
+  const [familiarId, setFamiliarId] = useState<FamiliarId>("auto");
   const [runtime, setRuntime] = useState<Runtime>(
     (RUNNABLE[0]?.id as Runtime) ?? "copilot"
   );
@@ -322,6 +326,7 @@ export function CreateAgent({
     onCreate({
       backend: "cloud",
       description: description.trim(),
+      familiarId,
       instructions: instructions.trim(),
       model: model.trim() || DEFAULT_MODEL,
       name: name.trim(),
@@ -404,9 +409,12 @@ export function CreateAgent({
                       }}
                       type="button"
                     >
-                      <span style={well(false, 26)}>
-                        {glyphFor(template.name)}
-                      </span>
+                      <FamiliarPortrait
+                        fallbackLabel={template.name}
+                        profileId={template.id}
+                        selected={false}
+                        size={32}
+                      />
                       <span
                         style={{
                           display: "grid",
@@ -542,9 +550,12 @@ export function CreateAgent({
                             padding: "6px 11px 6px 7px",
                           }}
                         >
-                          <span style={well(false, 20)}>
-                            {glyphFor(member.name)}
-                          </span>
+                          <FamiliarPortrait
+                            fallbackLabel={member.name}
+                            profileId={member.id}
+                            selected={false}
+                            size={22}
+                          />
                           <span style={type_.label}>{member.name}</span>
                         </span>
                       ))}
@@ -561,11 +572,10 @@ export function CreateAgent({
                   </div>
                 ))}
               </div>
-              <FinePrint label="Proposed: sequenced mode">
-                Sequenced mode would run a crew in order and pass each
-                member&rsquo;s evidence to the next. Nothing in the runner
-                orchestrates handoffs today, so it stays a proposal rather than
-                a switch you can flip.
+              <FinePrint label="Sequenced runs live in Teams">
+                Running members in order and passing each one&rsquo;s evidence
+                to the next is what a team does. Build a team to sequence these
+                profiles; a crew here starts them together.
               </FinePrint>
             </>
           ) : null}
@@ -658,6 +668,29 @@ export function CreateAgent({
                     value={workspace}
                   />
                 </Field>
+                <fieldset
+                  style={{ border: 0, margin: 0, minWidth: 0, padding: 0 }}
+                >
+                  <legend style={{ marginBottom: 7 }}>
+                    <Eyebrow>Familiar</Eyebrow>
+                  </legend>
+                  <FamiliarPicker
+                    automaticProfileId="custom"
+                    disabled={busy}
+                    onChange={setFamiliarId}
+                    value={familiarId}
+                  />
+                  <p
+                    style={{
+                      color: "var(--text-muted)",
+                      font: "400 11px/1.5 var(--font-ui)",
+                      margin: "7px 0 0",
+                    }}
+                  >
+                    Choose a curated identity now, or keep it matched to the
+                    profile.
+                  </p>
+                </fieldset>
                 <Field
                   hint="What the agent must and must not do. This is the contract."
                   label="Operating contract"

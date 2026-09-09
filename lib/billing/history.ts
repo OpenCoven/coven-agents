@@ -1,4 +1,4 @@
-import { asc, count, eq, sql } from "drizzle-orm";
+import { and, asc, count, eq, isNotNull, sql } from "drizzle-orm";
 import { usageWhere } from "@/lib/billing/usage";
 import type { databaseFor } from "@/lib/db/access";
 import { runReservation, runUsage } from "@/lib/db/schema";
@@ -6,6 +6,23 @@ import { runReservation, runUsage } from "@/lib/db/schema";
 type Database = ReturnType<typeof databaseFor>;
 
 export type DayCount = { day: string; minutes: number; runs: number };
+
+/**
+ * How long this tenant's runs actually took.
+ *
+ * Only settled reservations carry a duration: settlement is the moment
+ * terminal cleanup measures a run's start against its finish. A run whose
+ * timestamps could not be measured keeps its full reservation and is
+ * deliberately absent here rather than being counted as its reserved length,
+ * which would inflate every figure on the panel. `settledRuns` is therefore
+ * the honest denominator and belongs on screen next to the numbers.
+ */
+export type RunDurationSummary = {
+  longestSeconds: number | null;
+  medianSeconds: number | null;
+  settledRuns: number;
+  unsettledRuns: number;
+};
 
 const MS_PER_DAY = 86_400_000;
 
@@ -114,4 +131,58 @@ export function windowStart(now: Date, days: number): Date {
       0
     )
   );
+}
+
+/**
+ * Median and longest run length over the window, plus how many runs each
+ * figure is based on.
+ *
+ * The median rather than the mean: one recovery run that sat at the fifteen
+ * minute limit would drag an average away from what a typical run costs, and
+ * the number people want is "what does a run usually take".
+ *
+ * `percentile_cont` interpolates, so the median of an even count is a real
+ * midpoint rather than an arbitrary neighbour.
+ */
+export async function runDurations(
+  db: Database,
+  tenant: string,
+  since: Date
+): Promise<RunDurationSummary> {
+  const [row] = await db
+    .select({
+      longestSeconds: sql<
+        number | null
+      >`max(${runReservation.durationSeconds})`.mapWith(Number),
+      medianSeconds: sql<
+        number | null
+      >`percentile_cont(0.5) within group (order by ${runReservation.durationSeconds})`,
+      settledRuns: count(runReservation.runId),
+    })
+    .from(runUsage)
+    .innerJoin(
+      runReservation,
+      and(
+        eq(runReservation.runId, runUsage.runId),
+        eq(runReservation.state, "consumed"),
+        isNotNull(runReservation.durationSeconds)
+      )
+    )
+    .where(usageWhere(tenant, since));
+
+  const [total] = await db
+    .select({ runs: count(runUsage.id) })
+    .from(runUsage)
+    .where(usageWhere(tenant, since));
+
+  const settledRuns = Number(row?.settledRuns ?? 0);
+  return {
+    longestSeconds: settledRuns > 0 ? Number(row?.longestSeconds ?? 0) : null,
+    medianSeconds:
+      settledRuns > 0 && row?.medianSeconds !== null
+        ? Math.round(Number(row?.medianSeconds))
+        : null,
+    settledRuns,
+    unsettledRuns: Math.max(0, Number(total?.runs ?? 0) - settledRuns),
+  };
 }

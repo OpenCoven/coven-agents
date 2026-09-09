@@ -109,6 +109,7 @@ export function normalizedAppPermission(
 
 export class GitHubProviderError extends Error {
   readonly code: string;
+  readonly providerStage: GitHubProviderStage | null;
   readonly requestId: string | null;
   readonly retryable: boolean;
   readonly status: number;
@@ -116,6 +117,7 @@ export class GitHubProviderError extends Error {
   constructor(
     code: string,
     options: Readonly<{
+      providerStage?: GitHubProviderStage | null;
       requestId?: string | null;
       retryable: boolean;
       status: number;
@@ -124,6 +126,7 @@ export class GitHubProviderError extends Error {
     super("GitHub provider request failed.");
     this.name = "GitHubProviderError";
     this.code = code;
+    this.providerStage = options.providerStage ?? null;
     this.requestId = options.requestId ?? null;
     this.retryable = options.retryable;
     this.status = options.status;
@@ -138,6 +141,23 @@ export class GitHubProviderError extends Error {
     };
   }
 }
+
+export type GitHubProviderStage =
+  | "access_revocation"
+  | "app_installation_lookup"
+  | "app_repository_lookup"
+  | "authority_comparison"
+  | "exchange"
+  | "exchange_access_token"
+  | "exchange_candidates"
+  | "exchange_expiration"
+  | "exchange_metadata"
+  | "exchange_refresh_token"
+  | "identity_lookup"
+  | "installation_lookup"
+  | "project_lookup"
+  | "refresh_revocation"
+  | "repository_lookup";
 
 export function createGitHubAppJwt(
   input: Readonly<{ appId: string; privateKey: KeyObject }>,

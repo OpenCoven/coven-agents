@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { DaytonaNotFoundError, SnapshotState } from "@daytona/sdk";
 import {
+  DAYTONA_PROVIDER_RESOURCE_MAXIMA,
+  DAYTONA_SANDBOX_RESOURCE_POLICY_CAPS,
+  DAYTONA_SANDBOX_RESOURCE_POLICY_DEFAULTS,
+} from "./config";
+import {
   createDaytonaBuildLogSanitizer,
   createDaytonaCopilotImage,
   createDaytonaSnapshotDefinition,
@@ -21,11 +26,13 @@ import {
   sanitizeDaytonaBuildLog,
   WORKSPACE_DIRECTORY,
 } from "./image";
+import { assertReplacementSnapshotReady } from "./sandbox";
 
 const API_KEY = "daytona-api-key-for-test";
 const configuration: DaytonaSnapshotConfiguration = {
   apiKey: API_KEY,
   apiUrl: "https://app.daytona.io/api",
+  resources: { cpu: 2, disk: 10, memory: 4 },
   snapshotName: DAYTONA_COPILOT_SNAPSHOT_NAME,
   target: "us",
 };
@@ -82,7 +89,10 @@ test("pins the harness versions to the snapshot generation", () => {
     },
     {
       harnesses: ["@github/copilot@1.0.80"],
-      snapshot: "coven-agents-copilot-1",
+      // Generation 2 bakes the resource policy into the snapshot. Generation 1
+      // was built without resources, so it carries Daytona's defaults
+      // (1 vCPU / 1 GiB / 3 GiB) and every sandbox from it drifts below policy.
+      snapshot: "coven-agents-copilot-2",
     }
   );
 });
@@ -474,5 +484,173 @@ test("rejects a created snapshot that cannot be verified as active", async () =>
       snapshot,
     }),
     /is not active after creation \(state: build_failed\)/u
+  );
+});
+
+test("the snapshot is created with the resources the policy asks for", async () => {
+  // Daytona applies its own defaults (1 vCPU / 1 GiB / 3 GiB) to a snapshot
+  // created without resources, and a sandbox created FROM a snapshot cannot
+  // ask for more than the snapshot carries. Omitting this is what left every
+  // production sandbox permanently below policy and reported as drift.
+  const createCalls: Parameters<DaytonaSnapshotService["create"]>[] = [];
+  await provisionDaytonaSnapshot(
+    { ...configuration, resources: { cpu: 2, disk: 10, memory: 4 } },
+    {
+      log: () => undefined,
+      snapshot: {
+        create: (...arguments_) => {
+          createCalls.push(arguments_);
+          return Promise.resolve(activeSnapshot());
+        },
+        get: (() => {
+          let calls = 0;
+          return () => {
+            calls += 1;
+            return calls === 1
+              ? Promise.reject(missingSnapshot())
+              : Promise.resolve(activeSnapshot());
+          };
+        })(),
+      },
+    }
+  );
+
+  assert.deepEqual(createCalls[0]?.[0].resources, {
+    cpu: 2,
+    disk: 10,
+    memory: 4,
+  });
+});
+
+test("no expressible resource policy exceeds Daytona's per-sandbox maxima", () => {
+  // A create above a provider maximum is rejected outright, so a cap that
+  // permits one is a configuration that cannot work. `disk` was 40 against a
+  // documented ceiling of 10.
+  for (const field of ["cpu", "disk", "memory"] as const) {
+    assert.ok(
+      DAYTONA_SANDBOX_RESOURCE_POLICY_CAPS[field] <=
+        DAYTONA_PROVIDER_RESOURCE_MAXIMA[field],
+      `cap for ${field} (${DAYTONA_SANDBOX_RESOURCE_POLICY_CAPS[field]}) exceeds the provider maximum (${DAYTONA_PROVIDER_RESOURCE_MAXIMA[field]})`
+    );
+    assert.ok(
+      DAYTONA_SANDBOX_RESOURCE_POLICY_DEFAULTS[field] <=
+        DAYTONA_PROVIDER_RESOURCE_MAXIMA[field],
+      `default for ${field} exceeds the provider maximum`
+    );
+  }
+});
+
+test("snapshot resources are derived from the environment, not hardcoded", () => {
+  // The pass-through test above proves provisionDaytonaSnapshot forwards what
+  // it is given. It does NOT prove the configuration reads the same policy the
+  // running app will enforce. Hardcoding the resources in
+  // daytonaSnapshotConfiguration passed the entire suite, which would bake a
+  // snapshot that silently disagrees with the runtime — and snapshots are
+  // immutable, so recovering needs another generation bump.
+  const configured = daytonaSnapshotConfiguration({
+    DAYTONA_API_KEY: "test-key",
+    DAYTONA_SANDBOX_CPU_CORES: "3",
+    DAYTONA_SANDBOX_DISK_GIB: "10",
+    DAYTONA_SANDBOX_MEMORY_GIB: "7",
+    DAYTONA_SNAPSHOT: DAYTONA_COPILOT_SNAPSHOT_NAME,
+  } as unknown as NodeJS.ProcessEnv);
+
+  assert.deepEqual(configured.resources, { cpu: 3, disk: 10, memory: 7 });
+});
+
+test("a snapshot created below policy fails the build instead of shipping", async () => {
+  // Snapshots are immutable, so a clamped snapshot cannot be corrected in
+  // place: the runtime guard would refuse the whole fleet permanently and the
+  // only remedy is another generation. This is the moment it is still cheap.
+  await assert.rejects(
+    provisionDaytonaSnapshot(
+      { ...configuration, resources: { cpu: 2, disk: 10, memory: 4 } },
+      {
+        log: () => undefined,
+        snapshot: {
+          create: () =>
+            Promise.resolve({
+              name: configuration.snapshotName,
+              state: SnapshotState.ACTIVE,
+            }),
+          get: (() => {
+            let calls = 0;
+            return () => {
+              calls += 1;
+              return calls === 1
+                ? Promise.reject(missingSnapshot())
+                : Promise.resolve({
+                    cpu: 2,
+                    disk: 10,
+                    mem: 1,
+                    name: configuration.snapshotName,
+                    state: SnapshotState.ACTIVE,
+                  });
+            };
+          })(),
+        },
+      }
+    ),
+    /was created below policy \(memory 1 < 4\)/u,
+    "a clamped snapshot must not be reported as a successful build"
+  );
+});
+
+test("the build-time and runtime checks reject the same snapshot", async () => {
+  // Two structurally parallel checks: one refuses to ship a snapshot, the
+  // other refuses to delete a workspace for it. If they disagree, a snapshot
+  // can pass the build and then permanently refuse the whole fleet. This
+  // drives BOTH real functions rather than restating their logic.
+  const resources = { cpu: 2, disk: 10, memory: 4 };
+  const belowPolicy = {
+    cpu: 2,
+    disk: 10,
+    mem: 1,
+    name: configuration.snapshotName,
+    state: SnapshotState.ACTIVE,
+  };
+
+  await assert.rejects(
+    provisionDaytonaSnapshot(
+      { ...configuration, resources },
+      {
+        log: () => undefined,
+        snapshot: {
+          create: () =>
+            Promise.resolve({
+              name: configuration.snapshotName,
+              state: SnapshotState.ACTIVE,
+            }),
+          get: (() => {
+            let calls = 0;
+            return () => {
+              calls += 1;
+              return calls === 1
+                ? Promise.reject(missingSnapshot())
+                : Promise.resolve(belowPolicy);
+            };
+          })(),
+        },
+      }
+    ),
+    /below policy/u,
+    "the build must refuse it"
+  );
+
+  await assert.rejects(
+    assertReplacementSnapshotReady(
+      {
+        autoArchiveInterval: 10_080,
+        autoDeleteInterval: -1,
+        autoStopInterval: 15,
+        resources,
+        snapshotName: configuration.snapshotName,
+        target: "us",
+        ttlMinutes: 0,
+      },
+      { daytona: { snapshot: { get: () => Promise.resolve(belowPolicy) } } }
+    ),
+    /below policy/u,
+    "the runtime guard must refuse the same snapshot"
   );
 });

@@ -5,19 +5,29 @@ export const DAYTONA_DEFAULT_TARGET = "us";
 export const DAYTONA_DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 export const DAYTONA_MAX_REQUEST_TIMEOUT_MS = 120_000;
 export const DAYTONA_MIN_REQUEST_TIMEOUT_MS = 1000;
+/**
+ * Daytona's documented per-sandbox maxima. A create above any of these is
+ * rejected by the provider, so no policy this repository can express may
+ * exceed them.
+ */
+export const DAYTONA_PROVIDER_RESOURCE_MAXIMA = Object.freeze({
+  cpu: 4,
+  disk: 10,
+  memory: 8,
+});
 export const DAYTONA_SANDBOX_RESOURCE_POLICY_DEFAULTS = Object.freeze({
   autoArchiveInterval: 10_080,
   autoStopInterval: 15,
   cpu: 2,
-  disk: 20,
+  disk: DAYTONA_PROVIDER_RESOURCE_MAXIMA.disk,
   memory: 4,
 });
 export const DAYTONA_SANDBOX_RESOURCE_POLICY_CAPS = Object.freeze({
   autoArchiveInterval: 43_200,
   autoStopInterval: 60,
-  cpu: 4,
-  disk: 40,
-  memory: 8,
+  cpu: DAYTONA_PROVIDER_RESOURCE_MAXIMA.cpu,
+  disk: DAYTONA_PROVIDER_RESOURCE_MAXIMA.disk,
+  memory: DAYTONA_PROVIDER_RESOURCE_MAXIMA.memory,
 });
 export const DAYTONA_SANDBOX_RESOURCE_POLICY_ENVIRONMENT_KEYS = [
   "DAYTONA_AUTO_ARCHIVE_MINUTES",
@@ -32,6 +42,18 @@ const VERSIONED_SNAPSHOT_NAME = /^coven-agents-copilot-\d+$/u;
 export type DaytonaSnapshotConfiguration = Readonly<{
   apiKey: string;
   apiUrl: string;
+  /**
+   * The resources baked into the snapshot. Daytona applies its own defaults
+   * (1 vCPU / 1 GiB / 3 GiB) when a snapshot is created without them, and a
+   * sandbox created from a snapshot cannot ask for more than the snapshot
+   * carries — `CreateSandboxFromSnapshotParams` has no resources field. So
+   * this is the only place sandbox capacity can be set.
+   */
+  resources: Readonly<{
+    cpu: number;
+    disk: number;
+    memory: number;
+  }>;
   snapshotName: string;
   target: "eu" | "us";
 }>;
@@ -112,7 +134,13 @@ export function daytonaSnapshotConfiguration(
     );
   }
 
-  return { apiKey, apiUrl: parsedApiUrl.toString(), snapshotName, target };
+  return {
+    apiKey,
+    apiUrl: parsedApiUrl.toString(),
+    resources: daytonaSandboxResourcePolicy(environment).resources,
+    snapshotName,
+    target,
+  };
 }
 
 /** Shared client/preflight parser for Daytona's bounded request timeout. */

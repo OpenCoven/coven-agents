@@ -8,10 +8,9 @@ import {
 } from "@opencoven/agent-contracts";
 import { Check, ChevronDown, Plus, Search } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { FamiliarPortrait } from "@/components/console/familiar-portrait";
 import { StatusDot } from "@/components/console/primitives";
-import { well } from "@/components/console/styles";
 import { executionProfileForAgent } from "@/lib/console/agent-profile";
-import { glyphFor } from "@/lib/console/format";
 
 type ProfileSelectorProps = {
   agents: AgentDefinition[];
@@ -126,9 +125,13 @@ export function ProfileSelector({
         ref={triggerRef}
         type="button"
       >
-        <span style={well(true, 30)}>
-          {glyphFor(sanitizeEvidenceText(currentAgent.name))}
-        </span>
+        <FamiliarPortrait
+          fallbackLabel={sanitizeEvidenceText(currentAgent.name)}
+          familiarId={currentAgent.familiarId}
+          profileId={currentProfile.id}
+          selected
+          size={30}
+        />
         <span className="oc-profile-selector__current">
           <strong>{sanitizeEvidenceText(currentAgent.name)}</strong>
           <span>
@@ -237,9 +240,13 @@ export function ProfileSelector({
                         type="button"
                       >
                         <span className="oc-profile-selector__glyph">
-                          <span style={well(selected, 34)}>
-                            {glyphFor(sanitizeEvidenceText(agent.name))}
-                          </span>
+                          <FamiliarPortrait
+                            fallbackLabel={sanitizeEvidenceText(agent.name)}
+                            familiarId={agent.familiarId}
+                            profileId={profile.id}
+                            selected={selected}
+                            size={34}
+                          />
                           <StatusDot
                             label={agent.status}
                             size={7}

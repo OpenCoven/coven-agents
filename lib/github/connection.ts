@@ -45,6 +45,7 @@ import {
   type GitHubConnectionAppClient,
   type GitHubInstallation,
   GitHubProviderError,
+  type GitHubProviderStage,
   normalizedAppPermission,
 } from "./app-auth";
 import { clampUserPermission } from "./authority-types";
@@ -85,6 +86,15 @@ const CALLBACK_PARAMETERS = new Set([
   "state",
 ]);
 const OAUTH_CALLBACK_PARAMETERS = new Set(["code", "state"]);
+/**
+ * GitHub returns the issuer identifier on the authorization redirect, per
+ * RFC 9207. It is optional on the wire, and when it is present it must be
+ * checked rather than merely tolerated: identifying the issuer is the whole
+ * point of the parameter, and it is what defends the redirect against a
+ * mix-up attack from a second authorization server.
+ */
+const OAUTH_OPTIONAL_PARAMETERS = new Set(["iss"]);
+const GITHUB_OAUTH_ISSUER = "https://github.com/login/oauth";
 const INSTALL_PARAMETERS = new Set(["returnTo"]);
 const IDEMPOTENCY_RETENTION_FLOOR_MS = 1000;
 const CALLBACK_PROCESSING_LEASE_MS = 10 * 60_000;
@@ -167,6 +177,19 @@ export type GitHubConnectionDependencies = Readonly<{
   idempotencyStore: IdempotencyStore;
   now?: () => Date;
   randomBytes?: (size: number) => Uint8Array;
+  reportFailure?: (failure: GitHubConnectionFailureDiagnostic) => void;
+}>;
+
+export type GitHubConnectionFailureDiagnostic = Readonly<{
+  code: string;
+  providerRequestId: string | null;
+  providerStage: string | null;
+  retryable: boolean;
+  stage:
+    | "connection_persistence"
+    | "installation_authority"
+    | "user_authorization";
+  status: number;
 }>;
 
 export type GitHubConnectionHandlers = Readonly<{
@@ -183,7 +206,10 @@ export type GitHubConnectionAuthorityRefreshResult =
 
 type GitHubErrorCode =
   | "abuse_control_unavailable"
+  | "github_app_credentials_rejected"
+  | "github_callback_expired"
   | "github_callback_invalid"
+  | "github_callback_redirect_mismatch"
   | "github_configuration_invalid"
   | "github_feature_disabled"
   | "github_installation_access_denied"
@@ -215,10 +241,28 @@ const ERROR_DEFINITIONS = {
     retryable: true,
     status: 503,
   },
+  github_app_credentials_rejected: {
+    message:
+      "GitHub rejected this application's credentials. The stored client secret does not match the configured GitHub App.",
+    retryable: false,
+    status: 503,
+  },
+  github_callback_expired: {
+    message:
+      "The GitHub authorization expired before it completed. Start the connection again.",
+    retryable: false,
+    status: 400,
+  },
   github_callback_invalid: {
     message: "GitHub callback validation failed.",
     retryable: false,
     status: 400,
+  },
+  github_callback_redirect_mismatch: {
+    message:
+      "GitHub refused the callback address this application asked it to use. The App's callback URL does not match APP_ORIGIN.",
+    retryable: false,
+    status: 503,
   },
   github_configuration_invalid: {
     message: "GitHub connection configuration is unavailable.",
@@ -1186,6 +1230,7 @@ async function completeUserAuthorization(
         redirectUri: input.callbackUrl,
       });
   } catch (error) {
+    reportFailure(input.dependencies, "user_authorization", error);
     return {
       code: callbackErrorCode(error),
       kind: "error",
@@ -1202,6 +1247,7 @@ async function completeUserAuthorization(
     );
   } catch (error) {
     if (!terminalInstallationError(error)) {
+      reportFailure(input.dependencies, "installation_authority", error);
       return { code: callbackErrorCode(error), kind: "error" };
     }
     try {
@@ -1215,7 +1261,12 @@ async function completeUserAuthorization(
       if (removal.kind === "stale") {
         return { code: "request_in_progress", kind: "error" };
       }
-    } catch {
+    } catch (persistenceError) {
+      reportFailure(
+        input.dependencies,
+        "connection_persistence",
+        persistenceError
+      );
       return { code: "github_provider_unavailable", kind: "error" };
     }
     return { code: "github_installation_unusable", kind: "error" };
@@ -1285,7 +1336,10 @@ async function verifiedInstallationAuthority(
         userAuthority: GitHubUserInstallationAuthority;
       }>
 ): Promise<VerifiedInstallationAuthority> {
-  const installation = await provider.getInstallation(installationId);
+  const installation = await withConnectionProviderStage(
+    "app_installation_lookup",
+    () => provider.getInstallation(installationId)
+  );
   const appContentsPermission = normalizedAppPermission(
     installation.permissions.contents
   );
@@ -1314,7 +1368,10 @@ async function verifiedInstallationAuthority(
       status: 409,
     });
   }
-  const selection = await provider.listInstallationRepositories(installationId);
+  const selection = await withConnectionProviderStage(
+    "app_repository_lookup",
+    () => provider.listInstallationRepositories(installationId)
+  );
   if (
     selection.repositorySelection !== "selected" ||
     selection.repositories.length < 1 ||
@@ -1344,6 +1401,7 @@ async function verifiedInstallationAuthority(
         selected.owner !== userRepository.owner
       ) {
         throw new GitHubProviderError("github_provider_invalid_response", {
+          providerStage: "authority_comparison",
           retryable: false,
           status: 502,
         });
@@ -1597,12 +1655,23 @@ function callbackParameters(request: Request):
     return { installationId, kind: "installation", setupAction, state };
   }
   if (
-    entries.length === OAUTH_CALLBACK_PARAMETERS.size &&
-    entries.every(([name]) => OAUTH_CALLBACK_PARAMETERS.has(name))
+    names.has("code") &&
+    names.has("state") &&
+    entries.every(
+      ([name]) =>
+        OAUTH_CALLBACK_PARAMETERS.has(name) ||
+        OAUTH_OPTIONAL_PARAMETERS.has(name)
+    )
   ) {
     const code = parameters.get("code");
     const state = parameters.get("state");
-    if (!code || !OAUTH_CODE.test(code) || !validCallbackState(state)) {
+    const issuer = parameters.get("iss");
+    if (
+      !code ||
+      !OAUTH_CODE.test(code) ||
+      !validCallbackState(state) ||
+      (issuer !== null && issuer !== GITHUB_OAUTH_ISSUER)
+    ) {
       return null;
     }
     return { code, kind: "oauth", state };
@@ -1908,6 +1977,15 @@ function callbackErrorCode(error: unknown): GitHubErrorCode {
   if (error.code === "github_user_installation_inaccessible") {
     return "github_installation_access_denied";
   }
+  if (error.code === "github_oauth_credentials_rejected") {
+    return "github_app_credentials_rejected";
+  }
+  if (error.code === "github_oauth_code_expired") {
+    return "github_callback_expired";
+  }
+  if (error.code === "github_oauth_redirect_mismatch") {
+    return "github_callback_redirect_mismatch";
+  }
   if (error.code === "github_oauth_exchange_rejected") {
     return "github_callback_invalid";
   }
@@ -1915,6 +1993,98 @@ function callbackErrorCode(error: unknown): GitHubErrorCode {
     return "rate_limited";
   }
   return "github_provider_unavailable";
+}
+
+function reportFailure(
+  dependencies: GitHubConnectionDependencies,
+  stage: GitHubConnectionFailureDiagnostic["stage"],
+  error: unknown
+): void {
+  const reporter = dependencies.reportFailure;
+  if (!reporter) {
+    return;
+  }
+  let diagnostic: GitHubConnectionFailureDiagnostic;
+  if (error instanceof GitHubProviderError) {
+    diagnostic = {
+      code: /^[a-z][a-z0-9_]{0,63}$/u.test(error.code)
+        ? error.code
+        : "github_provider_unexpected",
+      providerRequestId: error.requestId,
+      providerStage:
+        error.providerStage &&
+        [
+          "access_revocation",
+          "app_installation_lookup",
+          "app_repository_lookup",
+          "authority_comparison",
+          "exchange",
+          "exchange_access_token",
+          "exchange_candidates",
+          "exchange_expiration",
+          "exchange_metadata",
+          "exchange_refresh_token",
+          "identity_lookup",
+          "installation_lookup",
+          "project_lookup",
+          "refresh_revocation",
+          "repository_lookup",
+        ].includes(error.providerStage)
+          ? error.providerStage
+          : null,
+      retryable: error.retryable,
+      stage,
+      status:
+        Number.isInteger(error.status) &&
+        error.status >= 400 &&
+        error.status <= 599
+          ? error.status
+          : 500,
+    };
+  } else {
+    diagnostic = {
+      code: "github_provider_unexpected",
+      providerRequestId: null,
+      providerStage: null,
+      retryable: false,
+      stage,
+      status: 500,
+    };
+  }
+  try {
+    reporter(diagnostic);
+  } catch {
+    try {
+      console.error("GitHub connection failure reporter failed.", { stage });
+    } catch {
+      // Observability must never consume or strand the one-time OAuth callback.
+    }
+  }
+}
+
+async function withConnectionProviderStage<T>(
+  providerStage: GitHubProviderStage,
+  operation: () => Promise<T>
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (!(error instanceof GitHubProviderError)) {
+      // biome-ignore lint/style/useErrorCause: provider errors are replaced with bounded non-secret diagnostics
+      throw new GitHubProviderError("github_provider_unavailable", {
+        providerStage,
+        retryable: true,
+        status: 503,
+      });
+    }
+    // biome-ignore lint/style/useErrorCause: provider errors are replaced with bounded non-secret diagnostics
+    throw new GitHubProviderError(error.code, {
+      providerStage: error.providerStage ?? providerStage,
+      requestId: error.requestId,
+      retryable: error.retryable,
+      status: error.status,
+    });
+  }
 }
 
 function errorResponse(

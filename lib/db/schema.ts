@@ -77,6 +77,23 @@ export const user = pgTable(
   {
     authVersion: integer("authVersion").notNull().default(0),
     billingPeriodStart: timestamp("billingPeriodStart"),
+    /**
+     * When this user's open-beta campaign minutes stop being spendable, and
+     * when they were granted. Both null means never enrolled.
+     *
+     * Deliberately not `subscribedUntil`. A campaign participant is entitled
+     * but has paid nothing, and reusing the subscription column would make
+     * them indistinguishable from a payer in `subscription-status`,
+     * `admin/directory` and Stripe reconciliation -- which would eventually
+     * find a subscription date with no Stripe subscription behind it and have
+     * to guess which of the two was wrong.
+     *
+     * `campaignGrantedAt` is kept rather than derived from the expiry because
+     * it is what the enrollment cap counts, and it survives a policy change to
+     * `BETA_CAMPAIGN_GRANT_DAYS` that would otherwise rewrite history.
+     */
+    campaignExpiresAt: timestamp("campaignExpiresAt"),
+    campaignGrantedAt: timestamp("campaignGrantedAt"),
     createdAt: timestamp("createdAt").notNull().defaultNow(),
     email: varchar("email", { length: 64 }).notNull(),
     emailVerified: boolean("emailVerified").notNull().default(false),
@@ -117,6 +134,24 @@ export const user = pgTable(
       "User_subscriptionOverride_shape",
       sql`(${table.subscriptionOverrideAction} is null and ${table.subscriptionOverrideAt} is null) or (${table.subscriptionOverrideAction} in ('grant', 'revoke') and ${table.subscriptionOverrideAt} is not null and isfinite(${table.subscriptionOverrideAt}))`
     ),
+    /**
+     * Half a grant is not a grant. Enrollment counts rows where
+     * `campaignGrantedAt` is set and entitlement reads `campaignExpiresAt`, so
+     * a row carrying one without the other would be counted against the global
+     * cap while granting nothing, or grant minutes nothing is counting.
+     */
+    check(
+      "User_campaignGrant_shape",
+      sql`(${table.campaignGrantedAt} is null and ${table.campaignExpiresAt} is null) or (${table.campaignGrantedAt} is not null and ${table.campaignExpiresAt} is not null and isfinite(${table.campaignGrantedAt}) and isfinite(${table.campaignExpiresAt}) and ${table.campaignExpiresAt} > ${table.campaignGrantedAt})`
+    ),
+    /**
+     * Partial: the global enrollment cap counts only enrolled rows, and the
+     * index stays the size of the campaign rather than the size of the user
+     * table.
+     */
+    index("User_campaignGrantedAt_idx")
+      .on(table.campaignGrantedAt)
+      .where(sql`${table.campaignGrantedAt} is not null`),
   ]
 );
 
@@ -658,6 +693,20 @@ export const runnerAgent = pgTable(
     createdAt: timestamp("createdAt").notNull().defaultNow(),
     daytonaSandboxId: text("daytonaSandboxId"),
     description: varchar("description", { length: 240 }).notNull().default(""),
+    familiarId: varchar("familiarId", {
+      enum: [
+        "auto",
+        "builder",
+        "critic",
+        "custom",
+        "scout",
+        "scribe",
+        "tester",
+      ],
+      length: 16,
+    })
+      .notNull()
+      .default("auto"),
     id: uuid("id").primaryKey().notNull().defaultRandom(),
     instructions: varchar("instructions", {
       length: AGENT_RUNNER_LIMITS.maxInstructionsLength,
@@ -737,6 +786,10 @@ export const runnerAgent = pgTable(
       sql`${table.runtime} in ('codex', 'claude', 'copilot')`
     ),
     check(
+      "RunnerAgent_familiarId_valid",
+      sql`${table.familiarId} in ('auto', 'builder', 'critic', 'custom', 'scout', 'scribe', 'tester')`
+    ),
+    check(
       "RunnerAgent_status_valid",
       sql`${table.status} in ('idle', 'running', 'error')`
     ),
@@ -808,6 +861,19 @@ export const runnerRun = pgTable(
     })
       .notNull()
       .default("queued"),
+    /**
+     * Minutes this run was admitted with, which is also how long it may run.
+     *
+     * Written once at admission from the same number the reservation held, so
+     * the run's time limit and its billing reservation are one fact rather
+     * than two kept equal by a test. A campaign run admitted with 5 minutes is
+     * stopped at 5 minutes; a subscriber run admitted with 15 is stopped at 15.
+     *
+     * Null on runs admitted before this column existed. The reconciler falls
+     * back to the process-wide limit for those, which is exactly what bounded
+     * them when they were admitted.
+     */
+    entitlementMinutes: integer("entitlementMinutes"),
     error: jsonb("error").$type<RunError>(),
     executionPermission: varchar("executionPermission", {
       enum: [

@@ -38,6 +38,7 @@ function agent(): RunnerAgentRecord {
       "00000000-0000-4000-8000-000000000001"
     ),
     description: "",
+    familiarId: "auto",
     id: "00000000-0000-4000-8000-000000000001",
     instructions: "instructions",
     lastRunAt: null,

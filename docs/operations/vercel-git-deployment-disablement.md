@@ -8,8 +8,14 @@
 
 Automatic Vercel deployments from Git are disabled for every branch. The root
 `vercel.json` may contain only the deny-only `git.deploymentEnabled: false`
-control without a deployment runbook. The previous reconciliation cron and
-`vercel-template.json` provisioning surface are removed.
+control without a deployment runbook. The `vercel-template.json` provisioning
+surface is removed.
+
+Reconciliation crons were removed with it on 2026-08-30 and restored on
+2026-09-04 through the reintroduction gate below: `vercel.json` now carries a
+`crons` array paired with `docs/runbooks/vercel-deployment.md`. The deny-only
+`git.deploymentEnabled: false` control is unchanged, and Git pushes still do
+not deploy.
 
 This record documents the disabled state. It is **not** the deployment runbook
 at `docs/runbooks/vercel-deployment.md` and does not authorize restoring Vercel

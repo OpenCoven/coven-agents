@@ -43,6 +43,9 @@ const POLICIES = Object.freeze({
   auth_start: closedPolicy(["ip"], 0, rateClass(5, 60, 20, 3600)),
   avatar_read: closedPolicy(["ip", "user"], 0, STANDARD_READ),
   avatar_write: closedPolicy(["ip", "user"], 8192, SENSITIVE_WRITE),
+  // Opening the hosted portal is cheap and must stay available to someone
+  // trying to cancel, so it is metered loosely.
+  billing_portal: closedPolicy(["ip", "user"], 0, rateClass(5, 300, 20, 3600)),
   chat: closedPolicy(["ip", "user"], 64_000, rateClass(4, 60, 60, 3600)),
   chat_delete: closedPolicy(["ip", "user"], 0, DESTRUCTIVE_WRITE),
   checkout: closedPolicy(["ip", "user"], 8192, rateClass(2, 300, 3, 3600)),
@@ -105,7 +108,6 @@ const POLICIES = Object.freeze({
   skill_delete: closedPolicy(["ip", "tenant"], 0, DESTRUCTIVE_WRITE),
   skill_read: closedPolicy(["ip", "user"], 0, STANDARD_READ),
   skill_write: closedPolicy(["ip", "tenant"], 8192, SENSITIVE_WRITE),
-  // Scheduled repair does no request parsing and is bounded by its DB lease.
   stripe_reconcile: closedPolicy(["ip"], 0, rateClass(120, 60, 1200, 3600)),
   // Admission runs before the signed raw body is read.
   stripe_webhook: closedPolicy(["ip"], 262_144, WEBHOOK_WRITE),
@@ -113,6 +115,13 @@ const POLICIES = Object.freeze({
   subscription_read_ip: closedPolicy(["ip"], 0, SUBSCRIPTION_READ_IP),
   suggestions_read: closedPolicy(["ip", "user"], 0, STANDARD_READ),
   team_delete: closedPolicy(["ip", "tenant"], 0, DESTRUCTIVE_WRITE),
+  // Scheduled repair does no request parsing and is bounded by its DB lease.
+  // Drafting calls a model, so it is metered tighter than a plain read.
+  team_mission_draft: closedPolicy(
+    ["ip", "tenant"],
+    2048,
+    rateClass(10, 60, 60, 3600)
+  ),
   team_read: closedPolicy(["ip", "user"], 0, STANDARD_READ),
   team_run_approve: closedPolicy(["ip", "tenant"], 4096, SENSITIVE_WRITE),
   team_run_read: closedPolicy(["ip", "user"], 0, STANDARD_READ),

@@ -533,7 +533,7 @@ function PureMultimodalInput({
           </div>
         )}
         <PromptInputTextarea
-          className="min-h-24 text-[13px] leading-relaxed px-4 pt-3.5 pb-1.5 placeholder:text-muted-foreground/35"
+          className="min-h-24 text-[13px] leading-relaxed px-4 pt-3.5 pb-1.5 placeholder:text-muted-foreground"
           data-testid="multimodal-input"
           onChange={handleInput}
           onKeyDown={handleTextareaKeyDown}
@@ -652,7 +652,16 @@ function PureAttachmentsButton({
 
   const caps: Record<string, ModelCapabilities> | undefined =
     modelsResponse?.capabilities ?? modelsResponse;
+  /**
+   * Every failure path in the capability lookup returns all-false, so an
+   * outage was indistinguishable from "no model accepts images" and silently
+   * disabled attachments for everyone. Unknown is treated as allowed: the
+   * upload can still be refused server-side, whereas a disabled button
+   * cannot be argued with.
+   */
+  const capabilitiesUnknown = caps?.[selectedModelId] === undefined;
   const hasVision = caps?.[selectedModelId]?.vision ?? false;
+  const attachmentsAllowed = hasVision || capabilitiesUnknown;
   const handleClick = useCallback(
     (event: React.MouseEvent<HTMLButtonElement>) => {
       event.preventDefault();
@@ -665,13 +674,20 @@ function PureAttachmentsButton({
     <Button
       className={cn(
         "h-7 w-7 rounded-lg border border-border/40 p-1 transition-colors",
-        hasVision
+        attachmentsAllowed
           ? "text-foreground hover:border-border hover:text-foreground"
           : "text-muted-foreground/30 cursor-not-allowed"
       )}
       data-testid="attachments-button"
-      disabled={status !== "ready" || !hasVision}
+      disabled={status !== "ready" || !attachmentsAllowed}
       onClick={handleClick}
+      title={
+        capabilitiesUnknown
+          ? "Model capabilities could not be read. Attachments may be refused."
+          : hasVision
+            ? undefined
+            : "This model does not accept images."
+      }
       variant="ghost"
     >
       <PaperclipIcon size={14} style={{ height: 14, width: 14 }} />

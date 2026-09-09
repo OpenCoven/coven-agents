@@ -1,11 +1,33 @@
 import "server-only";
 
 import type { KeyObject } from "node:crypto";
-import { GitHubProviderError } from "./app-auth";
+import { GitHubProviderError, type GitHubProviderStage } from "./app-auth";
 import type { GitHubUserRepositoryPermission } from "./authority-types";
 
 const GITHUB_API_ORIGIN = "https://api.github.com";
 const GITHUB_OAUTH_ORIGIN = "https://github.com";
+
+/**
+ * Narrows GitHub's own refusal so the operator learns which thing is wrong.
+ *
+ * These are GitHub's fixed OAuth identifiers, not free text, so carrying them
+ * forward leaks nothing. Collapsing all three into one code meant a mistyped
+ * client secret, an expired sign-in, and a misconfigured callback address all
+ * surfaced as "callback validation failed", which named none of them.
+ */
+export function exchangeRejectionCode(error: string): string {
+  switch (error) {
+    case "incorrect_client_credentials":
+      return "github_oauth_credentials_rejected";
+    case "bad_verification_code":
+    case "expired_token":
+      return "github_oauth_code_expired";
+    case "redirect_uri_mismatch":
+      return "github_oauth_redirect_mismatch";
+    default:
+      return "github_oauth_exchange_rejected";
+  }
+}
 const GITHUB_API_VERSION = "2022-11-28";
 const DEFAULT_TIMEOUT_MS = 5000;
 const DEFAULT_EXCHANGE_OBSERVATION_TIMEOUT_MS = 30_000;
@@ -13,6 +35,8 @@ const DEFAULT_MAX_RESPONSE_BYTES = 1024 * 1024;
 const DEFAULT_MAX_PAGES = 10;
 const DEFAULT_MAX_INSTALLATIONS = 1000;
 const DEFAULT_MAX_REPOSITORIES = 16;
+const MAX_ACCESS_TOKEN_EXPIRATION_SECONDS = 24 * 60 * 60;
+const MAX_REFRESH_TOKEN_EXPIRATION_SECONDS = 366 * 24 * 60 * 60;
 const MAX_PROJECTS_PER_ORGANIZATION = 100;
 const MAX_TOKEN_BYTES = 4096;
 const MAX_TOKEN_CANDIDATES_PER_TYPE = 4;
@@ -283,7 +307,7 @@ export function createGitHubUserAuthorizationClient(
         typeof parsed.error === "string"
       ) {
         validationError = new GitHubProviderError(
-          "github_oauth_exchange_rejected",
+          exchangeRejectionCode(parsed.error),
           {
             retryable: false,
             status: 400,
@@ -313,8 +337,7 @@ export function createGitHubUserAuthorizationClient(
           retainEffectiveCandidate(revokeAccess, accessToken) ||
           candidateOverflow;
       } catch (error) {
-        validationError ??=
-          error instanceof GitHubProviderError ? error : invalidResponse();
+        validationError ??= providerStageError(error, "exchange_access_token");
       }
       try {
         if (parsed.refresh_token !== undefined) {
@@ -324,23 +347,35 @@ export function createGitHubUserAuthorizationClient(
               boundedTokenCandidate(parsed.refresh_token)
             ) || candidateOverflow;
         }
-        if (
-          parsed.error !== undefined ||
-          parsed.token_type !== "bearer" ||
-          parsed.scope !== ""
-        ) {
-          throw invalidResponse();
-        }
+      } catch (error) {
+        validationError ??= providerStageError(error, "exchange_refresh_token");
+      }
+      if (
+        parsed.error !== undefined ||
+        parsed.token_type !== "bearer" ||
+        parsed.scope !== ""
+      ) {
+        validationError ??= providerStageError(
+          invalidResponse(),
+          "exchange_metadata"
+        );
+      }
+      try {
         validateOptionalExpiration(parsed);
       } catch (error) {
-        validationError ??=
-          error instanceof GitHubProviderError ? error : invalidResponse();
+        validationError ??= providerStageError(error, "exchange_expiration");
       }
       if (accessToken !== null && !OAUTH_USER_PATTERN.test(accessToken)) {
-        validationError ??= invalidResponse();
+        validationError ??= providerStageError(
+          invalidResponse(),
+          "exchange_access_token"
+        );
       }
       if (candidateOverflow) {
-        validationError ??= invalidResponse();
+        validationError ??= providerStageError(
+          invalidResponse(),
+          "exchange_candidates"
+        );
       }
       return {
         error: validationError,
@@ -645,19 +680,30 @@ export function createGitHubUserAuthorizationClient(
   return {
     async proveInstallationAccess(proof) {
       assertProofInput(proof);
-      const { error: exchangeError, tokens: exchangedTokens } =
-        await exchangeCode(proof);
+      const { error: rawExchangeError, tokens: exchangedTokens } =
+        await withProviderStage("exchange", () => exchangeCode(proof));
+      const exchangeError =
+        rawExchangeError === null
+          ? null
+          : providerStageError(rawExchangeError, "exchange");
       let accessToken = exchangedTokens.access;
       const accessTokensToRevoke = [...exchangedTokens.revokeAccess];
       const refreshTokensToRevoke = [...exchangedTokens.revokeRefresh];
       let operationError: unknown = exchangeError ?? undefined;
       let authority: GitHubUserInstallationAuthority | undefined;
       if (operationError === undefined && accessToken !== null) {
+        const proofAccessToken = accessToken;
         try {
-          await assertAccessibleInstallation(proof.installationId, accessToken);
+          await withProviderStage("installation_lookup", () =>
+            assertAccessibleInstallation(proof.installationId, proofAccessToken)
+          );
           const [userResult, repositoryResult] = await Promise.allSettled([
-            userIdentity(accessToken),
-            userRepositories(proof.installationId, accessToken),
+            withProviderStage("identity_lookup", () =>
+              userIdentity(proofAccessToken)
+            ),
+            withProviderStage("repository_lookup", () =>
+              userRepositories(proof.installationId, proofAccessToken)
+            ),
           ]);
           if (userResult.status === "rejected") {
             throw userResult.reason;
@@ -665,9 +711,9 @@ export function createGitHubUserAuthorizationClient(
           if (repositoryResult.status === "rejected") {
             throw repositoryResult.reason;
           }
-          const projectIdsByOwner = await userProjectIds(
-            repositoryResult.value,
-            accessToken
+          const projectIdsByOwner = await withProviderStage(
+            "project_lookup",
+            () => userProjectIds(repositoryResult.value, proofAccessToken)
           );
           authority = {
             repositories: repositoryResult.value.map(
@@ -689,8 +735,14 @@ export function createGitHubUserAuthorizationClient(
       let revocationError: unknown;
       try {
         const revocations = [
-          ...refreshTokensToRevoke.map((token) => revokeRefreshToken(token)),
-          ...accessTokensToRevoke.map((token) => revokeToken(token)),
+          ...refreshTokensToRevoke.map((token) =>
+            withProviderStage("refresh_revocation", () =>
+              revokeRefreshToken(token)
+            )
+          ),
+          ...accessTokensToRevoke.map((token) =>
+            withProviderStage("access_revocation", () => revokeToken(token))
+          ),
         ];
         const results = await Promise.allSettled(revocations);
         revocationError = results.find(
@@ -837,8 +889,12 @@ function validateOptionalExpiration(body: JsonObject): void {
   }
   if (
     hasAccessExpiration &&
-    (nonNegativeInteger(body.expires_in) !== 28_800 ||
-      nonNegativeInteger(body.refresh_token_expires_in) !== 15_897_600)
+    (nonNegativeInteger(body.expires_in) < 1 ||
+      nonNegativeInteger(body.expires_in) >
+        MAX_ACCESS_TOKEN_EXPIRATION_SECONDS ||
+      nonNegativeInteger(body.refresh_token_expires_in) < 1 ||
+      nonNegativeInteger(body.refresh_token_expires_in) >
+        MAX_REFRESH_TOKEN_EXPIRATION_SECONDS)
   ) {
     throw invalidResponse();
   }
@@ -1251,6 +1307,36 @@ function positiveInteger(value: number, label: string): number {
     throw new RangeError(`${label} must be a positive safe integer.`);
   }
   return value;
+}
+
+async function withProviderStage<T>(
+  providerStage: GitHubProviderStage,
+  operation: () => Promise<T>
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    throw providerStageError(error, providerStage);
+  }
+}
+
+function providerStageError(
+  error: unknown,
+  providerStage: GitHubProviderStage
+): GitHubProviderError {
+  if (!(error instanceof GitHubProviderError)) {
+    return new GitHubProviderError("github_provider_unavailable", {
+      providerStage,
+      retryable: true,
+      status: 503,
+    });
+  }
+  return new GitHubProviderError(error.code, {
+    providerStage: error.providerStage ?? providerStage,
+    requestId: error.requestId,
+    retryable: error.retryable,
+    status: error.status,
+  });
 }
 
 function timeoutError(): GitHubProviderError {

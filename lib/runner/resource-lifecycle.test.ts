@@ -38,6 +38,7 @@ function agent(overrides: Partial<RunnerAgentRecord> = {}): RunnerAgentRecord {
     createdAt: new Date("2026-09-01T00:00:00.000Z"),
     daytonaSandboxId: null,
     description: "",
+    familiarId: "auto",
     id: agentId,
     instructions: "instructions",
     lastRunAt: null,

@@ -7,6 +7,7 @@ import {
   type CreateAgentInput,
   type SkillResource,
   sanitizeEvidenceText,
+  TEAM_LIMITS,
   type TeamCapability,
   type TeamResource,
   type TeamRun,
@@ -14,19 +15,30 @@ import {
 import {
   ArrowDown,
   ArrowUp,
-  Check,
+  Bot,
   ChevronRight,
+  CircleCheckBig,
   CircleStop,
+  Clock3,
+  Download,
+  Github,
+  ListChecks,
+  Pencil,
+  Play,
   Plus,
   RefreshCw,
   ShieldCheck,
   Sparkles,
+  Trash2,
   UsersRound,
+  Workflow,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
+import { FamiliarPortrait } from "@/components/console/familiar-portrait";
 import { TEMPLATES } from "@/lib/agents/formations";
+import { executionProfileForAgent } from "@/lib/console/agent-profile";
 import {
   isGitHubProjectCapabilityCurrent,
   visibleGitHubProjectCapabilityExpiry,
@@ -93,6 +105,63 @@ function isGitHubDeliveryTeam(team: TeamResource): boolean {
   );
 }
 
+const RELATIVE = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+const RELATIVE_STEPS: readonly [Intl.RelativeTimeFormatUnit, number][] = [
+  ["second", 60],
+  ["minute", 60],
+  ["hour", 24],
+  ["day", 7],
+  ["week", 4],
+  ["month", 12],
+];
+
+/** `4 minutes ago`, so a run's age reads without doing arithmetic. */
+function relativeTime(iso: string, now: number): string {
+  const at = Date.parse(iso);
+  if (Number.isNaN(at)) {
+    return "";
+  }
+  let value = (at - now) / 1000;
+  for (const [unit, size] of RELATIVE_STEPS) {
+    if (Math.abs(value) < size) {
+      return RELATIVE.format(Math.round(value), unit);
+    }
+    value /= size;
+  }
+  return RELATIVE.format(Math.round(value), "year");
+}
+
+/**
+ * `owner/name` for each connected repository, from the connection endpoint.
+ *
+ * Parsed defensively and sorted, because this is rendered as fact: a
+ * malformed entry is dropped rather than shown as a partial name.
+ */
+function connectedRepositories(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const names = new Set<string>();
+  for (const entry of value) {
+    const repository = (entry as { repository?: unknown } | null)?.repository as
+      | { name?: unknown; owner?: unknown }
+      | undefined;
+    if (
+      typeof repository?.name === "string" &&
+      typeof repository.owner === "string" &&
+      repository.name &&
+      repository.owner
+    ) {
+      names.add(`${repository.owner}/${repository.name}`);
+    }
+  }
+  return [...names].sort((left, right) => left.localeCompare(right));
+}
+
+function statusLabel(status: TeamRun["status"]): string {
+  return status.replaceAll("_", " ");
+}
+
 function teamTone(
   status: TeamRun["status"] | TeamRun["steps"][number]["status"]
 ) {
@@ -128,6 +197,120 @@ function Field({
       <Eyebrow>{label}</Eyebrow>
       {children}
     </label>
+  );
+}
+
+/**
+ * The team, drawn.
+ *
+ * The panel used to name a team, describe it in a sentence, and count its
+ * members, which left the object itself invisible until you opened the edit
+ * form or started a run. This is the sequence that will execute: each member
+ * in order, its brief, and what it carries. It reads from the team resource
+ * the panel already holds, so it needs nothing new from the server.
+ */
+function TeamSequence({
+  agents,
+  skills,
+  team,
+}: {
+  agents: AgentDefinition[];
+  skills: SkillResource[];
+  team: TeamResource;
+}) {
+  const ordered = [...team.members].sort(
+    (left, right) => left.position - right.position
+  );
+  return (
+    <div className="oc-team-sequence">
+      <div className="oc-team-sequence__head">
+        <div>
+          <Eyebrow>Execution plan</Eyebrow>
+          <h3>The handoff, before you launch</h3>
+          <p>
+            Each stage receives the mission and the evidence produced by the
+            stage before it.
+          </p>
+        </div>
+        <span className="oc-team-sequence__count">
+          <Workflow aria-hidden="true" size={13} />
+          {ordered.length} {ordered.length === 1 ? "stage" : "stages"}
+        </span>
+      </div>
+      <ol className="oc-team-sequence__list">
+        {ordered.map((member, index) => {
+          const agent = agents.find(({ id }) => id === member.agentId);
+          const profile = agent ? executionProfileForAgent(agent) : null;
+          const carried = member.skillIds
+            .map((id) => skills.find((skill) => skill.id === id))
+            .filter((skill): skill is SkillResource => skill !== undefined);
+          return (
+            <li className="oc-team-sequence__step" key={member.id}>
+              <span aria-hidden="true" className="oc-team-sequence__rail">
+                <span>{String(index + 1).padStart(2, "0")}</span>
+              </span>
+              <article className="oc-team-sequence__card">
+                <header>
+                  {agent && profile ? (
+                    <FamiliarPortrait
+                      fallbackLabel={sanitizeEvidenceText(agent.name)}
+                      familiarId={agent.familiarId}
+                      profileId={profile.id}
+                      selected={false}
+                      size={40}
+                    />
+                  ) : (
+                    <span
+                      aria-hidden="true"
+                      className="oc-team-sequence__portrait-fallback"
+                    >
+                      <Bot size={17} />
+                    </span>
+                  )}
+                  <span className="oc-team-sequence__identity">
+                    <strong>
+                      {agent
+                        ? sanitizeEvidenceText(agent.name)
+                        : "Profile unavailable"}
+                    </strong>
+                    <small>
+                      Stage {index + 1} of {ordered.length}
+                    </small>
+                  </span>
+                  <span
+                    className="oc-team-sequence__requirement"
+                    data-required={member.required ? "true" : "false"}
+                  >
+                    {member.required ? (
+                      <CircleCheckBig aria-hidden="true" size={11} />
+                    ) : null}
+                    {member.required ? "Required" : "May be skipped"}
+                  </span>
+                </header>
+                <p>{sanitizeEvidenceText(member.responsibility)}</p>
+                {carried.length > 0 ? (
+                  <div className="oc-team-sequence__skills">
+                    <span>
+                      <Sparkles aria-hidden="true" size={11} />
+                      Skills
+                    </span>
+                    {carried.map((skill) => (
+                      <code key={skill.id}>
+                        {sanitizeEvidenceText(skill.name)}
+                      </code>
+                    ))}
+                  </div>
+                ) : null}
+              </article>
+            </li>
+          );
+        })}
+      </ol>
+      <p className="oc-team-sequence__note">
+        <ShieldCheck aria-hidden="true" size={13} />A failed required stage
+        stops the run before the next handoff.
+      </p>
+    </div>
   );
 }
 
@@ -234,12 +417,41 @@ export function TeamConsole({
   >(null);
   const [projectAuthorityCheckedAt, setProjectAuthorityCheckedAt] = useState(0);
   const [mission, setMission] = useState("");
+  const [drafting, setDrafting] = useState(false);
+  /**
+   * A toast is transient; the empty state it leaves behind is not. Without
+   * these, a failed load tells someone they have no teams and no runs.
+   */
+  const [catalogFailed, setCatalogFailed] = useState(false);
+  const [runsFailed, setRunsFailed] = useState(false);
   const [skillName, setSkillName] = useState("");
   const [skillDescription, setSkillDescription] = useState("");
   const [skillInstructions, setSkillInstructions] = useState("");
   const [skillCapabilities, setSkillCapabilities] = useState<TeamCapability[]>(
     []
   );
+  /** Set while the team form is editing an existing team rather than creating. */
+  const [editingTeam, setEditingTeam] = useState<TeamResource | null>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
+  /**
+   * One instant for every age in the list, refreshed whenever the list
+   * itself reloads. Pinning it forever would leave "4 minutes ago" frozen on
+   * a console left open; recomputing per row would let rows disagree.
+   */
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the reload is the refresh point.
+  const listedAt = useMemo(() => Date.now(), [runs]);
+  /**
+   * Whether this account has a GitHub installation bound to it. `null` means
+   * the check has not answered yet, which is deliberately distinct from "not
+   * connected" so the rail never claims a state it has not read.
+   */
+  const [githubConnected, setGithubConnected] = useState<boolean | null>(null);
+  /**
+   * The repositories this account's installation can reach, as the endpoint
+   * reported them. Shown so "connected" names what it is connected to rather
+   * than asserting a state the reader cannot check.
+   */
+  const [githubRepositories, setGithubRepositories] = useState<string[]>([]);
   const [teamName, setTeamName] = useState("");
   const [teamDescription, setTeamDescription] = useState("");
   const [members, setMembers] = useState<DraftMember[]>([]);
@@ -277,8 +489,14 @@ export function TeamConsole({
           return null;
         }
         const body = (await response.json()) as {
+          connected?: unknown;
+          connections?: unknown;
           projectAuthorityExpiresAt?: unknown;
         };
+        if (!controller.signal.aborted) {
+          setGithubConnected(body.connected === true);
+          setGithubRepositories(connectedRepositories(body.connections));
+        }
         return visibleGitHubProjectCapabilityExpiry(
           body.projectAuthorityExpiresAt,
           new Date()
@@ -298,6 +516,8 @@ export function TeamConsole({
       .catch(() => {
         if (!controller.signal.aborted) {
           setProjectAuthorityExpiresAt(null);
+          setGithubConnected(null);
+          setGithubRepositories([]);
         }
       });
     return () => {
@@ -365,11 +585,13 @@ export function TeamConsole({
 
   useEffect(() => {
     const controller = new AbortController();
+    setCatalogFailed(false);
     refreshCatalog(controller.signal)
       .catch((error) => {
         if (controller.signal.aborted) {
           return;
         }
+        setCatalogFailed(true);
         toast.error("Could not load teams.", {
           description: readableError(error),
         });
@@ -405,6 +627,7 @@ export function TeamConsole({
     setSelectedRun(null);
     setRunRefreshError(null);
     setLoadingRuns(true);
+    setRunsFailed(false);
     const controller = new AbortController();
     client
       .listTeamRuns(selectedTeamId, { signal: controller.signal })
@@ -421,6 +644,7 @@ export function TeamConsole({
         if (controller.signal.aborted) {
           return;
         }
+        setRunsFailed(true);
         toast.error("Could not load team runs.", {
           description: readableError(error),
         });
@@ -646,7 +870,126 @@ export function TeamConsole({
     }
   };
 
+  /** Opens the same form the create flow uses, prefilled from a saved team. */
+  const beginEditTeam = (team: TeamResource) => {
+    setEditingTeam(team);
+    setTeamName(team.name);
+    setTeamDescription(team.description);
+    setMembers(
+      team.members.map((member) => ({
+        agentId: member.agentId,
+        draftId: crypto.randomUUID(),
+        required: member.required,
+        responsibility: member.responsibility,
+        skillIds: [...member.skillIds],
+      }))
+    );
+    setMode("team");
+  };
+
+  const saveTeam = async () => {
+    const team = editingTeam;
+    if (!team) {
+      return;
+    }
+    setBusy(true);
+    try {
+      const updated = await client.updateTeam(
+        team.id,
+        {
+          description: teamDescription,
+          expectedVersion: team.version,
+          members: members.map(
+            ({ agentId, required, responsibility, skillIds }) => ({
+              agentId,
+              required,
+              responsibility,
+              skillIds,
+            })
+          ),
+          name: teamName,
+        },
+        { signal: lifecycleControllerRef.current?.signal }
+      );
+      setTeams((current) =>
+        current.map((entry) => (entry.id === updated.id ? updated : entry))
+      );
+      setSelectedTeamId(updated.id);
+      setEditingTeam(null);
+      setMode("browse");
+      toast.success("Team updated.");
+    } catch (error) {
+      if (lifecycleControllerRef.current?.signal.aborted) {
+        return;
+      }
+      toast.error("Could not update the team.", {
+        description: readableError(error),
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteTeam = async (team: TeamResource) => {
+    setBusy(true);
+    try {
+      await client.deleteTeam(
+        team.id,
+        team.version,
+        lifecycleControllerRef.current?.signal
+      );
+      setTeams((current) => current.filter((entry) => entry.id !== team.id));
+      setConfirmingDelete(null);
+      setSelectedTeamId((current) => (current === team.id ? null : current));
+      setRuns([]);
+      setSelectedRun(null);
+      toast.success("Team deleted.");
+    } catch (error) {
+      if (lifecycleControllerRef.current?.signal.aborted) {
+        return;
+      }
+      toast.error("Could not delete the team.", {
+        description: readableError(error),
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
+   * Writes the team definition to a file the browser saves. Export is
+   * deliberately client-side and derived from what is already on screen: it
+   * carries the sequence and each member's brief, not run history or
+   * evidence, so it is safe to hand to someone else.
+   */
+  const exportTeam = (team: TeamResource) => {
+    const payload = {
+      description: team.description,
+      exportedAt: new Date().toISOString(),
+      members: team.members.map((member) => ({
+        agentId: member.agentId,
+        position: member.position,
+        required: member.required,
+        responsibility: member.responsibility,
+        skillIds: member.skillIds,
+      })),
+      name: team.name,
+      version: team.version,
+    };
+    const url = URL.createObjectURL(
+      new Blob([JSON.stringify(payload, null, 2)], {
+        type: "application/json",
+      })
+    );
+    const link = document.createElement("a");
+    link.download = `${team.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase() || "team"}.json`;
+    link.href = url;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
   const beginTeam = () => {
+    setEditingTeam(null);
     const initialAgents = agents.slice(0, 2);
     setMembers(
       initialAgents.map((agent, index) => ({
@@ -708,6 +1051,40 @@ export function TeamConsole({
       });
     } finally {
       setBusy(false);
+    }
+  };
+
+  /**
+   * Fills the mission field from the team's own roster. Whatever is already
+   * typed is passed as a steer, so a half-written note becomes a full
+   * mission rather than being thrown away. The result is editable and still
+   * requires the person to start the run.
+   */
+  const draftMission = async () => {
+    if (!selectedTeam || drafting) {
+      return;
+    }
+    const teamId = selectedTeam.id;
+    setDrafting(true);
+    try {
+      const drafted = await client.draftTeamMission(
+        teamId,
+        { hint: mission.trim() },
+        lifecycleControllerRef.current?.signal
+      );
+      if (selectedTeamIdRef.current !== teamId) {
+        return;
+      }
+      setMission(drafted);
+    } catch (error) {
+      if (lifecycleControllerRef.current?.signal.aborted) {
+        return;
+      }
+      toast.error("Could not draft a mission.", {
+        description: readableError(error),
+      });
+    } finally {
+      setDrafting(false);
     }
   };
 
@@ -965,26 +1342,79 @@ export function TeamConsole({
             Runs
           </Btn>
         </div>
-        <button
-          className="oc-team-built-in"
-          data-selected={githubTeam?.id === selectedTeamId ? "" : undefined}
-          disabled={busy}
-          onClick={provisionGitHubTeam}
-          type="button"
+        {githubTeam ? null : (
+          <button
+            className="oc-team-built-in"
+            disabled={busy}
+            onClick={provisionGitHubTeam}
+            type="button"
+          >
+            <ShieldCheck size={17} />
+            <span>
+              <strong>{GITHUB_DELIVERY_TEAM.name}</strong>
+              <small>Issues · PRs · approvals</small>
+            </span>
+            {busy ? <Spinner size={12} /> : <Plus size={14} />}
+          </button>
+        )}
+        {/*
+          The install route mints the signed state the callback requires, so
+          connecting has to start here rather than from GitHub. It was
+          previously reachable only by typing the URL.
+        */}
+        <a
+          className="oc-team-connect"
+          data-state={
+            githubConnected === null
+              ? "unknown"
+              : githubConnected
+                ? "connected"
+                : "disconnected"
+          }
+          href={`${BASE_PATH}/api/github/install`}
         >
-          <ShieldCheck size={17} />
+          <Github size={15} />
           <span>
-            <strong>{GITHUB_DELIVERY_TEAM.name}</strong>
-            <small>Issues · PRs · approvals</small>
+            <strong>
+              GitHub
+              <em
+                className="oc-team-connect__state"
+                data-state={
+                  githubConnected === null
+                    ? "unknown"
+                    : githubConnected
+                      ? "connected"
+                      : "disconnected"
+                }
+              >
+                {githubConnected === null
+                  ? "checking"
+                  : githubConnected
+                    ? "connected"
+                    : "not connected"}
+              </em>
+            </strong>
+            <small>
+              {githubConnected === null
+                ? "Reading this account's installation."
+                : githubConnected
+                  ? githubRepositories.length > 0
+                    ? `${githubRepositories.length} ${githubRepositories.length === 1 ? "repository" : "repositories"} · change what this account can reach`
+                    : "No repository is selected yet. Choose which ones this account can reach."
+                  : "Required before a team can touch issues or pull requests."}
+            </small>
+            {githubConnected && githubRepositories.length > 0 ? (
+              <span className="oc-team-connect__repos">
+                {githubRepositories.map((repository) => (
+                  <code key={repository} title={repository}>
+                    {repository}
+                  </code>
+                ))}
+              </span>
+            ) : null}
           </span>
-          {busy ? (
-            <Spinner size={12} />
-          ) : githubTeam ? (
-            <Check size={14} />
-          ) : (
-            <Plus size={14} />
-          )}
-        </button>
+          <ChevronRight size={13} />
+        </a>
         <div className="oc-team-rail__label">
           <span>Saved teams</span>
           <span>{teams.length}</span>
@@ -1107,13 +1537,14 @@ export function TeamConsole({
             <Eyebrow>Custom sequence</Eyebrow>
             <h2>Create a team</h2>
             <p>
-              Order profiles into a durable sequence, attach reusable skills,
-              and decide whether a failed member stops the run.
+              Build a clear handoff between agents. Each member runs in order,
+              using the responsibility and skills you assign here.
             </p>
             <div className="oc-team-form__grid">
               <Field label="Name">
                 <input
                   onChange={(event) => setTeamName(event.currentTarget.value)}
+                  placeholder="e.g. Release readiness crew"
                   value={teamName}
                 />
               </Field>
@@ -1122,9 +1553,19 @@ export function TeamConsole({
                   onChange={(event) =>
                     setTeamDescription(event.currentTarget.value)
                   }
+                  placeholder="What should this team accomplish?"
                   value={teamDescription}
                 />
               </Field>
+            </div>
+            <div className="oc-team-sequence-heading">
+              <span>
+                <ListChecks aria-hidden="true" size={15} />
+              </span>
+              <div>
+                <strong>Execution sequence</strong>
+                <small>Agents run from top to bottom.</small>
+              </div>
             </div>
             <div className="oc-team-member-editor">
               {members.map((member, index) => {
@@ -1132,37 +1573,51 @@ export function TeamConsole({
                   agents.find(({ id }) => id === member.agentId)?.name ??
                   `member ${index + 1}`;
                 return (
-                  <fieldset key={member.draftId}>
+                  <fieldset
+                    aria-label={`Team member ${index + 1}: ${memberName}`}
+                    key={member.draftId}
+                  >
                     <legend className="oc-team-member-editor__legend">
-                      Team member {index + 1}: {memberName}
+                      Stage {String(index + 1).padStart(2, "0")} · {memberName}
                     </legend>
                     <div className="oc-team-member-editor__head">
-                      <span>{String(index + 1).padStart(2, "0")}</span>
-                      <select
-                        aria-label={`Agent for team member ${index + 1}`}
-                        onChange={(event) => {
-                          const agentId = event.currentTarget.value;
-                          setMembers((current) =>
-                            current.map((value, position) =>
-                              position === index ? { ...value, agentId } : value
-                            )
-                          );
-                        }}
-                        value={member.agentId}
-                      >
-                        {agents.map((agent) => (
-                          <option
-                            disabled={members.some(
-                              (value, position) =>
-                                position !== index && value.agentId === agent.id
-                            )}
-                            key={agent.id}
-                            value={agent.id}
-                          >
-                            {sanitizeEvidenceText(agent.name)}
-                          </option>
-                        ))}
-                      </select>
+                      <span className="oc-team-member-editor__step">
+                        {String(index + 1).padStart(2, "0")}
+                      </span>
+                      <label className="oc-team-member-editor__agent">
+                        <span>
+                          <Bot aria-hidden="true" size={14} />
+                          Agent
+                        </span>
+                        <select
+                          aria-label={`Agent for team member ${index + 1}`}
+                          onChange={(event) => {
+                            const agentId = event.currentTarget.value;
+                            setMembers((current) =>
+                              current.map((value, position) =>
+                                position === index
+                                  ? { ...value, agentId }
+                                  : value
+                              )
+                            );
+                          }}
+                          value={member.agentId}
+                        >
+                          {agents.map((agent) => (
+                            <option
+                              disabled={members.some(
+                                (value, position) =>
+                                  position !== index &&
+                                  value.agentId === agent.id
+                              )}
+                              key={agent.id}
+                              value={agent.id}
+                            >
+                              {sanitizeEvidenceText(agent.name)}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
                       <button
                         aria-label={`Move ${memberName} up`}
                         disabled={index === 0}
@@ -1177,6 +1632,7 @@ export function TeamConsole({
                             )
                           )
                         }
+                        title="Move this stage up"
                         type="button"
                       >
                         <ArrowUp size={13} />
@@ -1195,6 +1651,7 @@ export function TeamConsole({
                             )
                           )
                         }
+                        title="Move this stage down"
                         type="button"
                       >
                         <ArrowDown size={13} />
@@ -1207,32 +1664,48 @@ export function TeamConsole({
                             current.filter((_, position) => position !== index)
                           )
                         }
+                        title="Remove this stage"
                         type="button"
                       >
                         <X size={13} />
                       </button>
                     </div>
-                    <textarea
-                      aria-label={`Responsibility for member ${index + 1}`}
-                      onChange={(event) => {
-                        const responsibility = event.currentTarget.value;
-                        setMembers((current) =>
-                          current.map((value, position) =>
-                            position === index
-                              ? {
-                                  ...value,
-                                  responsibility,
-                                }
-                              : value
-                          )
-                        );
-                      }}
-                      rows={2}
-                      value={member.responsibility}
-                    />
+                    <label className="oc-team-member-editor__responsibility">
+                      <span>Responsibility</span>
+                      <textarea
+                        aria-label={`Responsibility for member ${index + 1}`}
+                        onChange={(event) => {
+                          const responsibility = event.currentTarget.value;
+                          setMembers((current) =>
+                            current.map((value, position) =>
+                              position === index
+                                ? {
+                                    ...value,
+                                    responsibility,
+                                  }
+                                : value
+                            )
+                          );
+                        }}
+                        rows={2}
+                        value={member.responsibility}
+                      />
+                    </label>
+                    <div className="oc-team-member-editor__skills-heading">
+                      <span>
+                        <ListChecks aria-hidden="true" size={13} />
+                        Skills and behavior
+                      </span>
+                      <small>
+                        Choose reusable instructions for this stage.
+                      </small>
+                    </div>
                     <div className="oc-team-member-editor__skills">
                       {skills.map((skill) => (
-                        <label key={skill.id}>
+                        <label
+                          className="oc-team-member-editor__skill"
+                          key={skill.id}
+                        >
                           <input
                             aria-label={`Attach ${skill.name} to ${memberName}`}
                             checked={member.skillIds.includes(skill.id)}
@@ -1259,7 +1732,7 @@ export function TeamConsole({
                           {sanitizeEvidenceText(skill.name)}
                         </label>
                       ))}
-                      <label>
+                      <label className="oc-team-member-editor__required">
                         <input
                           aria-label={`${memberName} is a required step`}
                           checked={member.required}
@@ -1274,6 +1747,7 @@ export function TeamConsole({
                           }
                           type="checkbox"
                         />
+                        <CircleCheckBig aria-hidden="true" size={13} />
                         Required step
                       </label>
                     </div>
@@ -1308,7 +1782,13 @@ export function TeamConsole({
               Add member
             </Btn>
             <div className="oc-team-form__actions">
-              <Btn onClick={() => setMode("browse")} variant="ghost">
+              <Btn
+                onClick={() => {
+                  setEditingTeam(null);
+                  setMode("browse");
+                }}
+                variant="ghost"
+              >
                 Cancel
               </Btn>
               <Btn
@@ -1318,76 +1798,276 @@ export function TeamConsole({
                   members.length < 2 ||
                   members.some(({ responsibility }) => !responsibility.trim())
                 }
-                onClick={createTeam}
+                onClick={editingTeam ? saveTeam : createTeam}
                 variant="primary"
               >
                 {busy ? <Spinner size={12} /> : null}
-                Create team
+                {editingTeam ? "Save changes" : "Create team"}
               </Btn>
             </div>
           </div>
         ) : selectedTeam ? (
           <div className="oc-team-workspace">
             <header className="oc-team-workspace__head">
-              <div>
-                <Eyebrow>{selectedTeam.members.length} member sequence</Eyebrow>
+              <div className="oc-team-workspace__identity">
+                <div className="oc-team-workspace__meta">
+                  <span>
+                    <UsersRound aria-hidden="true" size={12} />
+                    {selectedTeam.members.length}{" "}
+                    {selectedTeam.members.length === 1 ? "stage" : "stages"}
+                  </span>
+                  <span>
+                    <Workflow aria-hidden="true" size={12} />
+                    Sequential handoffs
+                  </span>
+                </div>
                 <h2>{sanitizeEvidenceText(selectedTeam.name)}</h2>
                 <p>{sanitizeEvidenceText(selectedTeam.description)}</p>
               </div>
-              <Btn onClick={() => refreshCatalog()} size="xs" variant="ghost">
-                <RefreshCw size={12} />
-                Refresh
-              </Btn>
+              <div className="oc-team-workspace__actions">
+                <Btn onClick={() => refreshCatalog()} size="xs" variant="ghost">
+                  <RefreshCw size={12} />
+                  Refresh
+                </Btn>
+                <Btn
+                  disabled={busy}
+                  onClick={() => exportTeam(selectedTeam)}
+                  size="xs"
+                  variant="ghost"
+                >
+                  <Download size={12} />
+                  Export
+                </Btn>
+                <Btn
+                  disabled={busy || agents.length < 2}
+                  onClick={() => beginEditTeam(selectedTeam)}
+                  size="xs"
+                  variant="ghost"
+                >
+                  <Pencil size={12} />
+                  Edit
+                </Btn>
+                <span className="oc-team-workspace__destructive">
+                  {confirmingDelete === selectedTeam.id ? (
+                    <>
+                      <Btn
+                        disabled={busy}
+                        onClick={() => {
+                          deleteTeam(selectedTeam).catch(() => undefined);
+                        }}
+                        size="xs"
+                        variant="danger-ghost"
+                      >
+                        {busy ? <Spinner size={11} /> : <Trash2 size={12} />}
+                        Delete permanently
+                      </Btn>
+                      <Btn
+                        disabled={busy}
+                        onClick={() => setConfirmingDelete(null)}
+                        size="xs"
+                        variant="ghost"
+                      >
+                        Keep
+                      </Btn>
+                    </>
+                  ) : (
+                    <Btn
+                      disabled={busy}
+                      onClick={() => setConfirmingDelete(selectedTeam.id)}
+                      size="xs"
+                      variant="ghost"
+                    >
+                      <Trash2 size={12} />
+                      Delete
+                    </Btn>
+                  )}
+                </span>
+              </div>
             </header>
+            {confirmingDelete === selectedTeam.id ? (
+              <p className="oc-team-delete-warning" role="alert">
+                Deleting removes the team and its run history from this account.
+                Runs already recorded against your usage are unaffected. This
+                cannot be undone; export first if you want to keep the sequence.
+              </p>
+            ) : null}
             <div className="oc-team-mission">
+              <div className="oc-team-mission__head">
+                <span className="oc-team-mission__icon">
+                  <Play aria-hidden="true" size={16} />
+                </span>
+                <div>
+                  <Eyebrow>Mission brief</Eyebrow>
+                  <h3>What should this team accomplish?</h3>
+                  <p>
+                    Give the team a clear outcome, relevant repository context,
+                    and the evidence you expect back.
+                  </p>
+                </div>
+                <kbd>Ctrl/⌘ + Enter</kbd>
+              </div>
               <Field label="Mission">
                 <textarea
                   onChange={(event) => setMission(event.currentTarget.value)}
+                  onKeyDown={(event) => {
+                    // The mission is multi-line, so Enter must stay Enter.
+                    // Cmd or Ctrl with Enter starts the run, which is what
+                    // every other composer in this product does.
+                    if (
+                      event.key === "Enter" &&
+                      (event.metaKey || event.ctrlKey) &&
+                      mission.trim() &&
+                      !(busy || loadingRuns || drafting)
+                    ) {
+                      event.preventDefault();
+                      startRun().catch(() => undefined);
+                    }
+                  }}
                   placeholder="Name the issue, pull request, repository, expected outcome, and evidence the team must return."
                   rows={4}
                   value={mission}
                 />
               </Field>
-              <Btn
-                disabled={busy || loadingRuns || !mission.trim()}
-                onClick={startRun}
-                variant="primary"
-              >
-                {busy || loadingRuns ? (
-                  <Spinner size={12} />
-                ) : (
-                  <ChevronRight size={13} />
-                )}
-                Start coordinated run
-              </Btn>
+              <p className="oc-team-mission__hint">
+                <span>
+                  The same brief follows every handoff.{" "}
+                  {mission.trim()
+                    ? "Review the sequence below, then launch."
+                    : "Start from scratch or draft a structured mission."}
+                </span>
+                {/*
+                  The limit is 40,000 characters and a mission is a few
+                  sentences, so a permanent counter was noise reporting a
+                  number nobody is near. It appears only once the length
+                  actually matters.
+                */}
+                {mission.length > TEAM_LIMITS.maxMissionLength * 0.9 ? (
+                  <span
+                    data-over={
+                      mission.length > TEAM_LIMITS.maxMissionLength
+                        ? ""
+                        : undefined
+                    }
+                  >
+                    {mission.length.toLocaleString()} /{" "}
+                    {TEAM_LIMITS.maxMissionLength.toLocaleString()}
+                  </span>
+                ) : null}
+              </p>
+              <div className="oc-team-mission__actions">
+                <Btn
+                  disabled={busy || loadingRuns || drafting}
+                  onClick={draftMission}
+                >
+                  {drafting ? <Spinner size={12} /> : <Sparkles size={13} />}
+                  {mission.trim() ? "Rewrite as a mission" : "Draft a mission"}
+                </Btn>
+                <Btn
+                  disabled={busy || loadingRuns || drafting || !mission.trim()}
+                  onClick={startRun}
+                  variant="primary"
+                >
+                  {busy || loadingRuns ? (
+                    <Spinner size={12} />
+                  ) : (
+                    <ChevronRight size={13} />
+                  )}
+                  Start coordinated run
+                </Btn>
+              </div>
             </div>
-            <div className="oc-team-run-layout">
+            <div
+              className="oc-team-run-layout"
+              data-empty={
+                !loadingRuns && runs.length === 0 ? "true" : undefined
+              }
+            >
               <aside className="oc-team-run-list">
                 <div className="oc-team-rail__label">
                   <span>Run history</span>
                   <span>{runs.length}</span>
                 </div>
-                {runs.map((run) => (
-                  <button
-                    data-selected={run.id === selectedRun?.id ? "" : undefined}
-                    disabled={busy}
-                    key={run.id}
-                    onClick={() => setSelectedRun(run)}
-                    type="button"
-                  >
-                    <StatusDot
-                      label={run.status}
-                      size={7}
-                      tone={teamTone(run.status)}
-                    />
-                    <span style={truncate}>
-                      {sanitizeEvidenceText(run.mission)}
-                    </span>
-                  </button>
-                ))}
+                {/*
+                  A listbox rather than a stack of buttons: the arrow keys
+                  move between runs, Home and End jump to the ends, and only
+                  the selected row is a tab stop, so reaching the record does
+                  not mean tabbing through every run.
+                */}
+                <div
+                  aria-label="Run history"
+                  className="oc-team-run-options"
+                  onKeyDown={(event) => {
+                    const index = runs.findIndex(
+                      (run) => run.id === selectedRun?.id
+                    );
+                    const next =
+                      event.key === "ArrowDown"
+                        ? Math.min(runs.length - 1, index + 1)
+                        : event.key === "ArrowUp"
+                          ? Math.max(0, index - 1)
+                          : event.key === "Home"
+                            ? 0
+                            : event.key === "End"
+                              ? runs.length - 1
+                              : -1;
+                    const target = next >= 0 ? runs[next] : undefined;
+                    if (!target || target.id === selectedRun?.id) {
+                      return;
+                    }
+                    event.preventDefault();
+                    setSelectedRun(target);
+                  }}
+                  role="listbox"
+                  tabIndex={-1}
+                >
+                  {runs.map((run) => {
+                    const selected = run.id === selectedRun?.id;
+                    return (
+                      <button
+                        aria-selected={selected}
+                        data-selected={selected ? "" : undefined}
+                        disabled={busy}
+                        key={run.id}
+                        onClick={() => setSelectedRun(run)}
+                        role="option"
+                        tabIndex={selected ? 0 : -1}
+                        type="button"
+                      >
+                        <StatusDot
+                          label={run.status}
+                          size={7}
+                          tone={teamTone(run.status)}
+                        />
+                        <span className="oc-team-run-option__body">
+                          <span style={truncate}>
+                            {sanitizeEvidenceText(run.mission)}
+                          </span>
+                          <small>
+                            {statusLabel(run.status)}
+                            {run.createdAt
+                              ? ` · ${relativeTime(run.createdAt, listedAt)}`
+                              : ""}
+                          </small>
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
                 {loadingRuns ? <p>Loading run history.</p> : null}
                 {!loadingRuns && runs.length === 0 ? (
-                  <p>No coordinated runs yet.</p>
+                  <div className="oc-team-run-empty">
+                    <span>
+                      <Clock3 aria-hidden="true" size={16} />
+                    </span>
+                    <strong>
+                      {runsFailed ? "History unavailable" : "No runs yet"}
+                    </strong>
+                    <p>
+                      {runsFailed
+                        ? "Run history could not be loaded. Any runs you started are unaffected."
+                        : "Launch the mission above and its progress will appear here."}
+                    </p>
+                  </div>
                 ) : null}
                 {nextRunCursor ? (
                   <Btn
@@ -1419,6 +2099,14 @@ export function TeamConsole({
                         {selectedRun.status.replaceAll("_", " ")}
                       </span>
                     </header>
+                    {selectedRun.status === "queued" ||
+                    selectedRun.status === "running" ? (
+                      <p className="oc-team-run-drive" role="status">
+                        This run continues if you close the page. Each member
+                        starts within about a minute of the one before it
+                        finishing.
+                      </p>
+                    ) : null}
                     {selectedRun.status === "waiting_approval" ? (
                       <div className="oc-team-approval">
                         <ShieldCheck size={18} />
@@ -1482,14 +2170,11 @@ export function TeamConsole({
                     </div>
                   </>
                 ) : (
-                  <div className="oc-team-empty">
-                    <UsersRound size={24} />
-                    <h3>Start the first coordinated run</h3>
-                    <p>
-                      The record will show every member, approval, handoff, and
-                      execution identifier in sequence.
-                    </p>
-                  </div>
+                  <TeamSequence
+                    agents={agents}
+                    skills={skills}
+                    team={selectedTeam}
+                  />
                 )}
               </div>
             </div>
@@ -1497,10 +2182,15 @@ export function TeamConsole({
         ) : (
           <div className="oc-team-empty">
             <UsersRound size={28} />
-            <h2>Create a coordinated team</h2>
+            <h2>
+              {catalogFailed
+                ? "Teams could not be loaded"
+                : "Create a coordinated team"}
+            </h2>
             <p>
-              Set up the GitHub delivery team or compose a custom sequence from
-              your execution profiles and reusable skills.
+              {catalogFailed
+                ? "Any teams you have are still here. Reload to try reading them again."
+                : "Set up the GitHub delivery team or compose a custom sequence from your execution profiles and reusable skills."}
             </p>
           </div>
         )}

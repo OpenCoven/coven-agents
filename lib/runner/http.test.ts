@@ -122,6 +122,7 @@ function definition(overrides: Partial<AgentDefinition> = {}): AgentDefinition {
     backend: "cloud",
     createdAt: "2026-08-28T15:00:00.000Z",
     description: "",
+    familiarId: "auto",
     id: AGENT_ID,
     instructions: "Do the thing.",
     lastRunAt: null,
@@ -1076,6 +1077,35 @@ test("update schedules bounded warm and reconciliation work", async () => {
   await fixture.after[0]();
   assert.equal(warmed, 1);
   assert.equal(reconciled, 1);
+});
+
+test("legacy update bodies reach the service without a default familiar", async () => {
+  let receivedInput: unknown;
+  const fixture = handlers({
+    service: service({
+      updateAgent: (_principal, _agentId, input) => {
+        receivedInput = input;
+        return Promise.resolve({
+          agent: definition({ name: "Updated" }),
+          kind: "updated",
+        });
+      },
+    }),
+  });
+
+  const response = await fixture.handlers.updateAgent(
+    new Request(`https://app.test/api/agents/${AGENT_ID}`, {
+      body: validDefinitionBody({ name: "Updated" }),
+      method: "PUT",
+    }),
+    AGENT_ID
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(
+    Object.hasOwn(receivedInput as Record<string, unknown>, "familiarId"),
+    false
+  );
 });
 
 test("scheduled update warming observes failures without rejection or provider leakage", async () => {

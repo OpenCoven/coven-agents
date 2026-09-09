@@ -133,11 +133,30 @@ function column<T>(row: Record<string, unknown>, name: string): T {
   return value as T;
 }
 
+/**
+ * A column the caller may legitimately not have selected, or that may not
+ * exist yet on the row being read.
+ *
+ * `column` throws on a missing key so that a query which forgot to select
+ * something fails loudly rather than silently reading undefined. That is the
+ * right default, but it is wrong for a nullable column added after runs
+ * already existed: those rows genuinely have nothing to report, and a run
+ * admitted before the column existed must keep dispatching, not throw.
+ */
+function optionalColumn<T>(
+  row: Record<string, unknown>,
+  name: string
+): T | null {
+  const value = row[name];
+  return value === undefined || value === null ? null : (value as T);
+}
+
 function asAgent(row: Record<string, unknown>): RunnerAgentRecord {
   return {
     createdAt: timestampColumn(row, "createdAt"),
     daytonaSandboxId: column(row, "daytonaSandboxId"),
     description: column(row, "description"),
+    familiarId: column(row, "familiarId"),
     id: column(row, "id"),
     instructions: column(row, "instructions"),
     lastRunAt: nullableTimestampColumn(row, "lastRunAt"),
@@ -188,6 +207,7 @@ function asRun(row: Record<string, unknown>): RunnerRunRecord {
     ),
     dispatchLeaseToken: column(row, "dispatchLeaseToken"),
     dispatchState: column(row, "dispatchState"),
+    entitlementMinutes: optionalColumn<number>(row, "entitlementMinutes"),
     error: column(row, "error"),
     executionPermission: column(row, "executionPermission"),
     executionProvenance: column(row, "executionProvenance"),
@@ -2111,12 +2131,23 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         return { kind: "decommissioning", value: asAgent(updated) };
       }),
 
+    /**
+     * Subscriber-initiated reset, used when prewarming finds a sandbox whose
+     * configuration no longer matches.
+     *
+     * Unlike the dispatch and cancellation resets, this one is not reached
+     * through a run lease, so it carries its own liveness guard: a sandbox
+     * holding a dispatching or running attempt is never reset here. Without
+     * that clause a prewarm could delete the sandbox out from under a live
+     * run, which is why this path previously refused to replace at all and
+     * left a drifted agent retrying forever instead.
+     */
     beginDaytonaSandboxReset: (
       principal: RunnerPrincipal,
       input: DaytonaSandboxFence
     ): Promise<
       | { kind: "updated"; value: RunnerAgentRecord }
-      | { kind: "not_found" | "stale_version" }
+      | { kind: "not_found" | "not_live" | "stale_version" }
     > =>
       database.transaction(async (transaction) => {
         const [updated] = await transaction.execute(
@@ -2140,6 +2171,16 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                   'provisioning_ambiguous',
                   'ready'
                 )
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM "RunnerRun" AS "agentLive"
+                  WHERE "agentLive"."agentId" = ${input.agentId}
+                    AND "agentLive"."tenant" = ${principal.tenant}
+                    AND "agentLive"."dispatchState" IN (
+                      'dispatching',
+                      'running'
+                    )
+                )
               RETURNING *`
           )
         );
@@ -2150,13 +2191,32 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           statement(
             "get-agent-after-daytona-sandbox-reset-begin",
             { agentId: input.agentId, tenant: principal.tenant },
-            sql`SELECT "id" FROM "RunnerAgent"
-              WHERE "id" = ${input.agentId}
-                AND "tenant" = ${principal.tenant}
+            sql`SELECT
+                "agent"."id",
+                EXISTS (
+                  SELECT 1
+                  FROM "RunnerRun" AS "agentLive"
+                  WHERE "agentLive"."agentId" = "agent"."id"
+                    AND "agentLive"."tenant" = "agent"."tenant"
+                    AND "agentLive"."dispatchState" IN (
+                      'dispatching',
+                      'running'
+                    )
+                ) AS "live"
+              FROM "RunnerAgent" AS "agent"
+              WHERE "agent"."id" = ${input.agentId}
+                AND "agent"."tenant" = ${principal.tenant}
               LIMIT 1`
           )
         );
-        return current ? { kind: "stale_version" } : { kind: "not_found" };
+        if (!current) {
+          return { kind: "not_found" };
+        }
+        // A live attempt is a wait, not a conflict: the caller retries once
+        // the run finishes rather than treating the agent as stale.
+        return (current as { live?: boolean }).live
+          ? { kind: "not_live" }
+          : { kind: "stale_version" };
       }),
 
     /**
@@ -2797,11 +2857,12 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             "create-agent",
             { ...input, tenant: principal.tenant },
             sql`INSERT INTO "RunnerAgent" (
-              "id", "tenant", "name", "description", "instructions", "model",
-              "runtime", "workspace"
+              "id", "tenant", "name", "description", "familiarId", "instructions",
+              "model", "runtime", "workspace"
             ) VALUES (
               ${input.id}, ${principal.tenant}, ${input.name}, ${input.description ?? ""},
-              ${input.instructions}, ${input.model}, ${input.runtime}, ${input.workspace ?? null}
+              ${input.familiarId}, ${input.instructions}, ${input.model},
+              ${input.runtime}, ${input.workspace ?? null}
             ) ON CONFLICT DO NOTHING
               RETURNING *`
           )
@@ -3745,9 +3806,23 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           : { kind: "lease_lost" };
       }),
 
+    /**
+     * `entitlementMinutes` is stamped in the same statement that sets
+     * `startedAt`, because the two are only meaningful together: the run's
+     * deadline is `startedAt + entitlementMinutes`, and a row carrying one
+     * without the other cannot be bounded.
+     *
+     * Optional because the reconciler also drives this transition when
+     * admission launched a run and died before marking it running. It has no
+     * credential context to supply, so those runs keep a null and fall back to
+     * the process-wide limit -- which is exactly what bounded every run before
+     * this column existed. Billing is unaffected either way: settlement clamps
+     * the charge to the minutes the reservation actually held.
+     */
     markDispatchRunningForDispatch: (
       _operator: RunnerOperator,
-      authority: RunnerDispatchAuthority
+      authority: RunnerDispatchAuthority,
+      entitlementMinutes?: number
     ): Promise<
       | {
           authority: RunnerDispatchAuthority;
@@ -3767,6 +3842,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           statement(
             "mark-dispatch-running-for-dispatch",
             {
+              entitlementMinutes: entitlementMinutes ?? null,
               expectedVersion: authority.expectedVersion,
               leaseToken: authority.leaseToken,
               runId: run.id,
@@ -3775,6 +3851,10 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
               SET "dispatchState" = 'running',
                   "status" = 'running',
                   "startedAt" = clock_timestamp(),
+                  "entitlementMinutes" = COALESCE(
+                    ${entitlementMinutes ?? null},
+                    "entitlementMinutes"
+                  ),
                   "updatedAt" = clock_timestamp(),
                   "version" = "version" + 1
               WHERE "id" = ${run.id}
@@ -5226,6 +5306,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             sql`UPDATE "RunnerAgent"
               SET "name" = ${input.name},
                   "description" = ${input.description},
+                  "familiarId" = ${input.familiarId},
                   "instructions" = ${input.instructions},
                   "model" = ${input.model},
                   "runtime" = ${input.runtime},

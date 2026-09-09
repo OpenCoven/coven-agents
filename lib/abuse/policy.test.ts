@@ -22,6 +22,7 @@ const EXPECTED_ROUTES = [
   "vote_read",
   "vote_write",
   "upload",
+  "billing_portal",
   "checkout",
   "minute_pack_checkout",
   "subscription_read_ip",
@@ -62,6 +63,7 @@ const EXPECTED_ROUTES = [
   "team_run_start",
   "team_run_stop",
   "team_run_approve",
+  "team_mission_draft",
 ] as const satisfies readonly AbuseRoute[];
 
 const EXPECTED_POLICIES = {
@@ -73,6 +75,7 @@ const EXPECTED_POLICIES = {
   auth_start: expectedPolicy(["ip"], 0, 5, 60, 20, 3600),
   avatar_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
   avatar_write: expectedPolicy(["ip", "user"], 8192, 10, 60, 40, 3600),
+  billing_portal: expectedPolicy(["ip", "user"], 0, 5, 300, 20, 3600),
   chat: expectedPolicy(["ip", "user"], 64_000, 4, 60, 60, 3600),
   chat_delete: expectedPolicy(["ip", "user"], 0, 5, 60, 20, 3600),
   checkout: expectedPolicy(["ip", "user"], 8192, 2, 300, 3, 3600),
@@ -126,6 +129,7 @@ const EXPECTED_POLICIES = {
   subscription_read_ip: expectedPolicy(["ip"], 0, 600, 60, 10_000, 3600),
   suggestions_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
   team_delete: expectedPolicy(["ip", "tenant"], 0, 5, 60, 20, 3600),
+  team_mission_draft: expectedPolicy(["ip", "tenant"], 2048, 10, 60, 60, 3600),
   team_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),
   team_run_approve: expectedPolicy(["ip", "tenant"], 4096, 10, 60, 40, 3600),
   team_run_read: expectedPolicy(["ip", "user"], 0, 60, 60, 600, 3600),

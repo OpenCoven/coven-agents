@@ -42,3 +42,29 @@ tsconfig.tsbuildinfo
 .env*
 *.env
 !.env.example
+
+# Per-developer agent tooling. These appear in the checkout because various
+# assistants install skills, caches and symlink farms into the repo root, not
+# because the project uses them. None of it is project configuration and none
+# of it should reach a shared branch: it is machine-local, it changes without
+# anyone editing it, and it is one `git add -A` away from being committed to a
+# private repo.
+#
+# `.claude/`, `.factory/` and `skills/` are symlink trees into `.agents/`, so
+# they are listed individually rather than covered by a glob -- a pattern loose
+# enough to catch them all would also catch legitimate dot-directories.
+#
+# Every rule is anchored with a leading slash because these are repo-root
+# artifacts. Unanchored, `skills/` matches at any depth and swallows the
+# tracked `app/api/skills/` routes. Gitignore does not apply to tracked files,
+# so that would look fine until someone removed and re-added a route -- which
+# is exactly when nobody is looking.
+/.agents/
+/.claude/
+/.factory/
+/.hermes/
+/.inferencesh/
+/.pi/
+/.tabnine/
+/skills/
+/skills-lock.json

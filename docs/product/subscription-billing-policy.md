@@ -24,11 +24,23 @@ seats, plan changes, automatic tax collection, and proration are not
 implemented here. The only add-on is the prepaid minute pack described under
 "Minute packs".
 
-Customer Portal and self-service cancellation are also deferred. An active
-subscriber can see current status and the paid-through boundary, but this
-release does not expose plan changes, payment-method management, invoice
-history, or cancellation controls. Operators must not imply that those
-features are available.
+Self-service cancellation, payment-method management, and invoice history are
+delegated to Stripe's hosted Customer Portal. `POST /api/billing/portal`
+creates a portal session for the signed-in subscriber's stored Customer and
+returns its URL; the application never handles a card and never reimplements
+those flows. The endpoint is deliberately **not** gated on
+`SUBSCRIPTION_CHECKOUT_ENABLED`: that flag pauses new purchases, and someone
+who already pays must still be able to leave while it is off. An account with
+a complimentary grant has no Stripe Customer and receives `customer_required`
+rather than an empty portal.
+
+A change made in the portal reaches this database only through the
+signature-verified webhook, exactly as a purchase does, so a cancellation
+takes effect on the entitlement timeline described below rather than
+immediately in the UI. Plan changes and proration remain out of scope.
+Operators must enable a portal configuration in Stripe before the control can
+work; without one, Stripe refuses the session and the subscriber sees a
+retryable billing-unavailable state.
 
 The included monthly allowance is `MONTHLY_MINUTE_CAP = 300` minutes of
 agent run time, defined in `lib/billing/limits.ts`. That constant is the
@@ -537,6 +549,20 @@ earlier periods used beyond their bucket. That remainder is computed from the
 reservation ledger at admission and in `GET /api/usage`, which reports it as
 `packMinutes` and the total as `allowance`. Demo tenants own no account and
 never draw on packs. The tenant daily cap applies unchanged.
+
+## Scheduled reconciliation
+
+`GET /api/internal/stripe-reconcile` and `GET /api/internal/runner-reconcile`
+are registered as Vercel cron jobs in `vercel.json`, hourly and every minute
+respectively, and are documented in `docs/runbooks/vercel-deployment.md`.
+Vercel supplies the `CRON_SECRET` bearer on each invocation. Only production
+deployments run them.
+
+The runner job is what advances a coordinated team run to its next member
+when nobody is watching; before it was restored, a run whose member had
+finished waited for a person to open the console. Neither job is retried by
+the scheduler and both may be skipped or overlapped, so correctness comes
+from their database leases and from the next invocation, never from delivery.
 
 ## Failure and recovery
 

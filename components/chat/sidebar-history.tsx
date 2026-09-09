@@ -105,6 +105,7 @@ export function SidebarHistory({ user }: { user: User | undefined }) {
 
   const {
     data: paginatedChatHistories,
+    error: historyError,
     setSize,
     isValidating,
     isLoading,
@@ -123,19 +124,31 @@ export function SidebarHistory({ user }: { user: User | undefined }) {
     ? paginatedChatHistories.some((page) => page.hasMore === false)
     : false;
 
-  const hasEmptyChatHistory = paginatedChatHistories
-    ? paginatedChatHistories.every((page) => page.chats.length === 0)
-    : false;
+  /**
+   * `fallbackData: []` makes a failed load structurally identical to an empty
+   * account, so the error has to be consulted before the empty state. Without
+   * it, someone with hundreds of chats is told they have none.
+   */
+  const hasEmptyChatHistory =
+    !historyError &&
+    (paginatedChatHistories
+      ? paginatedChatHistories.every((page) => page.chats.length === 0)
+      : false);
 
-  const handleDelete = useCallback(() => {
+  /**
+   * The delete is awaited before it is announced.
+   *
+   * Fired and forgotten, a rejected or failed delete produced the same
+   * "Chat deleted" toast as a successful one, and the row stayed gone from
+   * the list until the next revalidation quietly brought it back. The row is
+   * still removed optimistically, because that is what makes the list feel
+   * immediate, but a failure restores it and says so.
+   */
+  const handleDelete = useCallback(async () => {
     const chatToDelete = deleteId;
     const isCurrentChat = pathname === `/chat/${chatToDelete}`;
 
     setShowDeleteDialog(false);
-
-    if (isCurrentChat) {
-      router.replace("/");
-    }
 
     mutate((chatHistories) => {
       if (chatHistories) {
@@ -146,13 +159,38 @@ export function SidebarHistory({ user }: { user: User | undefined }) {
       }
     });
 
-    fetch(
-      `${process.env.NEXT_PUBLIC_BASE_PATH ?? ""}/api/chat?id=${chatToDelete}`,
-      { method: "DELETE" }
-    );
+    let deleted = false;
+    try {
+      const response = await fetch(
+        `${process.env.NEXT_PUBLIC_BASE_PATH ?? ""}/api/chat?id=${chatToDelete}`,
+        { method: "DELETE" }
+      );
+      deleted = response.ok;
+    } catch {
+      deleted = false;
+    }
 
+    if (!deleted) {
+      // Put the row back rather than leaving the list asserting a delete that
+      // did not happen.
+      await mutate();
+      toast.error("Could not delete that chat. It is still in your history.");
+      return;
+    }
+
+    if (isCurrentChat) {
+      router.replace("/");
+    }
     toast.success("Chat deleted");
   }, [deleteId, mutate, pathname, router]);
+
+  const retryHistory = useCallback(() => {
+    mutate().catch(() => undefined);
+  }, [mutate]);
+
+  const confirmDelete = useCallback(() => {
+    handleDelete().catch(() => undefined);
+  }, [handleDelete]);
 
   const handleShowDeleteDialog = useCallback((chatId: string) => {
     setDeleteId(chatId);
@@ -171,6 +209,28 @@ export function SidebarHistory({ user }: { user: User | undefined }) {
         <SidebarGroupContent>
           <div className="flex w-full flex-row items-center justify-center gap-2 px-2 text-[13px] text-sidebar-foreground/60">
             Login to save and revisit previous chats!
+          </div>
+        </SidebarGroupContent>
+      </SidebarGroup>
+    );
+  }
+
+  if (historyError) {
+    return (
+      <SidebarGroup className="group-data-[collapsible=icon]:hidden">
+        <SidebarGroupLabel className="text-[10px] font-semibold uppercase tracking-[0.12em] text-sidebar-foreground/70">
+          History
+        </SidebarGroupLabel>
+        <SidebarGroupContent>
+          <div className="flex w-full flex-col items-center gap-2 px-2 text-[13px] text-sidebar-foreground/60">
+            <span>Your chats could not be loaded. Nothing was lost.</span>
+            <button
+              className="underline underline-offset-2"
+              onClick={retryHistory}
+              type="button"
+            >
+              Try again
+            </button>
           </div>
         </SidebarGroupContent>
       </SidebarGroup>
@@ -353,7 +413,7 @@ export function SidebarHistory({ user }: { user: User | undefined }) {
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={handleDelete}>
+            <AlertDialogAction onClick={confirmDelete}>
               Continue
             </AlertDialogAction>
           </AlertDialogFooter>

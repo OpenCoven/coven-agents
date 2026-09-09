@@ -75,7 +75,10 @@ export function Composer({
 
   return (
     <div className="oc-composer oc-scroll">
-      <div className="oc-composer-grid">
+      <div
+        className="oc-composer-grid"
+        data-empty={runs.length === 0 ? "" : undefined}
+      >
         <section className="oc-composer-main">
           <header className="oc-composer-heading">
             <Eyebrow>New autonomous run</Eyebrow>
@@ -86,7 +89,10 @@ export function Composer({
           <div className="oc-composer-context">
             {[
               ["role", profile.label],
-              ["mode", profile.mode],
+              // `mode` is deliberately absent: it is an instruction in the
+              // profile text, not something the sandbox enforces, and it read
+              // as a permission sitting beside runtime, model and workspace,
+              // which are enforced.
               ["runtime", agent.runtime],
               ["model", sanitizeEvidenceText(agent.model)],
               [
@@ -148,7 +154,7 @@ export function Composer({
               <span>
                 {remainingCharacters > 0
                   ? `${remainingCharacters} more character${remainingCharacters === 1 ? "" : "s"}`
-                  : "⌘ ↵ to run"}
+                  : "Ctrl/⌘ + Enter to run"}
               </span>
               {blocked ? (
                 <span className="oc-composer-blocked">{blocked}</span>
@@ -193,8 +199,7 @@ export function Composer({
               <div className="oc-session-empty">
                 <strong>No receipts yet</strong>
                 <p style={type_.body}>
-                  Runs opened in this browser session will collect here for
-                  comparison and review.
+                  Your first run will appear here with its status and evidence.
                 </p>
               </div>
             ) : (

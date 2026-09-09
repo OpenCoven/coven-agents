@@ -17,6 +17,7 @@ import { HarnessCredentials } from "@/components/account/harness-credentials";
 import { UsageMeter } from "@/components/account/usage-meter";
 import { AccountMenu } from "@/components/agents/account-menu";
 import {
+  type BillingReturn,
   type MinutePackOffer,
   type MinutePackResult,
   SubscriptionCard,
@@ -31,6 +32,7 @@ import { cn } from "@/lib/utils";
 type CheckoutResult = "cancelled" | "success" | null;
 
 type AccountSettingsProps = {
+  billingReturn?: BillingReturn;
   checkoutEnabled: boolean;
   checkoutResult?: CheckoutResult;
   minutePackResult?: MinutePackResult;
@@ -73,6 +75,7 @@ function accountTabId(tab: TabId): string {
 }
 
 export function AccountSettings({
+  billingReturn = null,
   checkoutEnabled,
   checkoutResult = null,
   minutePackResult = null,
@@ -87,6 +90,7 @@ export function AccountSettings({
   const [tab, setTab] = useState<TabId>(() =>
     checkoutResult === "success" ||
     minutePackResult !== null ||
+    billingReturn !== null ||
     (checkoutResult === "cancelled" && checkoutEnabled)
       ? "billing"
       : "copilot"
@@ -284,7 +288,7 @@ export function AccountSettings({
             </p>
             {loginPath ? (
               <Link
-                className="mt-5 inline-flex h-10 items-center rounded-[8px] bg-[var(--oc-accent)] px-4 font-medium text-[13px] text-white transition-opacity hover:opacity-90"
+                className="mt-5 inline-flex h-10 items-center rounded-[8px] bg-[var(--oc-accent)] px-4 font-medium text-[13px] text-[var(--oc-accent-ink)] transition-opacity hover:opacity-90"
                 href={loginPath}
               >
                 Sign in with GitHub
@@ -292,7 +296,7 @@ export function AccountSettings({
             ) : (
               <span
                 aria-disabled="true"
-                className="mt-5 inline-flex h-10 items-center rounded-[8px] bg-[var(--oc-accent)] px-4 font-medium text-[13px] text-white opacity-60"
+                className="mt-5 inline-flex h-10 items-center rounded-[8px] bg-[var(--oc-accent)] px-4 font-medium text-[13px] text-[var(--oc-accent-ink)] opacity-60"
               >
                 Sign in with GitHub
               </span>
@@ -391,6 +395,7 @@ export function AccountSettings({
                 {active && entry.id === "usage" ? <UsageMeter /> : null}
                 {entry.id === "billing" && showBilling ? (
                   <SubscriptionCard
+                    billingReturn={billingReturn}
                     checkoutEnabled={checkoutEnabled}
                     checkoutResult={effectiveCheckoutResult}
                     confirmationOwner={confirmationOwner}

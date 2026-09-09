@@ -1,4 +1,4 @@
-import { count, eq, gte, max, sql } from "drizzle-orm";
+import { and, count, eq, gte, isNotNull, max, sql } from "drizzle-orm";
 import type { DayCount } from "@/lib/billing/history";
 import { fillDays, utcDay, windowStart } from "@/lib/billing/history";
 import type { databaseFor } from "@/lib/db/access";
@@ -10,10 +10,11 @@ import { isSubscribedAt } from "@/lib/subscription";
  * The Warden directory: every figure here is read off a real column.
  *
  * `RunUsage` records a tenant, a run id and the instant a run was counted,
- * and its reservation the minutes settled against the cap — so fleet volume,
- * per-account run counts, minutes and last-seen are real. Outcome and cost
- * have no column behind them and are deliberately absent; the screen names
- * those gaps instead of inventing numbers for them.
+ * and its reservation the minutes charged and the seconds the run actually
+ * held — so fleet volume, per-account run counts, minutes, run length and
+ * last-seen are all real. Outcome and provider spend have no column behind
+ * them and are deliberately absent; the screen names those gaps instead of
+ * inventing numbers for them.
  */
 
 export type AdminAccountRow = {
@@ -33,6 +34,9 @@ export type AdminOverview = {
   accountsTotal: number;
   activeAccounts: number;
   days: DayCount[];
+  /** Fleet run length, from the reservations that settled a measured run. */
+  durationP95Seconds: number | null;
+  minutesTotal: number;
   newAccounts: number;
   range: number;
   runsPrevious: number;
@@ -63,30 +67,51 @@ export async function adminOverview(
   const previousSince = windowStart(now, days * 2);
   const day = sql<string>`to_char(date_trunc('day', ${runUsage.countedAt} at time zone 'UTC'), 'YYYY-MM-DD')`;
 
-  const [byDay, previous, accounts, fresh, active] = await Promise.all([
-    db
-      .select({
-        day,
-        minutes: sql<number>`coalesce(sum(case when ${runReservation.state} = 'consumed' then ${runReservation.costUnits} else 0 end), 0)`,
-        runs: count(runUsage.id),
-      })
-      .from(runUsage)
-      .leftJoin(runReservation, eq(runReservation.runId, runUsage.runId))
-      .where(gte(runUsage.countedAt, since))
-      .groupBy(day),
-    db
-      .select({ runs: count() })
-      .from(runUsage)
-      .where(gte(runUsage.countedAt, previousSince)),
-    db.select({ total: count() }).from(user),
-    db.select({ total: count() }).from(user).where(gte(user.createdAt, since)),
-    db
-      .select({
-        tenants: sql<number>`count(distinct ${runUsage.tenant})`,
-      })
-      .from(runUsage)
-      .where(gte(runUsage.countedAt, since)),
-  ]);
+  const [byDay, previous, accounts, fresh, active, durations] =
+    await Promise.all([
+      db
+        .select({
+          day,
+          minutes: sql<number>`coalesce(sum(case when ${runReservation.state} = 'consumed' then ${runReservation.costUnits} else 0 end), 0)`,
+          runs: count(runUsage.id),
+        })
+        .from(runUsage)
+        .leftJoin(runReservation, eq(runReservation.runId, runUsage.runId))
+        .where(gte(runUsage.countedAt, since))
+        .groupBy(day),
+      db
+        .select({ runs: count() })
+        .from(runUsage)
+        .where(gte(runUsage.countedAt, previousSince)),
+      db.select({ total: count() }).from(user),
+      db
+        .select({ total: count() })
+        .from(user)
+        .where(gte(user.createdAt, since)),
+      db
+        .select({
+          tenants: sql<number>`count(distinct ${runUsage.tenant})`,
+        })
+        .from(runUsage)
+        .where(gte(runUsage.countedAt, since)),
+      db
+        .select({
+          p95: sql<
+            number | null
+          >`percentile_cont(0.95) within group (order by ${runReservation.durationSeconds})`,
+          settled: count(runReservation.runId),
+        })
+        .from(runUsage)
+        .innerJoin(
+          runReservation,
+          and(
+            eq(runReservation.runId, runUsage.runId),
+            eq(runReservation.state, "consumed"),
+            isNotNull(runReservation.durationSeconds)
+          )
+        )
+        .where(gte(runUsage.countedAt, since)),
+    ]);
 
   const series = fillDays(
     byDay.map((row) => ({
@@ -98,11 +123,17 @@ export async function adminOverview(
     now
   );
   const runsTotal = series.reduce((sum, entry) => sum + entry.runs, 0);
+  const settledRuns = Number(durations[0]?.settled ?? 0);
 
   return {
     accountsTotal: Number(accounts[0]?.total ?? 0),
     activeAccounts: Number(active[0]?.tenants ?? 0),
     days: series,
+    durationP95Seconds:
+      settledRuns > 0 && durations[0]?.p95 !== null
+        ? Math.round(Number(durations[0]?.p95))
+        : null,
+    minutesTotal: series.reduce((sum, entry) => sum + entry.minutes, 0),
     newAccounts: Number(fresh[0]?.total ?? 0),
     range: days,
     // The previous window is the double-window total minus this window's.

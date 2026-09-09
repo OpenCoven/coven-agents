@@ -7,6 +7,7 @@ import {
   createSkillInputSchema,
   createTeamInputSchema,
   createTeamRunInputSchema,
+  draftTeamMissionInputSchema,
   expectedVersionInputSchema,
   okEnvelopeSchema,
   skillEnvelopeSchema,
@@ -14,6 +15,7 @@ import {
   skillsEnvelopeSchema,
   teamEnvelopeSchema,
   teamIdSchema,
+  teamMissionEnvelopeSchema,
   teamRunEnvelopeSchema,
   teamRunIdSchema,
   teamRunsEnvelopeSchema,
@@ -186,6 +188,20 @@ export type TeamHttpDependencies = Readonly<{
   createService: (
     subscriber: RunnerAuthenticatedSubscriber
   ) => TeamService | Promise<TeamService>;
+  /**
+   * Drafts a mission from a team's own roster. Absent when no model is
+   * configured, which makes the endpoint report that drafting is unavailable
+   * rather than failing the request in a way a caller would retry.
+   */
+  draftMission?: (input: {
+    description: string;
+    hint: string;
+    members: readonly Readonly<{
+      required: boolean;
+      responsibility: string;
+    }>[];
+    name: string;
+  }) => Promise<string>;
   enforceAbuse: (input: AbuseEnforcementInput) => Promise<AbuseAdmission>;
   idempotencyStore: IdempotencyStore;
   ipAddress: (request: Request) => string | null;
@@ -198,6 +214,7 @@ export type TeamHttpHandlers = Readonly<{
   createTeam: (request: Request) => Promise<Response>;
   createTeamRun: (request: Request, teamId: string) => Promise<Response>;
   deleteSkill: (request: Request, id: string) => Promise<Response>;
+  draftTeamMission: (request: Request, teamId: string) => Promise<Response>;
   deleteTeam: (request: Request, id: string) => Promise<Response>;
   getSkill: (request: Request, id: string) => Promise<Response>;
   getTeam: (request: Request, id: string) => Promise<Response>;
@@ -479,6 +496,21 @@ function teamRunCursor(
     return errorResponse(dependencies, "invalid_request");
   }
   return entries[0][1];
+}
+
+/**
+ * Statuses whose next move belongs to the orchestrator rather than a person.
+ *
+ * `waiting_approval` is excluded on purpose: it is waiting for a human
+ * decision, and no reconciliation pass can advance it.
+ */
+const SELF_DRIVING_TEAM_RUN_STATUSES: ReadonlySet<string> = new Set([
+  "queued",
+  "running",
+]);
+
+function drivesItself(status: string): boolean {
+  return SELF_DRIVING_TEAM_RUN_STATUSES.has(status);
 }
 
 function scheduleReconciliation(dependencies: TeamHttpDependencies): void {
@@ -837,6 +869,64 @@ export function createTeamHttpHandlers(
         return deleteResponse(dependencies, result);
       }),
 
+    draftTeamMission: (request, teamId) =>
+      safely(dependencies, async () => {
+        const subscriber = await authorize(
+          request,
+          "team_mission_draft",
+          dependencies,
+          "json"
+        );
+        if (isResponse(subscriber)) {
+          return subscriber;
+        }
+        const invalid = invalidId(dependencies, teamIdSchema, teamId);
+        if (invalid) {
+          return invalid;
+        }
+        const body = await readBoundedJson(
+          request,
+          abusePolicyFor("team_mission_draft").bodyBytes,
+          draftTeamMissionInputSchema,
+          { emptyBody: {} }
+        );
+        if (body.kind !== "ok") {
+          return errorResponse(
+            dependencies,
+            body.kind === "too_large" ? "body_too_large" : "invalid_request"
+          );
+        }
+        const { draftMission } = dependencies;
+        if (!draftMission) {
+          return errorResponse(dependencies, "abuse_control_unavailable");
+        }
+        const service = await dependencies.createService(subscriber);
+        const found = await service.getTeam(subscriber.principal, teamId);
+        if (found.kind !== "found") {
+          return errorResponse(dependencies, "not_found");
+        }
+        let mission: string;
+        try {
+          mission = await draftMission({
+            description: found.team.description,
+            hint: body.value.hint.trim(),
+            members: found.team.members.map((member) => ({
+              required: member.required,
+              responsibility: member.responsibility,
+            })),
+            name: found.team.name,
+          });
+        } catch {
+          // The provider failed. Say so as a retryable condition rather than
+          // leaking a model or gateway error to the console.
+          return errorResponse(dependencies, "abuse_control_unavailable");
+        }
+        const parsed = teamMissionEnvelopeSchema.safeParse({ mission });
+        return parsed.success
+          ? jsonResponse(teamMissionEnvelopeSchema, parsed.data)
+          : errorResponse(dependencies, "abuse_control_unavailable");
+      }),
+
     getSkill: (request, id) =>
       safely(dependencies, async () => {
         const subscriber = await authorize(request, "skill_read", dependencies);
@@ -887,6 +977,17 @@ export function createTeamHttpHandlers(
         }
         const service = await dependencies.createService(subscriber);
         const result = await service.getRun(subscriber.principal, id);
+        /**
+         * Reading a live run also nudges it forward. Without a scheduled
+         * driver, a run whose child has finished has nobody left to project
+         * its result, so it would sit at `running` until a person created,
+         * approved, or stopped something. Anyone watching the run now
+         * advances it, after the response, so watching is never the thing
+         * that fails to make progress.
+         */
+        if (result.kind === "found" && drivesItself(result.teamRun.status)) {
+          scheduleReconciliation(dependencies);
+        }
         return result.kind === "found"
           ? jsonResponse(teamRunEnvelopeSchema, {
               teamRun: result.teamRun,
@@ -930,6 +1031,12 @@ export function createTeamHttpHandlers(
           teamId,
           cursor
         );
+        if (
+          result.kind === "found" &&
+          result.teamRuns.some((teamRun) => drivesItself(teamRun.status))
+        ) {
+          scheduleReconciliation(dependencies);
+        }
         return result.kind === "found"
           ? jsonResponse(teamRunsEnvelopeSchema, {
               nextCursor: result.nextCursor,

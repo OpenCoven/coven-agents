@@ -8,6 +8,7 @@ const BASE_AGENT: AgentDefinition = {
   backend: "cloud",
   createdAt: "2026-08-30T12:00:00.000Z",
   description: "",
+  familiarId: "auto",
   id: "11111111-1111-4111-8111-111111111111",
   instructions: "Custom operating contract.",
   lastRunAt: null,
@@ -26,23 +27,23 @@ const BASE_AGENT: AgentDefinition = {
 
 const EXPECTED = {
   builder: {
-    mode: "Can edit",
+    mode: "Asked to edit",
     outcome: "Working change and focused proof",
   },
   critic: {
-    mode: "Report only",
+    mode: "Asked to report only",
     outcome: "Concrete failure scenarios",
   },
   scout: {
-    mode: "Report only",
+    mode: "Asked to report only",
     outcome: "Findings and risks",
   },
   scribe: {
-    mode: "Can edit docs",
+    mode: "Asked to edit docs",
     outcome: "Source-backed documentation update",
   },
   tester: {
-    mode: "Can edit",
+    mode: "Asked to edit",
     outcome: "Failing-first test and fix",
   },
 } as const;
@@ -82,7 +83,7 @@ test("renamed and crew-suffixed built-ins retain their operating role", () => {
 
     assert.equal(profile.id, "builder");
     assert.equal(profile.label, "Builder");
-    assert.equal(profile.mode, "Can edit");
+    assert.equal(profile.mode, "Asked to edit");
   }
 });
 
@@ -91,7 +92,7 @@ test("custom profiles get neutral bounded guidance", () => {
 
   assert.equal(profile.id, "custom");
   assert.equal(profile.label, "Custom contract");
-  assert.equal(profile.mode, "Contract defined");
+  assert.equal(profile.mode, "Asked per contract");
   assert.equal(profile.outcome, "Evidence required by the stored contract");
   assert.equal(profile.prompts.length, 3);
   assert.equal(

@@ -67,6 +67,7 @@ const applicationRouteFiles = [
   "app/api/agents/[id]/runs/route.ts",
   "app/api/agents/route.ts",
   "app/api/analytics/route.ts",
+  "app/api/billing/portal/route.ts",
   "app/api/checkout/route.ts",
   "app/api/credentials/device/route.ts",
   "app/api/credentials/route.ts",
@@ -92,6 +93,7 @@ const applicationRouteFiles = [
   "app/api/team-runs/[id]/approve/route.ts",
   "app/api/team-runs/[id]/route.ts",
   "app/api/team-runs/[id]/stop/route.ts",
+  "app/api/teams/[id]/mission/route.ts",
   "app/api/teams/[id]/route.ts",
   "app/api/teams/[id]/runs/route.ts",
   "app/api/teams/route.ts",
@@ -200,6 +202,12 @@ const environmentKeys = [
   "AUTH_SECRET",
   "AUTH_URL",
   "BETA_ALLOWLIST",
+  "BETA_CAMPAIGN_ENABLED",
+  "BETA_CAMPAIGN_GRANT_DAYS",
+  "BETA_CAMPAIGN_MAX_ACCOUNTS",
+  "BETA_CAMPAIGN_MINUTES",
+  "BETA_CAMPAIGN_MIN_ACCOUNT_AGE_DAYS",
+  "BETA_CAMPAIGN_RUN_MINUTES",
   "BETA_MODE",
   "BLOB_READ_WRITE_TOKEN",
   "CREDENTIAL_AAD_WRITES_ENABLED",
@@ -336,6 +344,7 @@ const developmentDependencies = [
   "husky",
   "lint-staged",
   "postcss",
+  "sharp",
   "tailwindcss",
   "tsx",
   "typescript",
@@ -359,6 +368,8 @@ const scriptNames = [
   "db:up",
   "demo:record",
   "dev",
+  "familiar:assets",
+  "familiar:assets:check",
   "fix",
   "hygiene",
   "planning:check",
@@ -589,6 +600,8 @@ test("the living subscription policy records current billing authorities", () =>
     "app/api/checkout/route.ts",
     "app/api/stripe/webhook/route.ts",
     "GET /api/internal/stripe-reconcile",
+    "POST /api/billing/portal",
+    "docs/runbooks/vercel-deployment.md",
     "POST /api/minute-packs/checkout",
     "MINUTE_PACK_PRICES",
     "lib/billing/minute-packs.ts",
@@ -622,11 +635,24 @@ test("the subscriber offer renders the authoritative run cap without duplicating
     "utf8"
   );
 
+  // The named import may sit alongside others; what matters is that the cap
+  // comes from the constant and the number itself never appears in the view.
   assert.match(
     source,
-    /import \{ MONTHLY_MINUTE_CAP \} from "@\/lib\/billing\/limits";/
+    /import \{[^}]*\bMONTHLY_MINUTE_CAP\b[^}]*\} from "@\/lib\/billing\/limits";/s
   );
   assert.equal(source.includes(String(MONTHLY_MINUTE_CAP)), false);
+
+  // The usage ledger is the other surface that quotes the cap to a buyer.
+  const ledger = readFileSync(
+    new URL("components/billing/usage-ledger.tsx", repositoryRoot),
+    "utf8"
+  );
+  assert.match(
+    ledger,
+    /import \{[^}]*\bMONTHLY_MINUTE_CAP\b[^}]*\} from "@\/lib\/billing\/limits";/s
+  );
+  assert.equal(ledger.includes(String(MONTHLY_MINUTE_CAP)), false);
 });
 
 test("the README links the living subscription policy", () => {
@@ -1004,7 +1030,7 @@ test("the required local check gate includes retired-platform residue validation
 
   assert.equal(
     manifest.scripts?.check,
-    "pnpm validate:platform-residue && ultracite check && pnpm planning:check"
+    "pnpm validate:platform-residue && pnpm familiar:assets:check && ultracite check && pnpm planning:check"
   );
 });
 

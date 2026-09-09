@@ -25,6 +25,15 @@ test("lapsed analytics access is denied before admission or history reads", asyn
       calls.push("abuse");
       return Promise.resolve({ kind: "allowed" });
     },
+    readDurations: () => {
+      calls.push("durations");
+      return Promise.resolve({
+        longestSeconds: null,
+        medianSeconds: null,
+        settledRuns: 0,
+        unsettledRuns: 0,
+      });
+    },
     readHistory: () => {
       calls.push("history");
       return Promise.resolve([]);

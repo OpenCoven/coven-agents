@@ -4,21 +4,21 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { UsageLedger } from "@/components/billing/usage-ledger";
 import { useApplicationLoginPath } from "@/hooks/use-application-login-path";
 import { browserApplicationPath } from "@/lib/application-path";
-import { MONTHLY_MINUTE_CAP } from "@/lib/billing/limits";
+import {
+  MONTHLY_MINUTE_CAP,
+  RUN_MINUTE_RESERVATION,
+} from "@/lib/billing/limits";
 import { parseRetryAfter } from "@/lib/http/retry-after";
 
 const MAX_CONFIRMATION_ATTEMPTS = 15;
 const CONFIRMATION_INTERVAL_MS = 1000;
 const CONFIRMATION_FOREGROUND_BUDGET_MS = 15_000;
-const ALLOWANCE_MARKERS = Array.from(
-  { length: 15 },
-  (_, index) => `allowance-${index + 1}`
-);
-
 type CheckoutResult = "cancelled" | "success" | null;
 export type MinutePackResult = "added" | "cancelled" | null;
+export type BillingReturn = "managed" | null;
 export type MinutePackOffer = { minutes: number; priceId: string };
 
 export type SubscriptionCardProps = {
@@ -27,6 +27,8 @@ export type SubscriptionCardProps = {
   confirmationOwner?: string | null;
   isSubscriber: boolean;
   /** Top-up packs on offer, smallest first. Empty hides the section. */
+  /** Set when the viewer has just come back from Stripe's billing portal. */
+  billingReturn?: BillingReturn;
   minutePacks?: readonly MinutePackOffer[];
   minutePackResult?: MinutePackResult;
   onCheckoutConfirmed?: () => void;
@@ -169,6 +171,7 @@ function retryTime(retryAt: number): string {
 }
 
 export function SubscriptionCard({
+  billingReturn = null,
   checkoutEnabled,
   checkoutResult = null,
   confirmationOwner,
@@ -204,6 +207,9 @@ export function SubscriptionCard({
   const [checkoutSuppressed, setCheckoutSuppressed] = useState(false);
   const [checkoutPending, setCheckoutPending] = useState(false);
   const [packPending, setPackPending] = useState<string | null>(null);
+  const [packCredited, setPackCredited] = useState(false);
+  const [portalPending, setPortalPending] = useState(false);
+  const markPackCredited = useCallback(() => setPackCredited(true), []);
 
   const noticeRef = useRef<HTMLDivElement>(null);
   const checkoutAttemptRef = useRef<CheckoutAttempt | null>(null);
@@ -998,6 +1004,67 @@ export function SubscriptionCard({
     [packPending, publishNotice]
   );
 
+  /**
+   * Sends the subscriber to Stripe's hosted portal to cancel, change a card,
+   * or read invoices. Everything that touches a payment method lives there,
+   * so this app never sees one.
+   */
+  const openBillingPortal = useCallback(async () => {
+    if (portalPending) {
+      return;
+    }
+    setPortalPending(true);
+    let response: Response;
+    try {
+      response = await fetch(browserApplicationPath("/api/billing/portal"), {
+        credentials: "same-origin",
+        method: "POST",
+      });
+    } catch {
+      publishNotice(
+        {
+          detail: "Check your connection, then try again.",
+          title: "Could not reach billing.",
+          tone: "error",
+        },
+        { focus: true }
+      );
+      setPortalPending(false);
+      return;
+    }
+    let decoded: unknown;
+    try {
+      decoded = await response.json();
+    } catch {
+      decoded = null;
+    }
+    const body = responseBody(decoded);
+    if (response.ok) {
+      const destination = secureCheckoutDestination(body.url);
+      if (destination.kind === "valid") {
+        window.location.assign(destination.href);
+        return;
+      }
+    }
+    const error = checkoutError(body);
+    publishNotice(
+      {
+        detail:
+          error === "customer_required"
+            ? "This account has complimentary access, so there is no Stripe subscription to manage."
+            : "Try again in a moment.",
+        title: "Could not open the billing portal.",
+        tone: "error",
+      },
+      { focus: true }
+    );
+    setPortalPending(false);
+  }, [portalPending, publishNotice]);
+
+  const startBillingPortal = useCallback(() => {
+    openBillingPortal().catch(() => undefined);
+  }, [openBillingPortal]);
+
   const chooseMinutePack = useCallback(
     (event: { currentTarget: HTMLButtonElement }) => {
       const { priceId } = event.currentTarget.dataset;
@@ -1304,6 +1371,9 @@ export function SubscriptionCard({
         dateStyle: "long",
       }).format(paidThrough)
     : null;
+  const daysToRenewal = paidThrough
+    ? Math.max(0, Math.ceil((paidThrough.getTime() - Date.now()) / 86_400_000))
+    : null;
   const confirmationInFlight = checkoutResult === "success" && !activeConfirmed;
   const showCheckoutAction =
     checkoutEnabled &&
@@ -1311,6 +1381,7 @@ export function SubscriptionCard({
     !activeConfirmed &&
     !confirmationInFlight &&
     !checkoutSuppressed;
+  const showBillingPortal = isSubscriber || activeConfirmed;
   const showMinutePacks =
     checkoutEnabled &&
     minutePacks.length > 0 &&
@@ -1326,38 +1397,39 @@ export function SubscriptionCard({
         <p className="oc-subscription-card__eyebrow">Monthly contract</p>
         <h2 id={titleId}>Subscriber access</h2>
         <p>
-          One subscription provides {MONTHLY_MINUTE_CAP} minutes of agent run
-          time each month. A run holds its full time limit when it starts and
-          settles to the minutes it actually used when it ends.
+          One subscription includes {MONTHLY_MINUTE_CAP} minutes of agent run
+          time each month. Each run counts the minutes it actually runs, rounded
+          up to the next minute; while a run is in progress, up to{" "}
+          {RUN_MINUTE_RESERVATION} minutes are set aside and released when it
+          ends.
         </p>
       </div>
 
-      <div
-        aria-label={`Monthly allowance: ${MONTHLY_MINUTE_CAP} minutes of agent run time`}
-        className="oc-subscription-ledger"
-        role="img"
-      >
-        <div className="oc-subscription-ledger__heading">
-          <span>Run time allowance</span>
-          <span>Monthly</span>
-        </div>
-        <div className="oc-subscription-ledger__value">
-          <strong>{MONTHLY_MINUTE_CAP}</strong>
-          <span>minutes</span>
-        </div>
-        <div aria-hidden="true" className="oc-subscription-ledger__ticks">
-          {ALLOWANCE_MARKERS.map((marker) => (
-            <span key={marker} />
-          ))}
-        </div>
-      </div>
+      <UsageLedger
+        enabled={isSubscriber || activeConfirmed}
+        onPackCredited={markPackCredited}
+        variant="card"
+        watchPackCredit={minutePackResult === "added"}
+      />
 
       {activeConfirmed && formattedPaidThrough && paidThrough ? (
         <div className="oc-subscription-paid-through">
-          <span>Paid through</span>
-          <time dateTime={paidThrough.toISOString()}>
-            {formattedPaidThrough}
-          </time>
+          <span>Renews on</span>
+          <span>
+            <time dateTime={paidThrough.toISOString()}>
+              {formattedPaidThrough}
+            </time>
+            {daysToRenewal === null ? null : (
+              <>
+                {" "}
+                <small>
+                  {daysToRenewal === 0
+                    ? "today"
+                    : `in ${daysToRenewal} day${daysToRenewal === 1 ? "" : "s"}`}
+                </small>
+              </>
+            )}
+          </span>
         </div>
       ) : null}
 
@@ -1369,16 +1441,24 @@ export function SubscriptionCard({
       ) : null}
 
       {showMinutePacks ? (
-        <div className="oc-subscription-packs" data-testid="minute-packs">
-          <div className="oc-subscription-ledger__heading">
-            <span>Add minutes</span>
-            <span>One-time</span>
-          </div>
-          <p className="oc-subscription-card__provider-note">
-            Top-up minutes never expire and are used after the monthly{" "}
-            {MONTHLY_MINUTE_CAP}. Stripe shows the amount before purchase.
-          </p>
-          <div className="oc-subscription-card__actions">
+        <div
+          className="oc-subscription-offer"
+          data-result={packCredited ? "credited" : (minutePackResult ?? "none")}
+          data-testid="minute-packs"
+        >
+          <p className="oc-subscription-offer__eyebrow">Top up</p>
+          {minutePacks.length === 1 && minutePacks[0] ? (
+            <div className="oc-subscription-offer__figure">
+              <strong>{minutePacks[0].minutes}</strong>
+              <span>minutes · one-time</span>
+            </div>
+          ) : (
+            <div className="oc-subscription-offer__figure">
+              <strong>{minutePacks.length}</strong>
+              <span>pack sizes · one-time</span>
+            </div>
+          )}
+          <div className="oc-subscription-offer__actions">
             {minutePacks.map((pack) => (
               <button
                 aria-busy={packPending === pack.priceId}
@@ -1395,11 +1475,17 @@ export function SubscriptionCard({
               </button>
             ))}
           </div>
-          {minutePackResult ? (
-            <p className="oc-subscription-card__provider-note" role="status">
-              {minutePackResult === "added"
-                ? "Top-up received. The minutes are credited as soon as Stripe records the payment, usually within a minute, and appear in Usage."
-                : "Top-up cancelled. Nothing was charged."}
+          <p className="oc-subscription-offer__terms">
+            Top-up minutes never expire and are used only after your monthly{" "}
+            {MONTHLY_MINUTE_CAP}. Stripe shows the price before you pay.
+          </p>
+          {packCredited || minutePackResult ? (
+            <p className="oc-subscription-offer__status" role="status">
+              {packCredited
+                ? "Minutes added. Your allowance above already includes them."
+                : minutePackResult === "added"
+                  ? "Payment received. Your minutes appear above as soon as Stripe records it, usually within a minute."
+                  : "Top-up cancelled. Nothing was charged."}
             </p>
           ) : null}
         </div>
@@ -1420,6 +1506,28 @@ export function SubscriptionCard({
             <strong>{notice.title}</strong>
             <p>{notice.detail}</p>
           </div>
+        </div>
+      ) : null}
+
+      {showBillingPortal ? (
+        <div className="oc-subscription-manage">
+          <p>
+            Cancelling, changing a card, and invoice history are handled by
+            Stripe.{" "}
+            {billingReturn === "managed"
+              ? "A change made there appears here once Stripe confirms it, which can take a moment."
+              : "A cancellation keeps access until the paid-through date above."}
+          </p>
+          <button
+            aria-busy={portalPending}
+            className="oc-subscription-action"
+            data-variant="quiet"
+            disabled={portalPending}
+            onClick={startBillingPortal}
+            type="button"
+          >
+            {portalPending ? "Opening Stripe…" : "Manage subscription"}
+          </button>
         </div>
       ) : null}
 

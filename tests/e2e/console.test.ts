@@ -35,6 +35,7 @@ const retainedAgent = {
   backend: "cloud",
   createdAt: "2026-08-27T06:00:00.000Z",
   description: "Verifies the run timeline.",
+  familiarId: "auto",
   id: AGENT_ID,
   instructions: "Report evidence clearly.",
   lastRunAt: "2026-08-27T06:01:00.000Z",
@@ -208,6 +209,43 @@ test.describe("Run console", () => {
     expect(protectedRequests).toEqual([]);
   });
 
+  test("filtering the command palette resets its keyboard selection", async ({
+    page,
+  }) => {
+    await page.goto("/agents");
+    await page.getByRole("button", { name: "Search or run a command" }).click();
+    const search = page.getByRole("textbox", { exact: true, name: "Search" });
+    await search.press("ArrowDown");
+    await search.press("ArrowDown");
+    await search.fill("Open settings");
+    await search.press("Enter");
+    await expect(
+      page.getByRole("heading", { name: "Sign in to manage your account" })
+    ).toBeVisible();
+  });
+
+  test("the command palette keeps keyboard focus inside and restores its trigger", async ({
+    page,
+  }) => {
+    await page.goto("/agents");
+    const trigger = page.getByRole("button", {
+      name: "Search or run a command",
+    });
+    await trigger.click();
+    const dialog = page.getByRole("dialog", {
+      name: "Search runs, agents, and commands",
+    });
+    const search = page.getByRole("textbox", { exact: true, name: "Search" });
+    await expect(search).toBeFocused();
+    await search.press("Shift+Tab");
+    expect(
+      await dialog.evaluate((el) => el.contains(document.activeElement))
+    ).toBe(true);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(trigger).toBeFocused();
+  });
+
   test("an authenticated subscriber prewarms once through the same-origin API", async ({
     context,
     page,
@@ -352,6 +390,21 @@ test.describe("Run console", () => {
         name: "Choose execution profile",
       });
       await expect(selector).toHaveAttribute("aria-modal", "true");
+      const portrait = selector.locator(
+        `[data-profile-id="${template.id}"] img`
+      );
+      await expect(portrait).toBeVisible();
+      await expect(portrait).toHaveAttribute(
+        "src",
+        new RegExp(`/_next/static/media/${template.id}\\.[^/]+\\.webp$`, "u")
+      );
+      await expect
+        .poll(() =>
+          portrait.evaluate((image: HTMLImageElement) =>
+            image.complete ? image.naturalWidth : 0
+          )
+        )
+        .toBeGreaterThan(0);
       await selector
         .getByRole("button", {
           name: new RegExp(`${template.name}.*${profile.mode}`, "u"),
@@ -541,7 +594,7 @@ test.describe("Run console", () => {
     await expect(paths.getByRole("button")).toHaveCount(3);
     await expect(
       paths.getByRole("button", { name: /Start from a role/ })
-    ).toContainText("1 profile · ~5 seconds");
+    ).toContainText("1 profile · one action");
     await expect(
       paths.getByRole("button", { name: /Create a crew/ })
     ).toContainText("2–3 profiles · one action");
@@ -551,7 +604,7 @@ test.describe("Run console", () => {
     await expect(
       page.getByRole("heading", { name: "Start from a role" })
     ).toHaveCount(0);
-    await expect(paths).not.toContainText(/(^|\s)[123](\s|$)/);
+    await expect(paths.getByText(/^[123]$/)).toHaveCount(0);
 
     await paths.getByRole("button", { name: /Start from a role/ }).click();
     await expect(page.getByText("How read-only is enforced")).toBeVisible();
@@ -570,7 +623,9 @@ test.describe("Run console", () => {
     );
     await page.getByRole("button", { name: "All paths" }).click();
     await paths.getByRole("button", { name: /Create a crew/ }).click();
-    await expect(page.getByText("Proposed: sequenced mode")).toBeVisible();
+    await expect(
+      page.getByText("A crew is a complementary", { exact: false })
+    ).toBeVisible();
   });
 
   test("returning to all paths preserves the Forge draft and restores focus", async ({
@@ -599,6 +654,136 @@ test.describe("Run console", () => {
     await expect(page.getByLabel("Operating contract")).toHaveValue(
       "Review the release evidence and report concrete blockers."
     );
+  });
+
+  test("Forge creation persists the selected familiar", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    let createdBody: Record<string, unknown> | null = null;
+    await page.route("**/api/tenant/prewarm", (route) =>
+      route.fulfill({ status: 204 })
+    );
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: ["copilot"] } })
+    );
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const request = route.request();
+      const { pathname } = new URL(request.url());
+      if (pathname === "/api/agents" && request.method() === "POST") {
+        createdBody = request.postDataJSON() as Record<string, unknown>;
+        return route.fulfill({
+          json: {
+            agent: {
+              ...retainedAgent,
+              ...createdBody,
+              id: OTHER_AGENT_ID,
+              name: "Release steward",
+            },
+          },
+          status: 201,
+        });
+      }
+      return route.fulfill(
+        pathname === "/api/agents"
+          ? { json: { agents: [] } }
+          : { json: { apiVersion: "1.0", runs: [] } }
+      );
+    });
+
+    await page.goto("/agents");
+    await expect(page.getByText("e2e-user@example.invalid")).toBeVisible();
+    await page.getByRole("button", { name: "New agent" }).click();
+    await page.getByRole("button", { name: /Forge a profile/ }).click();
+    await page.getByLabel("Name", { exact: true }).fill("Release steward");
+    await page
+      .getByLabel("Operating contract")
+      .fill("Review release evidence and report every concrete blocker.");
+    await page.getByRole("radio", { name: /Morrow/ }).click();
+    await page.getByRole("button", { name: "Create profile" }).click();
+
+    await expect.poll(() => createdBody?.familiarId).toBe("scribe");
+    await expect(
+      page.locator('[data-profile-id="scribe"] img').first()
+    ).toBeVisible();
+  });
+
+  test("an existing profile can change its familiar", async ({
+    context,
+    page,
+  }) => {
+    await context.addCookies(await subscriberCookies());
+    let updatedBody: Record<string, unknown> | null = null;
+    let releaseUpdate!: () => Promise<void>;
+    await page.route("**/api/tenant/prewarm", (route) =>
+      route.fulfill({ status: 204 })
+    );
+    await page.route("**/api/credentials", (route) =>
+      route.fulfill({ json: { harnessIds: ["copilot"] } })
+    );
+    await page.route(/\/api\/(?:agents|runs)(?:\/|$)/, (route) => {
+      const request = route.request();
+      const { pathname } = new URL(request.url());
+      if (
+        pathname === `/api/agents/${AGENT_ID}` &&
+        request.method() === "PUT"
+      ) {
+        updatedBody = request.postDataJSON() as Record<string, unknown>;
+        return new Promise<void>((resolve) => {
+          releaseUpdate = async () => {
+            await route.fulfill({
+              json: {
+                agent: {
+                  ...retainedAgent,
+                  ...updatedBody,
+                  familiarId: "critic",
+                },
+              },
+            });
+            resolve();
+          };
+        });
+      }
+      return route.fulfill(
+        pathname === "/api/agents"
+          ? { json: { agents: [retainedAgent] } }
+          : { json: { apiVersion: "1.0", runs: [] } }
+      );
+    });
+
+    await page.goto("/agents");
+    const actions = page.getByRole("button", { name: "More run actions" });
+    await actions.click();
+    await page.getByRole("menuitem", { name: "Choose familiar" }).click();
+    const dialog = page.getByRole("dialog", { name: "Familiar selection" });
+    await expect(dialog).toHaveAttribute("aria-modal", "true");
+    await expect(dialog.getByRole("radio", { checked: true })).toBeFocused();
+    await page.getByRole("radio", { name: /Rook/ }).click();
+
+    await expect.poll(() => updatedBody?.familiarId).toBe("critic");
+    await expect(page.getByRole("button", { name: "Saving…" })).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeVisible();
+    await releaseUpdate();
+    await expect(dialog).toBeHidden();
+    const portrait = page.locator('[data-profile-id="critic"] img').first();
+    await expect(portrait).toHaveAttribute(
+      "src",
+      /\/_next\/static\/media\/critic\.[^/]+\.webp$/u
+    );
+    await expect
+      .poll(() =>
+        portrait.evaluate((image: HTMLImageElement) =>
+          image.complete ? image.naturalWidth : 0
+        )
+      )
+      .toBeGreaterThan(0);
+
+    await actions.click();
+    await page.getByRole("menuitem", { name: "Choose familiar" }).click();
+    await page.keyboard.press("Escape");
+    await expect(actions).toBeFocused();
   });
 
   test("profile paths share a row on wide screens and stack without overflow on narrow screens", async ({
@@ -2482,6 +2667,7 @@ test.describe("Run console", () => {
     await page.getByRole("button", { name: "Remove" }).click();
     await started;
 
+    await context.clearCookies();
     sessionOverride = null;
     const sessionRefresh = page.waitForResponse(async (response) => {
       if (new URL(response.url()).pathname !== "/api/auth/session") {
@@ -2491,6 +2677,10 @@ test.describe("Run console", () => {
     });
     await notifySessionChange(page);
     await sessionRefresh;
+    await expect(
+      page.getByRole("button", { exact: true, name: "signed out" })
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Account and settings" }).click();
     await expect(
       page.getByRole("heading", { name: "Sign in to manage your account" })
     ).toBeVisible();

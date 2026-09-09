@@ -25,7 +25,7 @@ export const DAYTONA_COPILOT_IMAGE_BASE = "node:22-bookworm-slim";
  * this generation counter is part of the pin: bumping any harness
  * `installVersion` without bumping this leaves the old CLI running.
  */
-export const DAYTONA_COPILOT_SNAPSHOT_NAME = "coven-agents-copilot-1";
+export const DAYTONA_COPILOT_SNAPSHOT_NAME = "coven-agents-copilot-2";
 export const PNPM_VERSION = "10.32.1";
 export const WORKSPACE_DIRECTORY = "/workspace";
 
@@ -70,13 +70,22 @@ const MARKER_NAMES = [
 export const DAYTONA_BUILD_LOG_LOOKBEHIND_SIZE = 96;
 
 export type DaytonaSnapshot = Readonly<{
+  cpu?: number;
+  disk?: number;
+  /** Daytona reports snapshot memory as `mem`; `memory` is the sandbox name. */
+  mem?: number;
+  memory?: number;
   name: string;
   state: string;
 }>;
 
 export type DaytonaSnapshotService = Readonly<{
   create: (
-    parameters: Readonly<{ image: Image; name: string }>,
+    parameters: Readonly<{
+      image: Image;
+      name: string;
+      resources: Readonly<{ cpu: number; disk: number; memory: number }>;
+    }>,
     options: Readonly<{ onLogs: (chunk: string) => void }>
   ) => Promise<DaytonaSnapshot>;
   get: (name: string) => Promise<DaytonaSnapshot>;
@@ -386,6 +395,12 @@ export async function provisionDaytonaSnapshot(
       {
         image: dependencies.image ?? createDaytonaCopilotImage(),
         name: configuration.snapshotName,
+        // Resources belong here and nowhere else. Daytona applies its own
+        // defaults (1 vCPU / 1 GiB / 3 GiB) to a snapshot created without
+        // them, and `CreateSandboxFromSnapshotParams` carries no resources
+        // field, so a sandbox can never ask for more than its snapshot has.
+        // Omitting this is what left every sandbox below policy.
+        resources: configuration.resources,
       },
       {
         onLogs: (chunk) => {
@@ -424,6 +439,36 @@ export async function provisionDaytonaSnapshot(
   ) {
     throw new Error(
       `Daytona snapshot "${configuration.snapshotName}" is not active after creation (state: ${snapshotState(snapshot.state)}).`
+    );
+  }
+
+  // Verify what was asked for is what landed. Snapshots are immutable, so a
+  // snapshot clamped below policy — by an org quota, say — cannot be corrected
+  // in place: the runtime guard would then refuse the whole fleet permanently,
+  // and the only remedy is another generation. This is the one moment the
+  // mistake is still cheap, so it must fail here rather than at delete time.
+  const shortfalls = (
+    [
+      ["cpu", snapshot.cpu, configuration.resources.cpu],
+      ["disk", snapshot.disk, configuration.resources.disk],
+      [
+        "memory",
+        snapshot.mem ?? snapshot.memory,
+        configuration.resources.memory,
+      ],
+    ] as const
+  ).filter(
+    ([, provided, required]) => provided !== undefined && provided < required
+  );
+  if (shortfalls.length > 0) {
+    throw new Error(
+      `Daytona snapshot "${configuration.snapshotName}" was created below policy (${shortfalls
+        .map(
+          ([field, provided, required]) => `${field} ${provided} < ${required}`
+        )
+        .join(
+          ", "
+        )}). Snapshots are immutable: build the next generation instead.`
     );
   }
   return snapshot;

@@ -3,6 +3,7 @@ import {
   validateAbuseConfig,
 } from "../lib/abuse/config";
 import { approvedApplicationOrigin } from "../lib/auth/application-origin";
+import { validateCampaignConfig } from "../lib/billing/campaign";
 import { validateSubscriptionCheckoutEnvironment } from "../lib/billing/config-core";
 import { credentialKekRingFromEnvironment } from "../lib/credentials/key-ring";
 import { validateGitHubEnvironment } from "../lib/github/config";
@@ -80,11 +81,30 @@ function validateReleaseAudience(
     if (env.BETA_MODE !== "off") {
       throw new Error("Public release requires BETA_MODE=off.");
     }
+    if (env.BETA_CAMPAIGN_ENABLED === "on") {
+      throw new Error(
+        "Public release requires BETA_CAMPAIGN_ENABLED=off: the campaign hands " +
+          "free run minutes to every new account, which is a beta acquisition " +
+          "cost, not a launched pricing model."
+      );
+    }
     return;
   }
 
   if (env.BETA_MODE !== "on") {
     throw new Error("Closed beta requires BETA_MODE=on.");
+  }
+
+  validateCampaignConfig(env);
+
+  /**
+   * An open campaign replaces the allowlist as the guest list, so an empty one
+   * is correct rather than a lockout. The campaign has its own bounds -- a
+   * global account cap, a per-account minute grant and an expiry -- which
+   * `validateCampaignConfig` has already insisted are present and sane.
+   */
+  if (env.BETA_CAMPAIGN_ENABLED === "on") {
+    return;
   }
 
   const allowlist = (env.BETA_ALLOWLIST ?? "")

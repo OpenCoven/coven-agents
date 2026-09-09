@@ -1400,6 +1400,7 @@ test("missing, suspended, under-permissioned, all-repository, and excessive inst
 test("transient provider failures are sanitized and cannot repeat a consumed OAuth exchange", async () => {
   const idempotency = new MemoryIdempotencyStore();
   const store = new MemoryConnectionStore();
+  const diagnostics: unknown[] = [];
   let attempts = 0;
   const handlers = createGitHubConnectionHandlers(
     dependencies({
@@ -1419,6 +1420,9 @@ test("transient provider failures are sanitized and cannot repeat a consumed OAu
         }),
       createStore: () => store,
       idempotencyStore: idempotency,
+      reportFailure: (failure) => {
+        diagnostics.push(failure);
+      },
     })
   );
   const authorization = await beginUserAuthorization(handlers);
@@ -1434,6 +1438,104 @@ test("transient provider failures are sanitized and cannot repeat a consumed OAu
   assert.equal(await errorCode(retried), "github_provider_unavailable");
   assert.equal(attempts, 1);
   assert.equal(store.replacements.length, 0);
+  assert.deepEqual(diagnostics, [
+    {
+      code: "github_provider_unavailable",
+      providerRequestId: null,
+      providerStage: "app_installation_lookup",
+      retryable: true,
+      stage: "installation_authority",
+      status: 503,
+    },
+  ]);
+});
+
+test("OAuth proof failures report only bounded provider diagnostics", async () => {
+  const diagnostics: unknown[] = [];
+  const handlers = createGitHubConnectionHandlers(
+    dependenciesWithUserAuthorization(
+      {
+        reportFailure: (failure) => {
+          diagnostics.push(failure);
+        },
+      },
+      {
+        proveInstallationAccess: () =>
+          Promise.reject(
+            Object.assign(
+              new GitHubProviderError("github_provider_invalid_response", {
+                requestId: "ABC1:DEF2:123456:789ABC:01234567",
+                retryable: false,
+                status: 502,
+              }),
+              { providerStage: "repository_lookup" as const }
+            )
+          ),
+      }
+    )
+  );
+  const authorization = await beginUserAuthorization(handlers);
+
+  const response = await handlers.callback(
+    oauthCallbackRequest(authorization.state),
+    null
+  );
+
+  assert.equal(response.status, 503);
+  assert.deepEqual(diagnostics, [
+    {
+      code: "github_provider_invalid_response",
+      providerRequestId: "ABC1:DEF2:123456:789ABC:01234567",
+      providerStage: "repository_lookup",
+      retryable: false,
+      stage: "user_authorization",
+      status: 502,
+    },
+  ]);
+  assert.doesNotMatch(
+    JSON.stringify(diagnostics),
+    /oauth-code|oauth-state|installation-local-token/u
+  );
+});
+
+test("diagnostic reporting cannot strand a consumed OAuth callback", async (context) => {
+  const idempotency = new MemoryIdempotencyStore();
+  context.mock.method(console, "error", () => {
+    throw new Error("fallback logging unavailable");
+  });
+  let proofCalls = 0;
+  const handlers = createGitHubConnectionHandlers(
+    dependenciesWithUserAuthorization(
+      {
+        idempotencyStore: idempotency,
+        reportFailure: () => {
+          throw new Error("logging unavailable");
+        },
+      },
+      {
+        proveInstallationAccess: () => {
+          proofCalls += 1;
+          return Promise.reject(
+            new GitHubProviderError("github_provider_unavailable", {
+              retryable: true,
+              status: 503,
+            })
+          );
+        },
+      }
+    )
+  );
+  const authorization = await beginUserAuthorization(handlers);
+  const request = oauthCallbackRequest(authorization.state);
+
+  const failed = await handlers.callback(request, null);
+  assert.equal(failed.status, 503);
+  assert.equal(await errorCode(failed), "github_provider_unavailable");
+
+  const replayed = await handlers.callback(request, null);
+  assert.equal(replayed.status, 503);
+  assert.equal(await errorCode(replayed), "github_provider_unavailable");
+  assert.equal(proofCalls, 1);
 });
 
 test("a near-expiry OAuth callback keeps its consumed record through slow bounded processing and cleanup", async () => {
@@ -2129,6 +2231,59 @@ function callbackRequest(
     `https://app.example${basePath}/api/github/callback?${query}`
   );
 }
+
+test("the RFC 9207 issuer is accepted from GitHub and rejected from anyone else", async () => {
+  // GitHub returns iss on the authorization redirect. Refusing the callback
+  // for carrying it stranded every connection before a single GitHub call was
+  // made, which is what shipped; tolerating it blindly would throw away the
+  // mix-up defence the parameter exists to provide.
+  const accepted = await createGitHubConnectionHandlers(
+    dependencies()
+  ).callback(
+    new Request(
+      `${oauthCallbackRequest(stateFor()).url}&iss=${encodeURIComponent(
+        "https://github.com/login/oauth"
+      )}`
+    ),
+    null
+  );
+  assert.notEqual(await errorCode(accepted), "github_callback_invalid");
+
+  for (const issuer of [
+    "https://github.com/login/oauth/",
+    "https://gitlab.com/login/oauth",
+    "https://github.com.evil.test/login/oauth",
+    "",
+  ]) {
+    // biome-ignore lint/performance/noAwaitInLoops: each forged issuer uses an isolated handler
+    const rejected = await createGitHubConnectionHandlers(
+      dependencies()
+    ).callback(
+      new Request(
+        `${oauthCallbackRequest(stateFor()).url}&iss=${encodeURIComponent(issuer)}`
+      ),
+      null
+    );
+    assert.equal(rejected.status, 400, issuer);
+    // biome-ignore lint/performance/noAwaitInLoops: each forged issuer uses an isolated handler
+    assert.equal(await errorCode(rejected), "github_callback_invalid", issuer);
+  }
+});
+
+test("an authorization callback still refuses parameters GitHub does not send", async () => {
+  for (const suffix of ["&scope=repo", "&installation_id=1", "&iss2=x"]) {
+    // biome-ignore lint/performance/noAwaitInLoops: each forged query uses an isolated handler
+    const response = await createGitHubConnectionHandlers(
+      dependencies()
+    ).callback(
+      new Request(`${oauthCallbackRequest(stateFor()).url}${suffix}`),
+      null
+    );
+    assert.equal(response.status, 400, suffix);
+    // biome-ignore lint/performance/noAwaitInLoops: each forged query uses an isolated handler
+    assert.equal(await errorCode(response), "github_callback_invalid", suffix);
+  }
+});
 
 function oauthCallbackRequest(
   state: string,

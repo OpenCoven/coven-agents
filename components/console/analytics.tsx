@@ -5,7 +5,7 @@
 import { useEffect, useState } from "react";
 import { Eyebrow } from "@/components/console/primitives";
 import { hairline, tabular, type as type_ } from "@/components/console/styles";
-import type { DayCount } from "@/lib/billing/history";
+import type { DayCount, RunDurationSummary } from "@/lib/billing/history";
 
 /**
  * Evidence analytics.
@@ -27,10 +27,20 @@ const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 type Analytics = {
   cap: number;
   days: DayCount[];
+  durations: RunDurationSummary;
   minutes: number;
   range: number;
   total: number;
 };
+
+/** `1m 04s`, or `47s` under a minute. Tabular so a column of them lines up. */
+function duration(seconds: number): string {
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}m ${String(seconds % 60).padStart(2, "0")}s`;
+}
 
 function shortDay(day: string): string {
   const at = new Date(`${day}T00:00:00.000Z`);
@@ -147,6 +157,72 @@ function VolumeChart({ days }: { days: DayCount[] }) {
 }
 
 /**
+ * How long a run usually takes, read off the reservation it settled against.
+ *
+ * The median rather than the mean, because one recovery run parked at the
+ * execution limit would drag an average away from what a run normally costs.
+ * The denominator is on screen: a run whose start or finish could not be
+ * measured never settles a duration, and counting it as its reserved length
+ * would quietly inflate every figure here.
+ */
+function RunLength({ durations }: { durations: RunDurationSummary }) {
+  const measured = durations.settledRuns > 0;
+  return (
+    <div
+      style={{
+        background: "var(--bg-sunken)",
+        border: hairline,
+        borderRadius: "var(--radius-card)",
+        display: "flex",
+        flexDirection: "column",
+        gap: 10,
+        minHeight: 186,
+        padding: 14,
+      }}
+    >
+      <Eyebrow>Run length</Eyebrow>
+      <span
+        style={{
+          color: measured ? "var(--text-primary)" : "var(--text-faint)",
+          font: "600 26px/1 var(--font-ui)",
+          ...tabular,
+        }}
+      >
+        {measured && durations.medianSeconds !== null
+          ? duration(durations.medianSeconds)
+          : "—"}
+      </span>
+      <p style={{ ...type_.body, font: "400 11px/1.55 var(--font-ui)" }}>
+        {measured
+          ? "Median time a run held its sandbox, measured when the run settled. This is the charge the cap counted."
+          : "No run in this window has settled a measured duration yet. A run settles when its cleanup records a start and a finish."}
+      </p>
+      <div style={{ flex: 1 }} />
+      <span
+        style={{
+          ...type_.meta,
+          lineHeight: 1.5,
+          whiteSpace: "normal",
+          ...tabular,
+        }}
+      >
+        {measured
+          ? `median of ${durations.settledRuns} settled ${durations.settledRuns === 1 ? "run" : "runs"}${
+              durations.longestSeconds === null
+                ? ""
+                : ` · longest ${duration(durations.longestSeconds)}`
+            }${
+              durations.unsettledRuns > 0
+                ? ` · ${durations.unsettledRuns} not measured`
+                : ""
+            }`
+          : `${durations.unsettledRuns} ${durations.unsettledRuns === 1 ? "run" : "runs"} counted, none measured`}
+      </span>
+    </div>
+  );
+}
+
+/**
  * A panel the receipts cannot fill.
  *
  * Named rather than hidden. A missing panel reads as a page still being built;
@@ -202,33 +278,53 @@ function NotRecorded({
   );
 }
 
+/**
+ * Why the panel has no series.
+ *
+ * `refused` and `unavailable` are kept apart deliberately. Telling someone
+ * their session cannot read the record sends them to sign in again, which is
+ * the wrong move and wasted effort when the real cause was a dropped request
+ * or a response this page could not parse.
+ */
+type LoadFailure = "refused" | "unavailable" | null;
+
 export function Analytics() {
   const [range, setRange] = useState<Range>(30);
   const [data, setData] = useState<Analytics | null>(null);
-  const [refused, setRefused] = useState(false);
+  const [failure, setFailure] = useState<LoadFailure>(null);
 
   useEffect(() => {
     let cancelled = false;
     setData(null);
-    setRefused(false);
+    setFailure(null);
 
     fetch(`${BASE_PATH}/api/analytics?days=${range}`)
-      .then(async (response) =>
-        response.ok ? ((await response.json()) as Analytics) : null
-      )
+      .then(async (response) => {
+        if (response.status === 401 || response.status === 403) {
+          return "refused" as const;
+        }
+        if (!response.ok) {
+          return "unavailable" as const;
+        }
+        try {
+          return (await response.json()) as Analytics;
+        } catch {
+          return "unavailable" as const;
+        }
+      })
       .then((next) => {
         if (cancelled) {
           return;
         }
-        if (next) {
-          setData(next);
-        } else {
-          setRefused(true);
+        if (next === "refused" || next === "unavailable") {
+          setFailure(next);
+          return;
         }
+        setData(next);
       })
       .catch(() => {
         if (!cancelled) {
-          setRefused(true);
+          setFailure("unavailable");
         }
       });
 
@@ -342,10 +438,11 @@ export function Analytics() {
               </span>
             </div>
 
-            {refused ? (
+            {failure ? (
               <p style={{ ...type_.body, font: "400 12px/1.6 var(--font-ui)" }}>
-                Run history is not readable on this session. The record is kept
-                per account, so it needs a signed-in subscriber.
+                {failure === "refused"
+                  ? "Run history is not readable on this session. The record is kept per account, so it needs a signed-in subscriber."
+                  : "Run history could not be loaded just now. Nothing is missing from the record; reload or pick another range to try again."}
               </p>
             ) : data ? (
               <>
@@ -504,11 +601,23 @@ export function Analytics() {
               needs="an outcome on the run record"
               title="Accepted evidence"
             />
-            <NotRecorded
-              blurb="How long a run took, and where the time went, is not stored. The runner reports durations while a run is live; nothing persists them."
-              needs="start and finish timestamps per run"
-              title="Time to evidence"
-            />
+            {data ? (
+              <RunLength durations={data.durations} />
+            ) : (
+              <NotRecorded
+                blurb={
+                  failure
+                    ? "Run lengths come from the same request as the series above, which did not return."
+                    : "Run lengths load with the rest of the window."
+                }
+                needs={
+                  failure
+                    ? "a successful analytics read"
+                    : "the analytics response"
+                }
+                title="Run length"
+              />
+            )}
             <NotRecorded
               blurb="Why a run stopped is not stored. The reason exists in the run's own record inside the runner, which this account does not archive."
               needs="a stop reason on the run record"
@@ -523,12 +632,12 @@ export function Analytics() {
               maxWidth: "84ch",
             }}
           >
-            Three panels above are empty because the data behind them is not
+            The two dashed panels are empty because the data behind them is not
             recorded, not because they are unfinished. The run record stores one
-            row per counted run — a tenant, a run id, an instant and the minutes
-            settled against the cap — which is enough to say how many runs
-            happened, when, and how long they held, and nothing about how they
-            went.
+            row per counted run — a tenant, a run id, an instant, and the
+            minutes and seconds it settled against the cap — which is enough to
+            say how many runs happened, when, how long they held, and what they
+            cost, and nothing about how they went.
           </p>
         </div>
       </div>

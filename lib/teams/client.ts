@@ -5,12 +5,16 @@ import {
   type CreateSkillInput,
   type CreateTeamInput,
   type CreateTeamRunInput,
+  type DraftTeamMissionInput,
+  okEnvelopeSchema,
   skillEnvelopeSchema,
   skillsEnvelopeSchema,
   teamEnvelopeSchema,
+  teamMissionEnvelopeSchema,
   teamRunEnvelopeSchema,
   teamRunsEnvelopeSchema,
   teamsEnvelopeSchema,
+  type UpdateTeamInput,
 } from "@opencoven/agent-contracts";
 import { browserApplicationPath } from "@/lib/application-path";
 
@@ -95,6 +99,54 @@ export class TeamClient {
         }
       )
     );
+  }
+
+  /**
+   * Replaces a team definition. `expectedVersion` is the optimistic fence:
+   * a concurrent edit elsewhere makes this fail rather than silently win.
+   */
+  async updateTeam(
+    teamId: string,
+    input: UpdateTeamInput,
+    options: MutationOptions = {}
+  ) {
+    return teamEnvelopeSchema.parse(
+      await this.request(`/api/teams/${encodeURIComponent(teamId)}`, {
+        body: JSON.stringify(input),
+        headers: { "content-type": "application/json" },
+        method: "PUT",
+        signal: options.signal,
+      })
+    ).team;
+  }
+
+  /** Deletes a team. The version travels in the query, and the body is empty. */
+  async deleteTeam(
+    teamId: string,
+    expectedVersion: number,
+    signal?: AbortSignal
+  ) {
+    return okEnvelopeSchema.parse(
+      await this.request(
+        `/api/teams/${encodeURIComponent(teamId)}?expectedVersion=${expectedVersion}`,
+        { method: "DELETE", signal }
+      )
+    );
+  }
+
+  async draftTeamMission(
+    teamId: string,
+    input: DraftTeamMissionInput,
+    signal?: AbortSignal
+  ) {
+    return teamMissionEnvelopeSchema.parse(
+      await this.request(`/api/teams/${encodeURIComponent(teamId)}/mission`, {
+        body: JSON.stringify(input),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+        signal,
+      })
+    ).mission;
   }
 
   async createTeamRun(

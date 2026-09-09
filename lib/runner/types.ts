@@ -2,6 +2,7 @@ import "server-only";
 
 import type {
   CommandEvidence,
+  FamiliarId,
   FileEvidence,
   RunError,
   RunEvent,
@@ -118,6 +119,7 @@ export type RunnerAgentRecord = {
   createdAt: Date;
   daytonaSandboxId: string | null;
   description: string;
+  familiarId: FamiliarId;
   id: string;
   instructions: string;
   lastRunAt: Date | null;
@@ -165,6 +167,13 @@ export type RunnerRunRecord = Omit<
   dispatchLeaseExpiresAt: Date | null;
   dispatchLeaseToken: string | null;
   dispatchState: RunnerDispatchState;
+  /**
+   * Minutes this run was admitted with, and therefore how long it may run.
+   * Null on runs admitted before the column existed, and on the recovery path
+   * where the reconciler marks a stranded dispatch running; both fall back to
+   * the process-wide limit.
+   */
+  entitlementMinutes?: number | null;
   error: RunError | null;
   executionPermission: RunnerExecutionPermission;
   githubBrokerPolicy: GitHubBrokerPolicy | null;
@@ -207,6 +216,7 @@ export type PersistRunnerAttemptRedactionInput = Omit<
 
 export type CreateRunnerAgentInput = {
   description?: string;
+  familiarId: FamiliarId;
   id: string;
   instructions: string;
   model: string;
@@ -218,6 +228,7 @@ export type CreateRunnerAgentInput = {
 export type UpdateRunnerAgentInput = {
   description: string;
   expectedVersion: number;
+  familiarId: FamiliarId;
   id: string;
   instructions: string;
   model: string;

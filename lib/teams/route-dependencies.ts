@@ -41,6 +41,15 @@ async function authorizeSubscriberAccess(session: SessionLike) {
   return authorization.authorizeSubscriberAccess(session);
 }
 
+async function draftMission(
+  input: Parameters<
+    NonNullable<Parameters<typeof createTeamHttpHandlers>[0]["draftMission"]>
+  >[0]
+): Promise<string> {
+  const mission = await import("@/lib/ai/mission");
+  return mission.draftTeamMission(input);
+}
+
 export function productionTeamHttpHandlers(): TeamHttpHandlers {
   return createTeamHttpHandlers({
     after,
@@ -68,6 +77,7 @@ export function productionTeamHttpHandlers(): TeamHttpHandlers {
         ),
       });
     },
+    draftMission,
     enforceAbuse: enforceAbusePolicy,
     idempotencyStore: lazyDatabaseIdempotencyStore,
     ipAddress: (request) => ipAddress(request) ?? null,

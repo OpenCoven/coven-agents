@@ -47,5 +47,8 @@ export function productionGitHubConnectionHandlers(): GitHubConnectionHandlers {
     },
     getConfig: () => validateGitHubEnvironment(process.env),
     idempotencyStore: databaseIdempotencyStore,
+    reportFailure: (failure) => {
+      console.error("GitHub connection provider failure.", failure);
+    },
   });
 }
