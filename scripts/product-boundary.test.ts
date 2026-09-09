@@ -344,6 +344,7 @@ const developmentDependencies = [
   "husky",
   "lint-staged",
   "postcss",
+  "sharp",
   "tailwindcss",
   "tsx",
   "typescript",
@@ -367,6 +368,8 @@ const scriptNames = [
   "db:up",
   "demo:record",
   "dev",
+  "familiar:assets",
+  "familiar:assets:check",
   "fix",
   "hygiene",
   "planning:check",
@@ -1027,7 +1030,7 @@ test("the required local check gate includes retired-platform residue validation
 
   assert.equal(
     manifest.scripts?.check,
-    "pnpm validate:platform-residue && ultracite check && pnpm planning:check"
+    "pnpm validate:platform-residue && pnpm familiar:assets:check && ultracite check && pnpm planning:check"
   );
 });
 

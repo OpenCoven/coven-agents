@@ -1,0 +1,60 @@
+{
+  "assets": [
+    {
+      "bytes": 10648,
+      "format": "webp",
+      "height": 512,
+      "id": "builder",
+      "sha256": "90aea90780ffa6316245b7b8e3b405ac10f0be172a6453b36013646602447d8d",
+      "width": 512
+    },
+    {
+      "bytes": 12958,
+      "format": "webp",
+      "height": 512,
+      "id": "critic",
+      "sha256": "c2bbb9fb38701d5356655d7200aee48e2e772ea9919734afb4b5ececb1b9533c",
+      "width": 512
+    },
+    {
+      "bytes": 6210,
+      "format": "webp",
+      "height": 512,
+      "id": "custom",
+      "sha256": "56d95811280cf4de79229a2167d4619aac6c87cdd7505d065a14d3a2789c1577",
+      "width": 512
+    },
+    {
+      "bytes": 15250,
+      "format": "webp",
+      "height": 512,
+      "id": "scout",
+      "sha256": "b55db79156ed13384bfe746282af3e18b43eb41eb9699d3a1725c41668499f62",
+      "width": 512
+    },
+    {
+      "bytes": 9730,
+      "format": "webp",
+      "height": 512,
+      "id": "scribe",
+      "sha256": "0b146b72ddb7481d63759c19519d04d6af35b63eb4484d302a933af54994a099",
+      "width": 512
+    },
+    {
+      "bytes": 12038,
+      "format": "webp",
+      "height": 512,
+      "id": "tester",
+      "sha256": "83e64cb515ebb76d19a64d1e8c563d7d8ace547f1f5b3c2afde7eaa114a6eeb1",
+      "width": 512
+    }
+  ],
+  "limits": {
+    "collectionBytes": 100000,
+    "outputPixels": 512,
+    "portraitBytes": 20000,
+    "sourcePixels": 1024
+  },
+  "totalBytes": 66834,
+  "version": 1
+}
