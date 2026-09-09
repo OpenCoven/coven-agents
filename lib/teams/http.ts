@@ -380,15 +380,26 @@ function subscriberFailure(
   );
 }
 
+function logTeamUnavailable(
+  message: string,
+  details: Readonly<Record<string, string>>
+): void {
+  if (process.env.NODE_ENV === "production") {
+    console.error(message, details);
+  }
+}
+
 function abuseFailure(
   dependencies: TeamHttpDependencies,
-  admission: Exclude<AbuseAdmission, { kind: "allowed" }>
+  admission: Exclude<AbuseAdmission, { kind: "allowed" }>,
+  route: AbuseEnforcementInput["route"]
 ): Response {
   if (admission.kind === "denied") {
     const response = errorResponse(dependencies, "rate_limited");
     response.headers.set("retry-after", String(admission.retryAfterSeconds));
     return response;
   }
+  logTeamUnavailable("Team request abuse admission unavailable.", { route });
   return errorResponse(dependencies, "abuse_control_unavailable");
 }
 
@@ -421,7 +432,7 @@ async function authorize(
   });
   return admission.kind === "allowed"
     ? subscriber
-    : abuseFailure(dependencies, admission);
+    : abuseFailure(dependencies, admission, route);
 }
 
 function isResponse(
@@ -898,6 +909,9 @@ export function createTeamHttpHandlers(
         }
         const { draftMission } = dependencies;
         if (!draftMission) {
+          logTeamUnavailable("Team mission draft unavailable.", {
+            stage: "generator_configuration",
+          });
           return errorResponse(dependencies, "abuse_control_unavailable");
         }
         const service = await dependencies.createService(subscriber);
@@ -916,12 +930,21 @@ export function createTeamHttpHandlers(
             })),
             name: found.team.name,
           });
-        } catch {
+        } catch (error) {
           // The provider failed. Say so as a retryable condition rather than
           // leaking a model or gateway error to the console.
+          logTeamUnavailable("Team mission draft unavailable.", {
+            name: error instanceof Error ? error.name : typeof error,
+            stage: "generator",
+          });
           return errorResponse(dependencies, "abuse_control_unavailable");
         }
         const parsed = teamMissionEnvelopeSchema.safeParse({ mission });
+        if (!parsed.success) {
+          logTeamUnavailable("Team mission draft unavailable.", {
+            stage: "generator_output",
+          });
+        }
         return parsed.success
           ? jsonResponse(teamMissionEnvelopeSchema, parsed.data)
           : errorResponse(dependencies, "abuse_control_unavailable");
