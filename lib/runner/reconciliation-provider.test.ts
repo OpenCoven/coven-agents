@@ -248,12 +248,22 @@ function reconciliationProviderContract(
         });
       })
     );
-    assert.deepEqual(outcomes, [
-      { kind: "stopped" },
-      { kind: "provider_not_found" },
-      { kind: "provider_unavailable" },
-      { kind: "sandbox_reset_required" },
-    ]);
+    assert.deepEqual(
+      outcomes,
+      name === "Daytona recovery provider"
+        ? [
+            { kind: "cleanup_required" },
+            { kind: "cleanup_required" },
+            { kind: "provider_unavailable" },
+            { kind: "cleanup_required" },
+          ]
+        : [
+            { kind: "stopped" },
+            { kind: "provider_not_found" },
+            { kind: "provider_unavailable" },
+            { kind: "sandbox_reset_required" },
+          ]
+    );
   });
 }
 

@@ -1,30 +1,40 @@
 import { pathToFileURL } from "node:url";
 import { Daytona } from "@daytona/sdk";
 import {
+  type DaytonaSnapshotService,
   daytonaClientConfiguration,
   daytonaSnapshotConfiguration,
   provisionDaytonaSnapshot,
+  verifyDaytonaSnapshot,
 } from "../lib/runner/daytona/image";
 
 export async function runDaytonaSnapshot(
   environment: NodeJS.ProcessEnv = process.env,
-  output: Pick<Console, "error" | "log"> = console
+  output: Pick<Console, "error" | "log"> = console,
+  args: readonly string[] = process.argv.slice(2),
+  snapshotService?: DaytonaSnapshotService
 ): Promise<number> {
   try {
+    if (args.length > 1 || (args.length === 1 && args[0] !== "--verify")) {
+      throw new Error("Usage: daytona-snapshot.ts [--verify]");
+    }
     const configuration = daytonaSnapshotConfiguration(environment);
-    const daytona = new Daytona(daytonaClientConfiguration(configuration));
-    const snapshot = await provisionDaytonaSnapshot(configuration, {
-      log: output.log,
-      snapshot: daytona.snapshot,
-    });
+    const service =
+      snapshotService ??
+      new Daytona(daytonaClientConfiguration(configuration)).snapshot;
+    const snapshot =
+      args[0] === "--verify"
+        ? await verifyDaytonaSnapshot(configuration, service)
+        : await provisionDaytonaSnapshot(configuration, {
+            log: output.log,
+            snapshot: service,
+          });
 
     output.log(`Daytona snapshot "${snapshot.name}" is active.`);
     return 0;
-  } catch (error) {
+  } catch {
     output.error(
-      error instanceof Error
-        ? error.message
-        : "Daytona snapshot provisioning failed."
+      "Daytona snapshot provisioning or verification failed. Check configuration, resource policy, and provider availability."
     );
     return 1;
   }

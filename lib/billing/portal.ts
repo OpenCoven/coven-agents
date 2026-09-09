@@ -6,15 +6,15 @@ import {
 import { applicationPath } from "@/lib/application-path";
 import { parseCanonicalApplicationOrigin } from "@/lib/auth/application-origin";
 import {
-  type SessionLike,
-  type SubscriberAccessDecision,
-  subscriberAccessResponse,
-} from "@/lib/auth/subscriber-access";
+  authVersionMatches,
+  validAuthVersion,
+} from "@/lib/auth/session-revocation";
+import type { VerifiedJwtIdentity } from "@/lib/auth/verified-jwt";
+import { isCanonicalUuid } from "@/lib/session";
 
 export type BillingPortalDependencies = {
   appBasePath: () => string;
-  authenticate: () => Promise<SessionLike>;
-  authorize: (session: SessionLike) => Promise<SubscriberAccessDecision>;
+  authenticate: (request: Request) => Promise<VerifiedJwtIdentity | null>;
   createPortalSession: (
     apiKey: string,
     params: Stripe.BillingPortal.SessionCreateParams
@@ -22,13 +22,13 @@ export type BillingPortalDependencies = {
   enforceAbuse: typeof enforceAbusePolicy;
   findUser: (
     userId: string
-  ) => Promise<{ stripeCustomerId: string | null } | null>;
+  ) => Promise<{ authVersion: number; stripeCustomerId: string | null } | null>;
   getApiKey: () => string | null;
   origin: () => string;
 };
 
 /**
- * Opens Stripe's hosted billing portal for the signed-in subscriber.
+ * Opens Stripe's hosted billing portal for a current authenticated account.
  *
  * Deliberately not gated on `SUBSCRIPTION_CHECKOUT_ENABLED`. That flag pauses
  * new purchases; someone who already pays must still be able to cancel or
@@ -42,47 +42,49 @@ export type BillingPortalDependencies = {
  * this database the same way a purchase does.
  */
 export async function billingPortalResponse(
-  _request: Request,
+  request: Request,
   dependencies: BillingPortalDependencies,
   sourceIp: string | null
 ): Promise<Response> {
-  const session = await dependencies.authenticate();
-  if (!session?.user?.id) {
+  const identity = await dependencies.authenticate(request);
+  if (
+    !identity ||
+    !isCanonicalUuid(identity.userId) ||
+    !validAuthVersion(identity.authVersion)
+  ) {
     return Response.json({ error: "unauthorized" }, { status: 401 });
   }
 
   const admission = await dependencies.enforceAbuse({
     ip: sourceIp,
     route: "billing_portal",
-    userId: session.user.id,
+    userId: identity.userId,
   });
   if (admission.kind !== "allowed") {
     return abuseAdmissionResponse(admission);
   }
 
-  const access = await dependencies.authorize(session);
-  if (access.kind !== "allowed") {
-    return subscriberAccessResponse(access);
-  }
-
-  const apiKey = dependencies.getApiKey();
-  if (!apiKey) {
-    return Response.json({ error: "billing_unavailable" }, { status: 503 });
-  }
-
-  let owner: { stripeCustomerId: string | null } | null;
+  let owner: { authVersion: number; stripeCustomerId: string | null } | null;
   try {
-    owner = await dependencies.findUser(access.userId);
+    owner = await dependencies.findUser(identity.userId);
   } catch {
     return Response.json({ error: "billing_unavailable" }, { status: 503 });
   }
-  if (!owner?.stripeCustomerId) {
+  if (!owner || !authVersionMatches(owner.authVersion, identity.authVersion)) {
+    return Response.json({ error: "unauthorized" }, { status: 401 });
+  }
+  if (!owner.stripeCustomerId) {
     /**
      * A complimentary grant has no Stripe Customer, so there is nothing for
      * the portal to manage. Saying so is better than opening an empty portal
      * or implying the account is billed when it is not.
      */
     return Response.json({ error: "customer_required" }, { status: 409 });
+  }
+
+  const apiKey = dependencies.getApiKey();
+  if (!apiKey) {
+    return Response.json({ error: "billing_unavailable" }, { status: 503 });
   }
 
   let origin: string;
@@ -113,6 +115,19 @@ export async function billingPortalResponse(
   }
   if (!portal.url) {
     return Response.json({ error: "billing_unavailable" }, { status: 503 });
+  }
+  let currentOwner: Awaited<ReturnType<BillingPortalDependencies["findUser"]>>;
+  try {
+    currentOwner = await dependencies.findUser(identity.userId);
+  } catch {
+    return Response.json({ error: "billing_unavailable" }, { status: 503 });
+  }
+  if (
+    !currentOwner ||
+    !authVersionMatches(currentOwner.authVersion, identity.authVersion) ||
+    currentOwner.stripeCustomerId !== owner.stripeCustomerId
+  ) {
+    return Response.json({ error: "unauthorized" }, { status: 401 });
   }
   return Response.json(
     { url: portal.url },

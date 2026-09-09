@@ -1,6 +1,6 @@
 "use client";
 
-import { LogIn, LogOut, Settings } from "lucide-react";
+import { LogIn, LogOut, ReceiptText, Settings } from "lucide-react";
 import Link from "next/link";
 import { signOut, useSession } from "next-auth/react";
 import { useCallback, useState } from "react";
@@ -15,6 +15,7 @@ import {
 import { browserApplicationPath } from "@/lib/application-path";
 import { sessionMenu } from "@/lib/auth/session-menu";
 import { avatarFor } from "@/lib/avatar";
+import { CLOUD_PILOT_PLAN } from "@/lib/billing/pilot-plan";
 
 /**
  * The signed-in account control.
@@ -93,6 +94,13 @@ export function AccountMenu({ isSubscriber }: { isSubscriber: boolean }) {
           <Link href="/account">
             <Settings className="size-4" />
             Account settings
+          </Link>
+        </DropdownMenuItem>
+
+        <DropdownMenuItem asChild>
+          <Link href={CLOUD_PILOT_PLAN.billingManagementPath}>
+            <ReceiptText className="size-4" />
+            Manage billing
           </Link>
         </DropdownMenuItem>
 

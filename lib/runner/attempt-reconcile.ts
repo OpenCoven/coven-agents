@@ -72,6 +72,7 @@ export type RunnerAttemptSnapshotInput = Readonly<{
 
 export type RunnerStopAttemptResult = Readonly<{
   kind:
+    | "cleanup_required"
     | "provider_not_found"
     | "provider_unavailable"
     | "sandbox_reset_required"
@@ -929,11 +930,12 @@ async function recoverExpiredDispatch(
     }
     if (
       !providerStopConfirmed(stopped) &&
-      !(await resetResourceAfterStopFailure(
-        claimed.run,
-        claimed.authority,
-        dependencies
-      ))
+      (stopped.kind !== "sandbox_reset_required" ||
+        !(await resetResourceAfterStopFailure(
+          claimed.run,
+          claimed.authority,
+          dependencies
+        )))
     ) {
       return { kind: "deferred" };
     }
@@ -1306,6 +1308,17 @@ export async function cancelRunnerRun(
     }
     if (stopped.kind === "provider_unavailable") {
       return { kind: "unavailable", runId, source: "provider" };
+    }
+    if (stopped.kind === "cleanup_required") {
+      try {
+        await dependencies.store.appendCancellationDiagnostic(
+          dependencies.operator,
+          authority
+        );
+      } catch {
+        // The exact attempt and cancellation intent remain the retry record.
+      }
+      return { kind: "cleanup_required", runId };
     }
     if (stopped.kind === "sandbox_reset_required") {
       const reset = await resetResourceForCancellation(

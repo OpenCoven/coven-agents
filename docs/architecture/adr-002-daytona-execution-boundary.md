@@ -69,10 +69,17 @@ remains in PostgreSQL.
 10. **Persistent resources use explicit server policy.** Sandbox creation
     always requests bounded auto-stop and auto-archive values. CPU, memory,
     and disk come from the immutable pinned snapshot instead, because Daytona
-    refuses a sandbox create that names them, so the declared policy governs a
-    sandbox only once a snapshot is built from it. The pinned snapshot declares
-    none today, so those three are the provider's defaults and unbounded by
-    this invariant until such a snapshot exists. Public previews are false;
+    refuses a sandbox create that names them. Snapshot provisioning passes all
+    three explicitly and verifies the resulting active profile; read-only
+    `scripts/daytona-snapshot.ts --verify` verifies an existing immutable
+    generation without creating or changing it. Missing, non-integer,
+    non-finite, conflicting, undersized, or oversized resource metadata fails
+    closed. Configured dispatch verifies the pinned profile before sandbox
+    preparation. Dependency-free `lib/runner/daytona/resource-policy.ts`
+    publishes the same policy defaults and caps used by the server parser;
+    these constants are not attestation of a deployed snapshot. Public
+    disclosures must distinguish policy defaults from verified deployment
+    resources. Public previews are false;
     volumes, linked/forked sandboxes, and
     warm pools are not configured. TTL is explicitly disabled and automatic
     deletion remains disabled so valid persistent work cannot disappear
@@ -146,24 +153,63 @@ attempt may address. Before staging, the adapter removes and confirms absence
 of a stale session with that exact deterministic name; it never treats another
 attempt's session or path as cleanup authority. A pre-launch failure removes
 and verifies both exact resources before durable preparation can be released.
-Terminal and cancellation cleanup likewise removes and verifies the exact
-session and path. A Daytona `404` or `410` confirms session absence, but still
-requires credential-path cleanup.
+Terminal and cancellation cleanup likewise attempts the exact session and
+path independently: a session deletion or lookup failure must not skip
+credential removal or attempt capability cleanup. A Daytona `404` or `410`
+confirms session absence, but still requires credential-path cleanup. File
+verification rejects both existing paths and dangling symlinks.
 
 Cleanup ambiguity, including a failed path check, cannot become a successful
-start, stop, cancellation, or terminal result. It remains a durable
-cleanup/recovery obligation and requires a sandbox reset when absence cannot
-be confirmed. Reset and decommission are independently fenced by the agent's
-durable version and sandbox generation, so an old attempt cannot destroy a
-replacement sandbox.
+start, stop, cancellation, or terminal result. A rejected staging request may
+still write later, and a rejected asynchronous start may already have launched
+the harness. Both retain the exact attempt fence and redaction envelope even
+when immediate session/file cleanup succeeds. Attempt GitHub capabilities are
+still revoked and their exact files removed. Only a known-settled pre-launch
+failure with confirmed cleanup may release preparation.
 
-Persistent reuse additionally depends on Daytona process-session containment:
-session deletion must terminate the attempt's complete process tree, including
-any attempted background descendants. The source adapter can confirm only the
-provider session and deterministic file path. Until provider behavior is
-retained as deployment evidence, a missing session record is not proof that a
-detached process cannot observe a later staging file; that condition requires
-a fenced sandbox reset before reuse.
+Persistent reuse fails closed rather than depending on unverified Daytona
+process-session containment. After any launched or possibly launched attempt,
+the adapter returns `cleanup_required`, not `stopped` or
+`provider_not_found`, even when the exact session and file are absent. This
+retains the durable attempt/lease and blocks another dispatch; reconciliation
+and cancellation do not translate this outcome into automatic workspace
+deletion. Transient provider failures remain retryable without releasing the
+fence. A stale session found before staging also blocks credential transfer.
+
+Freshly created sandboxes carry `credentialBoundaryVersion: attempt-reset-v1`.
+Configured dispatch refuses legacy sandboxes without this marker, since their
+prior completed attempts may have already released their database fences under
+the older policy. The marker is a compatibility gate, not deletion or adoption
+authority; database tenant, attempt, version, and generation fences remain
+authoritative.
+
+An explicitly approved, fenced reset is required before reuse. No automatic
+reset or new destructive operator endpoint is introduced by this policy.
+Configuration drift, stale generation labels, and ambiguous provisioning also
+refuse reuse without entering a destructive reset. Background recovery may
+finish a reset after confirmed provider absence, but a legacy `resetting` row
+alone cannot authorize deleting an existing workspace: earlier workers entered
+that state automatically. An explicit reset or decommission request remains
+the destruction boundary.
+Reset and decommission remain independently fenced by the agent's durable
+version and sandbox generation, so an old attempt cannot destroy a replacement
+sandbox. Operators must preserve/export needed workspace data, approve any
+destructive reset, and converge the old attempt cleanup before reprovisioning.
+An explicit reset retry renews the agent-version fence only after revalidating
+the exact attempt, run lease, tenant, and generation; it does not advance the
+reset generation again. Deletion stays pinned to a recorded provider ID without
+falling back to a reused name. An unrecorded ID requires the named observation
+to match the authorized predecessor generation and ownership labels.
+Ordinary session deletion is never sufficient evidence of descendant
+termination for the complete process tree. This deliberately sacrifices
+repeated-run availability until a workspace-preserving reset workflow or
+separately approved destruction is available; provider-live containment and
+reset acceptance remain release gates.
+
+Provider diagnostics do not expose raw provider errors. Snapshot build output
+is stream-redacted and capped at 65,536 characters per invocation; CLI failures
+are fixed bounded messages. Attempt output retains its existing redaction and
+bounded evidence contract.
 
 ## Provider adapter and rollback criteria
 

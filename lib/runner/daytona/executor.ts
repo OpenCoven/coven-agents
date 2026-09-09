@@ -21,6 +21,8 @@ import {
   startDaytonaProcess,
 } from "./process";
 import {
+  assertDaytonaCredentialBoundary,
+  assertReplacementSnapshotReady,
   type DaytonaSandboxConfiguration,
   type DaytonaSandboxDependencies,
   DaytonaSandboxLifecycleError,
@@ -87,6 +89,7 @@ export function daytonaRunnerExecutor(
     isCleanupPending: (error) =>
       (error instanceof DaytonaProcessError &&
         (error.code === "durable_release_failed" ||
+          error.code === "sandbox_reuse_required" ||
           error.code === "sandbox_reset_required")) ||
       (error instanceof DaytonaSandboxLifecycleError &&
         error.kind === "cleanup_needed"),
@@ -124,12 +127,29 @@ export function configuredDaytonaRunnerExecutor(
 ): RunnerExecutor {
   return daytonaRunnerExecutor({
     ensureContext: async (authority) => {
+      try {
+        await assertReplacementSnapshotReady(
+          configuration.sandboxConfiguration,
+          configuration.sandboxDependencies
+        );
+      } catch (error) {
+        if (!(error instanceof DaytonaSandboxLifecycleError)) {
+          throw error;
+        }
+        // This read-only preflight has not created resources or staged credentials.
+        // biome-ignore lint/style/useErrorCause: Do not retain raw provider diagnostics.
+        throw new DaytonaSandboxLifecycleError(
+          "Daytona snapshot verification failed before sandbox preparation.",
+          { retryable: error.retryable }
+        );
+      }
       const ensured = await ensureDaytonaSandboxForDispatch(
         configuration.operator,
         authority,
         configuration.sandboxConfiguration,
         { ...configuration.sandboxDependencies, store: configuration.store }
       );
+      assertDaytonaCredentialBoundary(ensured.sandbox);
       return {
         agent: ensured.agent,
         sandbox: ensured.sandbox as DaytonaProcessSandbox,

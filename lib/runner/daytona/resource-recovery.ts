@@ -30,7 +30,6 @@ const DEFAULT_PROVIDER_CONCURRENCY = 4;
 type SandboxRecoveryStore = Pick<
   RunnerStore,
   | "attachDaytonaSandboxForRecovery"
-  | "beginDaytonaSandboxResetForRecovery"
   | "deleteDecommissionedAgentForRecovery"
   | "finishDaytonaSandboxWarmForRecovery"
   | "finishDaytonaSandboxResetForRecovery"
@@ -192,11 +191,7 @@ async function recoverSandbox(
         dependencies.sandboxConfiguration
       )
     ) {
-      // This branch replaces a workspace whose provisioning identity no longer
-      // matches, which after a configurationId change is every sandbox in the
-      // fleet. It deletes before recreating, so it needs the same proof the
-      // foreground reprovision needs: guarding only the `resetting` branch
-      // left the identical defect live one branch over.
+      // Inventory identity is not consent to destroy a persistent workspace.
       try {
         await assertReplacementSnapshotReady(
           dependencies.sandboxConfiguration,
@@ -205,31 +200,7 @@ async function recoverSandbox(
       } catch (error) {
         return classifySandboxRecoveryFailure(error);
       }
-      const resetting =
-        await dependencies.store.beginDaytonaSandboxResetForRecovery(
-          dependencies.operator,
-          fence
-        );
-      if (resetting.kind !== "updated") {
-        return "deferred";
-      }
-      try {
-        await sandbox.delete(60, true);
-      } catch (error) {
-        if (classifyDaytonaProviderError(error) !== "not_found") {
-          return classifySandboxRecoveryFailure(error);
-        }
-      }
-      const reset =
-        await dependencies.store.finishDaytonaSandboxResetForRecovery(
-          dependencies.operator,
-          {
-            agentId: resetting.value.id,
-            expectedGeneration: resetting.value.sandboxGeneration,
-            expectedVersion: resetting.value.version,
-          }
-        );
-      return reset.kind === "updated" ? "recovered" : "deferred";
+      return "failed";
     }
     const persisted = sandbox
       ? await dependencies.store.attachDaytonaSandboxForRecovery(
@@ -243,13 +214,9 @@ async function recoverSandbox(
     return persisted.kind === "updated" ? "recovered" : "deferred";
   }
   if (agent.sandboxLifecycle === "resetting") {
-    // A row reaches `resetting` because a reprovision decided to replace the
-    // workspace, but this scanner finishes that decision on a later tick and
-    // in a different process. Re-prove the replacement here rather than trust
-    // the earlier decision: the snapshot can be deleted, fail its build, or
-    // be repointed between the two. Deferring leaves the row stuck and
-    // visible, which is strictly better than deleting a workspace that
-    // nothing can rebuild.
+    // Legacy workers entered this state automatically on configuration drift.
+    // It cannot prove deliberate reset consent. Converge only confirmed absence;
+    // an existing workspace must be handled by an explicit lifecycle request.
     try {
       await assertReplacementSnapshotReady(dependencies.sandboxConfiguration, {
         daytona: dependencies.daytona,
@@ -268,13 +235,7 @@ async function recoverSandbox(
       return classifySandboxRecoveryFailure(error);
     }
     if (sandbox) {
-      try {
-        await sandbox.delete(60, true);
-      } catch (error) {
-        if (classifyDaytonaProviderError(error) !== "not_found") {
-          return classifySandboxRecoveryFailure(error);
-        }
-      }
+      return "deferred";
     }
     const reset = await dependencies.store.finishDaytonaSandboxResetForRecovery(
       dependencies.operator,

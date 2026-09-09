@@ -11,6 +11,7 @@ import {
   MONTHLY_MINUTE_CAP,
   RUN_MINUTE_RESERVATION,
 } from "@/lib/billing/limits";
+import { CLOUD_PILOT_PLAN } from "@/lib/billing/pilot-plan";
 import { parseRetryAfter } from "@/lib/http/retry-after";
 
 const MAX_CONFIRMATION_ATTEMPTS = 15;
@@ -225,6 +226,20 @@ export function SubscriptionCard({
   const internalConfirmationOwnerRef = useRef<string | null>(null);
   const authorityRef = useRef({ isSubscriber, subscribedUntil, userId });
   const checkoutIdentityRef = useRef(checkoutUserId);
+  const portalAbortRef = useRef<AbortController | null>(null);
+  const portalIdentity = `${checkoutUserId ?? ""}:${session.data?.user?.authVersion ?? ""}`;
+  const portalIdentityRef = useRef(portalIdentity);
+  portalIdentityRef.current = portalIdentity;
+
+  useEffect(() => {
+    if (portalIdentityRef.current === portalIdentity) {
+      setPortalPending(false);
+    }
+    return () => {
+      portalAbortRef.current?.abort();
+      portalAbortRef.current = null;
+    };
+  }, [portalIdentity]);
 
   const publishNotice = useCallback(
     (next: Notice, options: { focus?: boolean } = {}) => {
@@ -1010,17 +1025,37 @@ export function SubscriptionCard({
    * so this app never sees one.
    */
   const openBillingPortal = useCallback(async () => {
-    if (portalPending) {
+    if (portalAbortRef.current || !checkoutUserIdRef.current) {
       return;
     }
+    const controller = new AbortController();
+    portalAbortRef.current = controller;
+    const identity = portalIdentityRef.current;
+    const isCurrent = () =>
+      portalAbortRef.current === controller &&
+      !controller.signal.aborted &&
+      portalIdentityRef.current === identity;
+    const finish = () => {
+      if (isCurrent()) {
+        portalAbortRef.current = null;
+        setPortalPending(false);
+      }
+    };
     setPortalPending(true);
     let response: Response;
     try {
       response = await fetch(browserApplicationPath("/api/billing/portal"), {
         credentials: "same-origin",
         method: "POST",
+        signal: AbortSignal.any([
+          controller.signal,
+          AbortSignal.timeout(CONFIRMATION_FOREGROUND_BUDGET_MS),
+        ]),
       });
     } catch {
+      if (!isCurrent()) {
+        return;
+      }
       publishNotice(
         {
           detail: "Check your connection, then try again.",
@@ -1029,7 +1064,7 @@ export function SubscriptionCard({
         },
         { focus: true }
       );
-      setPortalPending(false);
+      finish();
       return;
     }
     let decoded: unknown;
@@ -1037,6 +1072,9 @@ export function SubscriptionCard({
       decoded = await response.json();
     } catch {
       decoded = null;
+    }
+    if (!isCurrent()) {
+      return;
     }
     const body = responseBody(decoded);
     if (response.ok) {
@@ -1051,15 +1089,15 @@ export function SubscriptionCard({
       {
         detail:
           error === "customer_required"
-            ? "This account has complimentary access, so there is no Stripe subscription to manage."
+            ? "This account has no Stripe billing record. Complimentary access does not create a subscription."
             : "Try again in a moment.",
         title: "Could not open the billing portal.",
         tone: "error",
       },
       { focus: true }
     );
-    setPortalPending(false);
-  }, [portalPending, publishNotice]);
+    finish();
+  }, [publishNotice]);
 
   const startBillingPortal = useCallback(() => {
     openBillingPortal().catch(() => undefined);
@@ -1362,7 +1400,14 @@ export function SubscriptionCard({
     beginCheckout().catch(() => undefined);
   }, [beginCheckout]);
 
-  if (!(checkoutEnabled || isSubscriber || checkoutResult === "success")) {
+  if (
+    !(
+      checkoutEnabled ||
+      isSubscriber ||
+      checkoutResult === "success" ||
+      billingReturn === "managed"
+    )
+  ) {
     return null;
   }
 
@@ -1381,7 +1426,9 @@ export function SubscriptionCard({
     !activeConfirmed &&
     !confirmationInFlight &&
     !checkoutSuppressed;
-  const showBillingPortal = isSubscriber || activeConfirmed;
+  const showBillingPortal =
+    checkoutUserId !== null &&
+    (isSubscriber || activeConfirmed || billingReturn === "managed");
   const showMinutePacks =
     checkoutEnabled &&
     minutePacks.length > 0 &&
@@ -1403,6 +1450,18 @@ export function SubscriptionCard({
           {RUN_MINUTE_RESERVATION} minutes are set aside and released when it
           ends.
         </p>
+        <p>
+          No automatic overage. Cloud capacity does not include model inference:
+          bring your own supported harness credential and provider entitlement.
+          Work remains limited to {CLOUD_PILOT_PLAN.maximumRunMinutes} minutes
+          per run.
+        </p>
+        <p>
+          Per-sandbox policy caps: {CLOUD_PILOT_PLAN.sandboxPolicy.caps.cpu}{" "}
+          vCPU, {CLOUD_PILOT_PLAN.sandboxPolicy.caps.memory} GiB memory, and{" "}
+          {CLOUD_PILOT_PLAN.sandboxPolicy.caps.disk} GiB disk. These are limits,
+          not a guarantee of provisioned resources.
+        </p>
       </div>
 
       <UsageLedger
@@ -1414,7 +1473,7 @@ export function SubscriptionCard({
 
       {activeConfirmed && formattedPaidThrough && paidThrough ? (
         <div className="oc-subscription-paid-through">
-          <span>Renews on</span>
+          <span>Paid through</span>
           <span>
             <time dateTime={paidThrough.toISOString()}>
               {formattedPaidThrough}

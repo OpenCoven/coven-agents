@@ -16,9 +16,11 @@ import {
 } from "./names";
 import { probeDaytonaHarnesses } from "./process";
 import {
+  assertDaytonaCredentialBoundary,
   assertReplacementSnapshotReady,
   classifyDaytonaProviderError,
   classifyDaytonaSandboxCreateError,
+  DAYTONA_CREDENTIAL_BOUNDARY_VERSION,
   type DaytonaSandboxConfiguration,
   type DaytonaSandboxCreateParameters,
   DaytonaSandboxLifecycleError,
@@ -45,6 +47,29 @@ const config: DaytonaSandboxConfiguration = {
   target: "us",
   ttlMinutes: 0,
 };
+
+test("legacy persistent sandboxes require approved reset rather than inferred process containment", () => {
+  const legacyLabels: Record<string, string>[] = [
+    {},
+    { credentialBoundaryVersion: "legacy" },
+  ];
+  for (const labels of legacyLabels) {
+    assert.throws(
+      () => assertDaytonaCredentialBoundary({ labels }),
+      (error: unknown) =>
+        error instanceof DaytonaSandboxLifecycleError &&
+        error.kind === "cleanup_needed" &&
+        !error.retryable
+    );
+  }
+  assert.doesNotThrow(() =>
+    assertDaytonaCredentialBoundary({
+      labels: {
+        credentialBoundaryVersion: DAYTONA_CREDENTIAL_BOUNDARY_VERSION,
+      },
+    })
+  );
+});
 
 /**
  * A snapshot service that resolves the configured snapshot at policy size.
@@ -171,7 +196,7 @@ test("stored provider IDs are resolved and stopped or archived sandboxes start",
   );
 });
 
-test("dispatch replaces a sandbox when gateway egress configuration identity changes", async () => {
+test("dispatch preserves a sandbox when gateway egress configuration identity changes", async () => {
   const calls: string[] = [];
   const currentAgent = agent({
     daytonaSandboxId: "stored",
@@ -227,7 +252,7 @@ test("dispatch replaces a sandbox when gateway egress configuration identity cha
     gatewayHostname: "app.example",
   };
 
-  const result = await ensureDaytonaSandboxForDispatch(
+  const result = ensureDaytonaSandboxForDispatch(
     { kind: "runner-operator" },
     {
       expectedVersion: 1,
@@ -294,19 +319,8 @@ test("dispatch replaces a sandbox when gateway egress configuration identity cha
     }
   );
 
-  assert.equal(result.agent.sandboxGeneration, 4);
-  assert.equal(result.sandbox, replacement);
-  assert.deepEqual(calls, [
-    "get-dispatch",
-    "get:stored",
-    "begin-reset",
-    "delete",
-    "finish-reset",
-    "reserve",
-    `get:${daytonaSandboxName(principal.tenant, currentAgent.id)}`,
-    "create",
-    "attach",
-  ]);
+  await assert.rejects(result, /approved reset/u);
+  assert.deepEqual(calls, ["get-dispatch", "get:stored"]);
 });
 
 test("cancellation reset fences the sandbox before clearing its generation", async () => {
@@ -447,6 +461,85 @@ test("cancellation reset preserves absence, provider outage, and stale fences", 
     }
   );
   assert.deepEqual(stale, { kind: "stale_version" });
+});
+
+test("a reset retry cannot follow a stable name into a replacement generation", async () => {
+  await Promise.all(
+    ["stored-id", "ambiguous-name", "matching-name", "unproven-name"].map(
+      async (lookup) => {
+        const calls: string[] = [];
+        const resetting = agent({
+          daytonaSandboxId: lookup === "stored-id" ? "old-sandbox" : null,
+          sandboxGeneration: 2,
+          sandboxLifecycle: "resetting",
+          version: 4,
+        });
+        const result = await resetDaytonaSandboxForCancellation(
+          { kind: "runner-operator" },
+          {
+            expectedVersion: 2,
+            leaseToken: "cancel-lease",
+            runId: "00000000-0000-4000-8000-000000000002",
+          } as never,
+          config,
+          {
+            daytona: {
+              create: () => Promise.reject(new Error("must not create")),
+              get: (identifier) => {
+                calls.push(`get:${identifier}`);
+                if (identifier === "old-sandbox") {
+                  return Promise.reject(new DaytonaNotFoundError("absent"));
+                }
+                return Promise.resolve(
+                  Object.assign(
+                    sandbox(SandboxState.STARTED, {
+                      delete: () => {
+                        calls.push("delete-replacement");
+                        return Promise.resolve();
+                      },
+                    }),
+                    {
+                      labels: {
+                        ...daytonaSandboxLabels(resetting.tenant, resetting.id),
+                        ...(lookup === "unproven-name"
+                          ? {}
+                          : {
+                              sandboxGeneration:
+                                lookup === "matching-name" ? "1" : "2",
+                            }),
+                      },
+                    }
+                  )
+                );
+              },
+            },
+            store: store({
+              beginDaytonaSandboxResetForCancellation: async () => ({
+                kind: "resetting" as const,
+                value: resetting,
+              }),
+              finishDaytonaSandboxResetForRecovery: async () => ({
+                kind: "stale_version" as const,
+              }),
+            }),
+          }
+        );
+        assert.equal(
+          calls.includes("delete-replacement"),
+          lookup === "matching-name"
+        );
+        assert.equal(
+          result.kind,
+          lookup === "stored-id" || lookup === "matching-name"
+            ? "stale_version"
+            : "sandbox_reset_required"
+        );
+        if (lookup === "stored-id") {
+          assert.deepEqual(calls, ["get:old-sandbox"]);
+        }
+      }
+    )
+  );
 });
 
 test("only Daytona-reported recoverable errors call recover", async () => {
@@ -869,59 +962,53 @@ test("stale provisioning refuses a deterministic sandbox from the previous gener
   });
   let lookups = 0;
   let reservations = 0;
-  const result = await ensureDaytonaSandbox(
-    principal,
-    stale,
-    currentConfiguration,
-    {
-      daytona: {
-        create: (parameters) => {
-          calls.push("create");
-          assert.equal(
-            parameters.labels?.sandboxGeneration,
-            String(replacementReservation.sandboxGeneration)
-          );
-          return Promise.resolve(replacement);
-        },
-        get: (identifier) => {
-          calls.push("get");
-          assert.equal(
-            identifier,
-            daytonaSandboxName(principal.tenant, stale.id)
-          );
-          lookups += 1;
-          return lookups === 1
-            ? Promise.resolve(existing)
-            : Promise.reject(new DaytonaNotFoundError("deleted"));
-        },
-        snapshot: policySnapshot(),
+  const result = ensureDaytonaSandbox(principal, stale, currentConfiguration, {
+    daytona: {
+      create: (parameters) => {
+        calls.push("create");
+        assert.equal(
+          parameters.labels?.sandboxGeneration,
+          String(replacementReservation.sandboxGeneration)
+        );
+        return Promise.resolve(replacement);
       },
-      store: store({
-        attachDaytonaSandbox: () => {
-          calls.push("attach");
-          return Promise.resolve({ kind: "updated" as const, value: attached });
-        },
-        beginDaytonaSandboxReset: () =>
-          Promise.resolve({ kind: "updated" as const, value: resetting }),
-        finishDaytonaSandboxReset: () =>
-          Promise.resolve({ kind: "updated" as const, value: reset }),
-        reserveDaytonaSandbox: (
-          _principal: unknown,
-          input: { provisioningStaleBefore: Date }
-        ) => {
-          assert.ok(input.provisioningStaleBefore > stale.sandboxUpdatedAt);
-          reservations += 1;
-          return Promise.resolve({
-            kind: "reserved" as const,
-            value: reservations === 1 ? reserved : replacementReservation,
-          });
-        },
-      }),
-    }
-  );
-  assert.equal(result.agent, attached);
-  assert.equal(result.sandbox, replacement);
-  assert.deepEqual(calls, ["get", "delete", "get", "create", "attach"]);
+      get: (identifier) => {
+        calls.push("get");
+        assert.equal(
+          identifier,
+          daytonaSandboxName(principal.tenant, stale.id)
+        );
+        lookups += 1;
+        return lookups === 1
+          ? Promise.resolve(existing)
+          : Promise.reject(new DaytonaNotFoundError("deleted"));
+      },
+      snapshot: policySnapshot(),
+    },
+    store: store({
+      attachDaytonaSandbox: () => {
+        calls.push("attach");
+        return Promise.resolve({ kind: "updated" as const, value: attached });
+      },
+      beginDaytonaSandboxReset: () =>
+        Promise.resolve({ kind: "updated" as const, value: resetting }),
+      finishDaytonaSandboxReset: () =>
+        Promise.resolve({ kind: "updated" as const, value: reset }),
+      reserveDaytonaSandbox: (
+        _principal: unknown,
+        input: { provisioningStaleBefore: Date }
+      ) => {
+        assert.ok(input.provisioningStaleBefore > stale.sandboxUpdatedAt);
+        reservations += 1;
+        return Promise.resolve({
+          kind: "reserved" as const,
+          value: reservations === 1 ? reserved : replacementReservation,
+        });
+      },
+    }),
+  });
+  await assert.rejects(result, /approved reset/u);
+  assert.deepEqual(calls, ["get"]);
   assert.equal(calls.includes("stale-start"), false);
 });
 
@@ -1025,6 +1112,7 @@ test("a provider-not-found stored ID fences a replacement before persisting it",
     ephemeral: false,
     labels: {
       ...daytonaSandboxLabels(principal.tenant, reserved.id),
+      credentialBoundaryVersion: DAYTONA_CREDENTIAL_BOUNDARY_VERSION,
       sandboxGeneration: String(reserved.sandboxGeneration),
     },
     language: "python",
@@ -1107,7 +1195,7 @@ test("an unconfirmed created-sandbox attach reports retryable cleanup needed", a
   assert.equal(deletes, 0);
 });
 
-test("an older creator cannot delete a sandbox adopted by a newer generation", async () => {
+test("neither a superseded creator nor a newer reservation can delete an existing workspace", async () => {
   const oldReservation = agent({
     sandboxGeneration: 1,
     sandboxLifecycle: "provisioning",
@@ -1181,7 +1269,6 @@ test("an older creator cannot delete a sandbox adopted by a newer generation", a
   const providerLookups = [
     Promise.reject(new DaytonaNotFoundError("missing")),
     Promise.resolve(created),
-    Promise.reject(new DaytonaNotFoundError("deleted")),
   ];
   let reserveCalls = 0;
   const lifecycleStore = store({
@@ -1219,7 +1306,7 @@ test("an older creator cannot delete a sandbox adopted by a newer generation", a
     store: lifecycleStore,
   });
   await oldAttachReached;
-  const newer = await ensureDaytonaSandbox(
+  const newer = ensureDaytonaSandbox(
     principal,
     oldReservation,
     currentConfiguration,
@@ -1232,15 +1319,12 @@ test("an older creator cannot delete a sandbox adopted by a newer generation", a
       store: lifecycleStore,
     }
   );
+  await assert.rejects(newer, /approved reset/u);
   releaseOldAttach();
   await assert.rejects(old, /generation changed/u);
 
-  assert.equal(deletes, 1);
-  assert.equal(newer.agent.daytonaSandboxId, replacement.id);
-  assert.equal(
-    newer.agent.sandboxGeneration,
-    replacementReservation.sandboxGeneration
-  );
+  assert.equal(deletes, 0);
+  assert.equal(attachCalls, 1);
 });
 
 test("warming probes only the sandbox and persists success or failure through fences", async () => {
@@ -2281,7 +2365,7 @@ test("a timeout after Daytona may have accepted creation remains durable until d
   assert.equal(starts, 1);
 });
 
-test("ambiguous recovery deletes and reprovisions stale configuration or generation before attachment", async () => {
+test("ambiguous recovery preserves stale configuration and generation until an approved reset", async () => {
   const baseEnvironment = {
     APP_ORIGIN: "https://app.example",
     AUTH_URL: "https://app.example",
@@ -2374,8 +2458,7 @@ test("ambiguous recovery deletes and reprovisions stale configuration or generat
     );
     let lookups = 0;
 
-    // biome-ignore lint/performance/noAwaitInLoops: each mismatch owns an isolated durable generation
-    const result = await ensureDaytonaSandbox(
+    const result = ensureDaytonaSandbox(
       principal,
       ambiguous,
       currentConfiguration,
@@ -2432,19 +2515,9 @@ test("ambiguous recovery deletes and reprovisions stale configuration or generat
       }
     );
 
-    assert.equal(result.agent, attached);
-    assert.equal(result.sandbox, replacement);
-    assert.deepEqual(calls, [
-      "get:1",
-      "begin-reset",
-      "delete",
-      "finish-reset",
-      "reserve",
-      "get:2",
-      "create",
-      "attach",
-      "replacement-start",
-    ]);
+    // biome-ignore lint/performance/noAwaitInLoops: each mismatch owns an isolated durable generation
+    await assert.rejects(result, /approved reset/u);
+    assert.deepEqual(calls, ["get:1"]);
     assert.equal(calls.includes("stale-start"), false);
   }
 });
@@ -2489,7 +2562,7 @@ test("a stale ambiguous recovery cannot delete a sandbox owned by a newer durabl
         }),
       }
     ),
-    /generation changed|stale/i
+    /approved reset/u
   );
   assert.equal(deletes, 0);
 });
@@ -3014,7 +3087,7 @@ test("a workspace is never deleted for a snapshot that is below policy", async (
 
   await assert.rejects(
     attempt,
-    /is below policy \(memory\)/u,
+    /is outside policy \(memory\)/u,
     "replacing a workspace with an undersized one is not a repair"
   );
   assert.ok(
@@ -3039,12 +3112,8 @@ test("a workspace is never deleted for a snapshot that is below policy", async (
  * a caller that cannot prove the replacement is usable does not get to delete.
  */
 
-/**
- * The provider reports only some resource fields on a snapshot. An absent
- * field is not evidence of a shortfall, and reading it as one would block
- * every reprovision against the real API.
- */
-test("a field the provider omits is not treated as a shortfall", async () => {
+/** Missing provider metadata must not authorize destructive reprovisioning. */
+test("a missing resource field blocks reprovisioning without deleting the workspace", async () => {
   const calls: string[] = [];
   const currentAgent = agent({
     daytonaSandboxId: "stored",
@@ -3100,7 +3169,7 @@ test("a field the provider omits is not treated as a shortfall", async () => {
     gatewayHostname: "app.example",
   };
 
-  const result = await ensureDaytonaSandboxForDispatch(
+  const result = ensureDaytonaSandboxForDispatch(
     { kind: "runner-operator" },
     {
       expectedVersion: 1,
@@ -3125,10 +3194,7 @@ test("a field the provider omits is not treated as a shortfall", async () => {
             : Promise.reject(new DaytonaNotFoundError("replacement absent"));
         },
         snapshot: {
-          // A field the provider does not report must not read as zero. This
-          // is deliberately NOT `mem`: Daytona always reports mem, cpu, disk
-          // and state on a snapshot, so the realistic absence is a field a
-          // future API version stops sending.
+          // Missing metadata cannot prove the replacement meets policy.
           get: (name) =>
             Promise.resolve({ cpu: 2, disk: 10, name, state: "active" }),
         },
@@ -3174,11 +3240,10 @@ test("a field the provider omits is not treated as a shortfall", async () => {
     }
   );
 
-  assert.equal(result.sandbox, replacement);
-  assert.ok(
-    calls.includes("delete") && calls.includes("create"),
-    `the reprovision must proceed, got: ${calls.join(", ")}`
-  );
+  await assert.rejects(result, /outside policy \(memory\)/u);
+  assert.equal(calls.includes("begin-reset"), false);
+  assert.equal(calls.includes("delete"), false);
+  assert.equal(calls.includes("create"), false);
 });
 
 /**
@@ -3322,7 +3387,7 @@ test("a workspace is never deleted for a snapshot that is not active", async () 
 
   await assert.rejects(
     attempt,
-    /is not active \(state: build_failed\)/u,
+    /is not active/u,
     "a snapshot that exists but cannot serve a create is not a replacement"
   );
   assert.ok(

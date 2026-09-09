@@ -21,18 +21,7 @@ function dependencies(
 ): BillingPortalDependencies {
   return {
     appBasePath: () => "",
-    authenticate: async () => ({
-      user: { authVersion: 1, id: USER_ID, type: "subscriber" },
-    }),
-    authorize: async () => {
-      calls.push("authorize");
-      return {
-        authVersion: 1,
-        kind: "allowed",
-        session: { id: USER_ID, kind: "subscriber", tenant: "u_x" } as never,
-        userId: USER_ID,
-      };
-    },
+    authenticate: async () => ({ authVersion: 1, userId: USER_ID }),
     createPortalSession: async (_apiKey, params) => {
       calls.push("portal");
       created.push(params);
@@ -44,7 +33,7 @@ function dependencies(
     },
     findUser: async () => {
       calls.push("user");
-      return { stripeCustomerId: "cus_acme" };
+      return { authVersion: 1, stripeCustomerId: "cus_acme" };
     },
     getApiKey: () => "sk_test",
     origin: () => ORIGIN,
@@ -72,12 +61,7 @@ test("a subscriber is sent to their own Stripe portal session", async () => {
       return_url: `${ORIGIN}/account?billing=managed`,
     },
   ]);
-  assert.deepEqual(calls, [
-    "abuse:billing_portal",
-    "authorize",
-    "user",
-    "portal",
-  ]);
+  assert.deepEqual(calls, ["abuse:billing_portal", "user", "portal", "user"]);
 });
 
 test("the portal stays open while new purchases are paused", async () => {
@@ -93,7 +77,7 @@ test("the portal stays open while new purchases are paused", async () => {
   );
 });
 
-test("only a signed-in subscriber with a Stripe Customer reaches Stripe", async () => {
+test("only a current signed-in owner with a Stripe Customer reaches Stripe", async () => {
   const calls: string[] = [];
 
   const anonymous = await billingPortalResponse(
@@ -103,19 +87,19 @@ test("only a signed-in subscriber with a Stripe Customer reaches Stripe", async 
   );
   assert.equal(anonymous.status, 401);
 
-  const guest = await billingPortalResponse(
+  const revoked = await billingPortalResponse(
     request(),
     dependencies(calls, [], {
-      authorize: async () => ({ kind: "subscription_required" }),
+      findUser: async () => ({ authVersion: 2, stripeCustomerId: "cus_acme" }),
     }),
     null
   );
-  assert.equal(guest.status, 403);
+  assert.equal(revoked.status, 401);
 
   const granted = await billingPortalResponse(
     request(),
     dependencies(calls, [], {
-      findUser: async () => ({ stripeCustomerId: null }),
+      findUser: async () => ({ authVersion: 1, stripeCustomerId: null }),
     }),
     null
   );
@@ -158,7 +142,7 @@ test("provider and configuration failures never leak, and are retryable", async 
   assert.equal(missingUrl.status, 503);
 });
 
-test("admission runs before authorization and before any Stripe work", async () => {
+test("admission runs before the account read and any Stripe work", async () => {
   const calls: string[] = [];
   const response = await billingPortalResponse(
     request(),
@@ -177,4 +161,74 @@ test("admission runs before authorization and before any Stripe work", async () 
 
   assert.equal(response.status, 429);
   assert.deepEqual(calls, ["abuse:billing_portal"]);
+});
+
+test("expired billing does not prevent payment recovery or invoice access", async () => {
+  const calls: string[] = [];
+  const response = await billingPortalResponse(
+    request(),
+    dependencies(calls, [], {
+      findUser: async () => ({
+        authVersion: 1,
+        stripeCustomerId: "cus_expired",
+        subscribedUntil: new Date("2020-01-01T00:00:00Z"),
+      }),
+    }),
+    null
+  );
+  assert.equal(response.status, 200);
+  assert.ok(calls.includes("portal"));
+});
+
+test("revocation or customer reassignment during provider work withholds the portal URL", async () => {
+  await Promise.all(
+    [
+      { authVersion: 2, stripeCustomerId: "cus_acme" },
+      { authVersion: 1, stripeCustomerId: "cus_reassigned" },
+      null,
+    ].map(async (changedOwner) => {
+      let reads = 0;
+      const response = await billingPortalResponse(
+        request(),
+        dependencies([], [], {
+          findUser: async () => {
+            reads += 1;
+            return reads === 1
+              ? { authVersion: 1, stripeCustomerId: "cus_acme" }
+              : changedOwner;
+          },
+        }),
+        null
+      );
+      assert.equal(response.status, 401);
+      assert.deepEqual(await response.json(), { error: "unauthorized" });
+      assert.equal(reads, 2);
+    })
+  );
+});
+
+test("missing owners, stale credentials, and malformed identities cannot reach billing", async () => {
+  const cases: Partial<BillingPortalDependencies>[] = [
+    { findUser: async () => null },
+    { authenticate: async () => ({ authVersion: 1, userId: "forged" }) },
+    { authenticate: async () => ({ authVersion: -1, userId: USER_ID }) },
+    {
+      findUser: async () => ({
+        authVersion: 2,
+        stripeCustomerId: "cus_other",
+      }),
+    },
+  ];
+  await Promise.all(
+    cases.map(async (overrides) => {
+      const calls: string[] = [];
+      const response = await billingPortalResponse(
+        request(),
+        dependencies(calls, [], overrides),
+        null
+      );
+      assert.equal(response.status, 401);
+      assert.equal(calls.includes("portal"), false);
+    })
+  );
 });

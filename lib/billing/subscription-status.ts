@@ -10,12 +10,14 @@ import type { VerifiedJwtIdentity } from "@/lib/auth/verified-jwt";
 import { isCanonicalUuid } from "@/lib/session";
 import { isSubscribedAt } from "@/lib/subscription";
 import type { MinutePack } from "./minute-packs";
+import { CLOUD_PILOT_PLAN } from "./pilot-plan";
 
 export type SubscriptionStatusResponse = {
   active: boolean;
   checkoutEnabled: boolean;
   /** Top-up packs on offer, smallest first; empty when none are configured. */
   minutePacks: MinutePack[];
+  plan: typeof CLOUD_PILOT_PLAN;
   subscribedUntil: string | null;
 };
 
@@ -109,6 +111,7 @@ export function subscriptionStatusFor(
       minutes,
       priceId,
     })),
+    plan: CLOUD_PILOT_PLAN,
     subscribedUntil: user.subscribedUntil?.toISOString() ?? null,
   };
 }

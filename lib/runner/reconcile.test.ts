@@ -394,6 +394,104 @@ test("command-free recovery resets a fenced sandbox before requeueing", async ()
   assert.equal(result.requeued, 1);
 });
 
+test("cleanup-required attempts retain their fences without automatic workspace deletion or reacquisition", async () => {
+  await Promise.all(
+    [false, true].map(async (terminal) => {
+      const calls: string[] = [];
+      const pending = run(
+        terminal
+          ? {
+              completedAt: new Date(),
+              dispatchState: "terminal",
+              status: "failed",
+            }
+          : {}
+      );
+      const authority = {
+        attemptId,
+        expectedVersion: pending.version + 1,
+        leaseToken: "cleanup-lease",
+        runId: pending.id,
+      } as RunnerDispatchAuthority;
+      const claimed = { authority, kind: "claimed" as const, run: pending };
+      const forbidden = () => {
+        calls.push("forbidden");
+        throw new Error("cleanup-required must retain the exact attempt");
+      };
+      const result = await reconcileAndDispatch({
+        operator,
+        provider: {
+          resolveExecutionContext: async () => ({}) as never,
+          stop: async () => ({ kind: "cleanup_required" }),
+        },
+        releaseCredentialResources: forbidden,
+        resourceLifecycle: { reset: forbidden },
+        rollbackCredentialResources: forbidden,
+        store: {
+          appendTerminalCleanupDiagnostic: async () => {
+            calls.push("diagnostic");
+          },
+          claimExpiredDaytonaAttemptCleanup: async () => claimed,
+          claimTerminalDaytonaAttemptCleanup: async () => claimed,
+          deleteAttemptRedaction: forbidden,
+          releaseTerminalDaytonaAttempt: forbidden,
+          requeueAfterDaytonaAttemptCleanup: forbidden,
+          scanExpiredDispatchLeases: async () => (terminal ? [] : [pending]),
+          scanTerminalDaytonaAttemptCleanups: async () =>
+            terminal ? [pending] : [],
+        } as never,
+      });
+      assert.equal(result.requeued, 0);
+      assert.equal(result.terminalCleaned, 0);
+      assert.equal(result.deferred, 1);
+      assert.equal(calls.includes("forbidden"), false);
+    })
+  );
+});
+
+test("cancellation reports cleanup required without deleting a persistent workspace", async () => {
+  const calls: string[] = [];
+  const active = run({
+    daytonaCommandId: "command",
+    daytonaSessionId: "session",
+    dispatchState: "running",
+    status: "running",
+  });
+  const authority = {
+    attemptId,
+    expectedVersion: active.version + 1,
+    leaseToken: "cancel-lease",
+    runId: active.id,
+  } as RunnerDispatchAuthority;
+  const forbidden = () => {
+    calls.push("forbidden");
+    throw new Error("cleanup-required is not deletion authority");
+  };
+  const result = await cancelRunnerRun(active.id, {
+    operator,
+    provider: {
+      resolveExecutionContext: async () => ({}) as never,
+      stop: async () => ({ kind: "cleanup_required" }),
+    },
+    releaseCredentialResources: forbidden,
+    resourceLifecycle: { reset: forbidden },
+    store: {
+      appendCancellationDiagnostic: async () => {
+        calls.push("diagnostic");
+      },
+      deleteAttemptRedaction: forbidden,
+      finalizeRun: forbidden,
+      requestRunCancellation: async () => ({
+        authority,
+        kind: "requested",
+        run: { ...active, cancellationRequestedAt: new Date() },
+      }),
+    } as never,
+  });
+  assert.deepEqual(result, { kind: "cleanup_required", runId: active.id });
+  assert.deepEqual(calls, ["diagnostic"]);
+});
+
 test("retryable provider stop failure defers without resetting the sandbox", async () => {
   const calls: string[] = [];
   const expired = run();
@@ -586,7 +684,7 @@ test("ambiguous sandbox provisioning attaches only the scanned generation", asyn
   assert.deepEqual(result, { deferred: 0, failures: 0, recovered: 1 });
 });
 
-test("cron recovery deletes and resets stale or unlabeled provisioning sandboxes instead of attaching them", async () => {
+test("cron recovery refuses stale or unlabeled provisioning sandboxes without deleting or attaching them", async () => {
   for (const labels of [
     {
       ...daytonaSandboxLabels("tenant_a", agent().id),
@@ -651,12 +749,12 @@ test("cron recovery deletes and resets stale or unlabeled provisioning sandboxes
       } as never,
     });
 
-    assert.deepEqual(calls, ["delete", "reset"]);
-    assert.deepEqual(result, { deferred: 0, failures: 0, recovered: 1 });
+    assert.deepEqual(calls, []);
+    assert.deepEqual(result, { deferred: 0, failures: 1, recovered: 0 });
   }
 });
 
-test("stale cron recovery cannot delete a sandbox after losing the durable reset fence", async () => {
+test("stale cron recovery cannot request a destructive reset for a newer sandbox", async () => {
   const pending = agent();
   let deletes = 0;
   const result = await reconcileDaytonaSandboxes({
@@ -690,7 +788,7 @@ test("stale cron recovery cannot delete a sandbox after losing the durable reset
   });
 
   assert.equal(deletes, 0);
-  assert.deepEqual(result, { deferred: 1, failures: 0, recovered: 0 });
+  assert.deepEqual(result, { deferred: 0, failures: 1, recovered: 0 });
 });
 
 test("cron removes only the exact stale warm probe and fenced-finishes it", async () => {
@@ -3099,6 +3197,52 @@ test("reconciliation appends only fresh logs and terminalizes a settled command"
  * nothing able to rebuild it. Deferring leaves the row stuck and visible,
  * which is strictly better.
  */
+test("cron never treats a legacy resetting row as consent to delete an existing workspace", async () => {
+  await Promise.all(
+    [false, true].map(async (exists) => {
+      const pending = agent({
+        daytonaSandboxId: "existing",
+        sandboxLifecycle: "resetting",
+      });
+      let deletes = 0;
+      let finishes = 0;
+      const result = await reconcileDaytonaSandboxes({
+        daytona: {
+          create: () => Promise.reject(new Error("must not create")),
+          get: () =>
+            exists
+              ? Promise.resolve({
+                  delete: () => {
+                    deletes += 1;
+                    return Promise.resolve();
+                  },
+                  id: "existing",
+                } as never)
+              : Promise.reject(new DaytonaNotFoundError("absent")),
+          snapshot: usableSnapshot(),
+        },
+        operator,
+        sandboxConfiguration: SANDBOX_CONFIGURATION,
+        store: {
+          finishDaytonaSandboxResetForRecovery: () => {
+            finishes += 1;
+            return Promise.resolve({ kind: "updated", value: pending });
+          },
+          scanDaytonaSandboxRecoveries: () => Promise.resolve([pending]),
+          scanDaytonaWarmRecoveries: () => Promise.resolve([]),
+        } as never,
+      });
+      assert.equal(deletes, 0);
+      assert.equal(finishes, exists ? 0 : 1);
+      assert.deepEqual(result, {
+        deferred: exists ? 1 : 0,
+        failures: 0,
+        recovered: exists ? 0 : 1,
+      });
+    })
+  );
+});
+
 test("cron recovery defers a reset it cannot complete instead of deleting the workspace", async () => {
   const calls: string[] = [];
   const pending = agent({

@@ -1,7 +1,7 @@
 # Subscription and Billing Policy
 
 - Status: living repository policy
-- Last reviewed: 2026-09-02
+- Last reviewed: 2026-09-09
 - Scope: subscriber entitlement, Stripe checkout and webhook handling, billing
   period usage, and recovery expectations
 
@@ -14,9 +14,17 @@ separate operator evidence.
 
 The application offers one configured Stripe subscription price at a time.
 `app/api/checkout/route.ts` creates a hosted subscription Checkout Session with
-one `STRIPE_PRICE_ID` line item. The repository does not encode or verify the
-price amount or recurring interval, so reviewers must confirm those values in
-Stripe before promotion.
+one `STRIPE_PRICE_ID` line item. Before Customer or Checkout mutation, the
+server retrieves that exact Price and requires an active, positive,
+fixed-integer, licensed, per-unit monthly price with interval count one, no
+quantity transformation, no adjustable amount, and no trial. Invalid or
+unavailable pricing preserves the existing attempt for recovery and returns
+`billing_unavailable`; it cannot create a new payable session.
+
+The amount and currency are not independently hard-coded. Hosted Checkout
+discloses them from the same configured Price. Operators still must confirm the
+intended amount, live/test mode, and portal/webhook configuration before
+promotion. Source validation does not establish a live deployment receipt.
 
 There is no application-granted free trial. A failed initial invoice grants no
 authority. Guest replay is the non-paying evaluation path. Metered overage,
@@ -26,13 +34,21 @@ implemented here. The only add-on is the prepaid minute pack described under
 
 Self-service cancellation, payment-method management, and invoice history are
 delegated to Stripe's hosted Customer Portal. `POST /api/billing/portal`
-creates a portal session for the signed-in subscriber's stored Customer and
+creates a portal session for the signed-in account's stored Customer and
 returns its URL; the application never handles a card and never reimplements
 those flows. The endpoint is deliberately **not** gated on
 `SUBSCRIPTION_CHECKOUT_ENABLED`: that flag pauses new purchases, and someone
 who already pays must still be able to leave while it is off. An account with
 a complimentary grant has no Stripe Customer and receives `customer_required`
-rather than an empty portal.
+rather than an empty portal. Portal access verifies the encrypted Auth.js cookie
+and current database `authVersion`, but does not require a paid period. Expired
+payment therefore does not prevent billing recovery; a revoked session or
+deleted account still cannot reach Stripe. Account controls link to
+`/account?billing=managed` even with new sales off. This billing-only exception
+does not grant execution, credential, transcript, or export access.
+The server rechecks the account version and Customer binding before returning
+a newly created Portal URL. The client also aborts or ignores a pending response
+when its signed-in account changes.
 
 A change made in the portal reaches this database only through the
 signature-verified webhook, exactly as a purchase does, so a cancellation
@@ -49,6 +65,16 @@ subscription offer must disclose the cap before purchase; the account usage
 surfaces must continue to report the same value rather than maintain a
 separate copy. The repository does not encode the price amount; see the Stripe
 verification note above.
+
+The non-secret `plan` projection in `/api/subscription` discloses that allowance,
+the maximum reservation, monthly interval, no automatic overage, separate
+customer-supplied inference, and application-relative billing/usage paths.
+It also publishes the shared non-secret sandbox policy defaults and caps from
+`lib/runner/daytona/resource-policy.ts`, not an attestation of deployed resources.
+`/api/usage` remains the bounded, application-owned remaining-allowance view.
+Neither response grants canonical familiar authority or replaces transactional
+run admission. The UI labels the stored timestamp "Paid through", not a promise
+of renewal; cancellation and renewal intent remain Stripe evidence.
 
 Each admitted run reserves `RUN_MINUTE_RESERVATION = 15` minutes, the runner's
 execution time limit, and is settled to the whole minutes it actually held
@@ -206,10 +232,10 @@ payments and renewals still require it.
 
 Production uses the compatibility variable `STRIPE_SECRET_KEY`, but its value
 should be a least-privilege Stripe restricted key. The current integration
-requires Customer read/write, Subscription read, Checkout Session
+requires Price read, Customer read/write, Subscription read, Checkout Session
 read/write/expire, Invoice and invoice-line read for webhook reconciliation,
-and the minimum additional access needed to construct and verify the installed
-SDK operations. Operators must first exercise those permissions with a
+Billing Portal session creation, and the minimum additional access needed to
+construct and verify the installed SDK operations. Operators must first exercise those permissions with a
 test-mode restricted key, then create a separate live-mode restricted key with
 the same reviewed access. The live key and live Price must be configured
 together and verified as live objects before promotion; a live key cannot be

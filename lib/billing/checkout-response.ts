@@ -39,6 +39,10 @@ import {
   runWithCheckoutAttemptLease,
 } from "@/lib/billing/checkout-lease";
 import type { SubscriptionCheckoutConfig } from "@/lib/billing/config";
+import {
+  assertPilotSubscriptionPrice,
+  type PilotSubscriptionPrice,
+} from "@/lib/billing/pilot-plan";
 
 const CHECKOUT_RESULT_RETENTION_MS = 24 * 60 * 60_000;
 
@@ -76,6 +80,7 @@ export class CheckoutProviderRequestError extends Error {
 }
 
 export type CheckoutProvider = {
+  retrievePrice: (priceId: string) => Promise<PilotSubscriptionPrice>;
   createCheckoutSession: (
     input: Stripe.Checkout.SessionCreateParams,
     options: ProviderRequestOptions
@@ -200,6 +205,18 @@ export async function checkoutResponse(
           }): Promise<CheckoutAttemptResult> => {
             const row = await dependencies.findUser(userId);
             const provider = dependencies.createProvider(enabledConfig.apiKey);
+            try {
+              assertPilotSubscriptionPrice(
+                await provider.retrievePrice(enabledConfig.priceId),
+                enabledConfig.priceId
+              );
+            } catch {
+              return {
+                disposition: "preserve_attempt",
+                state: attemptState,
+                value: { body: { error: "billing_unavailable" }, status: 503 },
+              };
+            }
             const decision = checkoutDecision({
               hasBlockingSubscription: false,
               userId,

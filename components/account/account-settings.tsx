@@ -114,7 +114,10 @@ export function AccountSettings({
     userId: session?.user?.id,
   });
   const showBilling =
-    checkoutEnabled || isSubscriber || effectiveCheckoutResult === "success";
+    checkoutEnabled ||
+    isSubscriber ||
+    effectiveCheckoutResult === "success" ||
+    billingReturn === "managed";
   const credentialAuthorityContextRevision = [
     session?.user?.id ?? "",
     session?.user?.authVersion ?? "",
@@ -129,6 +132,12 @@ export function AccountSettings({
   const tabRefs = useRef(new Map<TabId, HTMLButtonElement>());
   const billingPanelRef = useRef<HTMLElement | null>(null);
   const removedBillingOwnedFocusRef = useRef(false);
+
+  useEffect(() => {
+    if (billingReturn === "managed") {
+      setTab("billing");
+    }
+  }, [billingReturn]);
 
   useEffect(() => {
     setEffectiveCheckoutResult(checkoutResult);

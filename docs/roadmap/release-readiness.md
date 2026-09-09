@@ -32,9 +32,17 @@ Do not promote when:
 - a team child can exceed its immutable workspace/tool authority or a
   GitHub-capable step can run without the approved capability broker;
 - Daytona credentials, snapshot, target, or domain policy are missing;
+- the pinned snapshot lacks exact active CPU/memory/disk verification, or
+  repeated execution requires an unresolved containment/reset decision;
 - an active run lacks durable PostgreSQL ownership;
 - lifecycle, SSE, rollback, or reconciliation evidence is absent;
 - a high-severity security finding remains unresolved.
+
+The [cloud pilot integration boundary](../product/cloud-pilot-integration.md)
+also requires canonical familiar authority, native account/mission transport,
+and packaged end-to-end evidence before promoting native paid delegation.
+Billing-only recovery must remain available to a current authenticated owner
+after paid access expires; it is not an execution or credential exception.
 
 ## Environment prerequisites
 

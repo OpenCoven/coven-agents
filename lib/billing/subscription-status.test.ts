@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { CLOUD_PILOT_PLAN } from "./pilot-plan";
 import { subscriptionStatusFor } from "./subscription-status";
 
 const NOW = new Date("2026-08-31T12:00:00.000Z");
@@ -12,6 +13,7 @@ test("subscription status is active only for a stored future timestamp", () => {
       active: true,
       checkoutEnabled: true,
       minutePacks: [],
+      plan: CLOUD_PILOT_PLAN,
       subscribedUntil: FUTURE.toISOString(),
     }
   );
@@ -37,6 +39,7 @@ test("subscription status exposes only the public billing shape", () => {
     "active",
     "checkoutEnabled",
     "minutePacks",
+    "plan",
     "subscribedUntil",
   ]);
   assert.equal("stripeCustomerId" in status, false);

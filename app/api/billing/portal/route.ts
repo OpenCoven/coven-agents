@@ -1,9 +1,8 @@
 import { ipAddress } from "@vercel/functions";
-import { auth } from "@/app/(auth)/auth";
 import { enforceAbusePolicy } from "@/lib/abuse/enforce";
 import { configuredApplicationBasePath } from "@/lib/application-path";
 import { approvedApplicationOrigin } from "@/lib/auth/application-origin";
-import { authorizeSubscriberAccess } from "@/lib/auth/subscriber-authorization.server";
+import { verifiedJwtIdentity } from "@/lib/auth/verified-jwt";
 import {
   type BillingPortalDependencies,
   billingPortalResponse,
@@ -18,8 +17,7 @@ import { findUserById } from "@/lib/db/queries";
  */
 const dependencies: BillingPortalDependencies = {
   appBasePath: () => configuredApplicationBasePath(process.env),
-  authenticate: auth,
-  authorize: authorizeSubscriberAccess,
+  authenticate: verifiedJwtIdentity,
   async createPortalSession(apiKey, params) {
     const session =
       await createStripeClient(apiKey).billingPortal.sessions.create(params);

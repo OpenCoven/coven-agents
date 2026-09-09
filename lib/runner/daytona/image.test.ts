@@ -10,7 +10,7 @@ import {
   createDaytonaBuildLogSanitizer,
   createDaytonaCopilotImage,
   createDaytonaSnapshotDefinition,
-  DAYTONA_BUILD_LOG_LOOKBEHIND_SIZE,
+  DAYTONA_BUILD_LOG_MAX_CHARACTERS,
   DAYTONA_COPILOT_IMAGE_BASE,
   DAYTONA_COPILOT_SNAPSHOT_NAME,
   DAYTONA_DEFAULT_API_URL,
@@ -24,6 +24,7 @@ import {
   PNPM_VERSION,
   provisionDaytonaSnapshot,
   sanitizeDaytonaBuildLog,
+  verifyDaytonaSnapshot,
   WORKSPACE_DIRECTORY,
 } from "./image";
 import { assertReplacementSnapshotReady } from "./sandbox";
@@ -49,6 +50,9 @@ function missingSnapshot(): DaytonaNotFoundError {
 
 function activeSnapshot(): DaytonaSnapshot {
   return {
+    cpu: 2,
+    disk: 10,
+    mem: 4,
     name: DAYTONA_COPILOT_SNAPSHOT_NAME,
     state: SnapshotState.ACTIVE,
   };
@@ -232,13 +236,60 @@ test("streams SDK-trimmed chunks without waiting for newline boundaries", () => 
   assert.ok(emitted.slice(0, -1).some((chunk) => chunk.length > 0));
 });
 
-test("keeps only a bounded tail for huge no-newline SDK chunks", () => {
+test("bounds total build output even for huge no-newline SDK chunks", () => {
   const sanitizer = createDaytonaBuildLogSanitizer(API_KEY);
   const log = "x".repeat(1_000_000);
   const emitted = sanitizer.write(log);
 
-  assert.equal(emitted.length, log.length - DAYTONA_BUILD_LOG_LOOKBEHIND_SIZE);
-  assert.equal(sanitizer.flush().length, DAYTONA_BUILD_LOG_LOOKBEHIND_SIZE);
+  assert.equal(emitted.length, DAYTONA_BUILD_LOG_MAX_CHARACTERS);
+  assert.equal(sanitizer.write(log), "");
+  assert.equal(sanitizer.flush(), "");
+});
+
+test("read-only verification requires the exact active snapshot resource profile", async () => {
+  const accepted = [
+    activeSnapshot(),
+    { ...activeSnapshot(), mem: undefined, memory: 4 },
+  ];
+  await Promise.all(
+    accepted.map(async (snapshot) => {
+      assert.equal(
+        await verifyDaytonaSnapshot(configuration, {
+          get: (name) => {
+            assert.equal(name, configuration.snapshotName);
+            return Promise.resolve(snapshot);
+          },
+        }),
+        snapshot
+      );
+    })
+  );
+  await Promise.all(
+    [
+      { cpu: undefined },
+      { cpu: Number.NaN },
+      { cpu: Number.POSITIVE_INFINITY },
+      { cpu: 1 },
+      { cpu: 4 },
+      { disk: 3 },
+      { mem: undefined },
+      { mem: 4, memory: 8 },
+      { state: "building" },
+      { state: `provider-secret-${"x".repeat(10_000)}` },
+      { name: "wrong-snapshot" },
+    ].map(async (mismatch) => {
+      await assert.rejects(
+        verifyDaytonaSnapshot(configuration, {
+          get: () => Promise.resolve({ ...activeSnapshot(), ...mismatch }),
+        }),
+        (error: unknown) =>
+          error instanceof Error &&
+          error.message.includes("does not match") &&
+          error.message.length < 256 &&
+          !error.message.includes("provider-secret")
+      );
+    })
+  );
 });
 
 test("redacts markers split across SDK-trimmed chunks and suppresses values", () => {
@@ -591,7 +642,7 @@ test("a snapshot created below policy fails the build instead of shipping", asyn
         },
       }
     ),
-    /was created below policy \(memory 1 < 4\)/u,
+    /was created outside policy \(memory\)/u,
     "a clamped snapshot must not be reported as a successful build"
   );
 });
@@ -633,7 +684,7 @@ test("the build-time and runtime checks reject the same snapshot", async () => {
         },
       }
     ),
-    /below policy/u,
+    /outside policy/u,
     "the build must refuse it"
   );
 
@@ -650,7 +701,7 @@ test("the build-time and runtime checks reject the same snapshot", async () => {
       },
       { daytona: { snapshot: { get: () => Promise.resolve(belowPolicy) } } }
     ),
-    /below policy/u,
+    /outside policy/u,
     "the runtime guard must refuse the same snapshot"
   );
 });

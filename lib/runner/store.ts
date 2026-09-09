@@ -2223,7 +2223,9 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
      * Fences the persistent sandbox before an exact cancellation, terminal,
      * or command-free attempt cleanup can delete it. `resetting` blocks every
      * provisioning path until Daytona absence is confirmed and the next
-     * sandbox generation is cleared.
+     * sandbox generation is cleared. An explicit retry renews the same reset
+     * generation under a fresh agent-version fence; the lifecycle state alone
+     * is never deletion authority.
      */
     beginDaytonaSandboxResetForCancellation: (
       operator: RunnerOperator,
@@ -2248,6 +2250,9 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         if (rejected) {
           return rejected;
         }
+        if ((run.daytonaAttemptId ?? null) !== (authority.attemptId ?? null)) {
+          return { kind: "not_live" };
+        }
         const liveCancellation =
           Boolean(run?.cancellationRequestedAt) &&
           (run?.dispatchState === "dispatching" ||
@@ -2266,9 +2271,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         if (!agent) {
           return { kind: "not_found" };
         }
-        if (agent.sandboxLifecycle === "resetting") {
-          return { kind: "in_progress", value: agent };
-        }
+        const continuingReset = agent.sandboxLifecycle === "resetting";
         if (
           agent.sandboxLifecycle === "decommissioning" ||
           agent.sandboxLifecycle === "decommission_failed"
@@ -2281,6 +2284,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             {
               agentId: agent.id,
               attemptId: authority.attemptId ?? null,
+              continuingReset,
               expectedGeneration: agent.sandboxGeneration,
               expectedVersion: agent.version,
               leaseToken: authority.leaseToken,
@@ -2288,7 +2292,11 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
               tenant: agent.tenant,
             },
             sql`UPDATE "RunnerAgent"
-              SET "sandboxGeneration" = "sandboxGeneration" + 1,
+              SET "sandboxGeneration" = ${
+                continuingReset
+                  ? sql`"sandboxGeneration"`
+                  : sql`"sandboxGeneration" + 1`
+              },
                   "sandboxLifecycle" = 'resetting',
                   "sandboxUpdatedAt" = clock_timestamp(),
                   "warmStatus" = 'not_started',
@@ -2303,7 +2311,8 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                   'unprovisioned',
                   'provisioning',
                   'provisioning_ambiguous',
-                  'ready'
+                  'ready',
+                  'resetting'
                 )
                 AND NOT EXISTS (
                   SELECT 1
@@ -2319,6 +2328,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                     AND "version" = ${authority.expectedVersion}
                     AND "dispatchLeaseToken" = ${authority.leaseToken}
                     AND "dispatchLeaseExpiresAt" > clock_timestamp()
+                    AND "daytonaAttemptId" IS NOT DISTINCT FROM ${authority.attemptId ?? null}
                     AND (
                       (
                         "cancellationRequestedAt" IS NOT NULL
