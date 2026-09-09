@@ -329,6 +329,83 @@ test.describe("Subscriber checkout", () => {
     expect(accountOffer).not.toMatch(/[$€£]|\b(?:USD|EUR|GBP)\b/);
   });
 
+  test("billing recovery stays reachable without paid access or new sales", async ({
+    page,
+  }, testInfo) => {
+    test.skip(CHECKOUT_ENABLED, "This is the launch-flag-off contract.");
+    await mockSession(page, "demo");
+    await mockAccountDependencies(page);
+    await page.route("**/api/billing/portal", (route) =>
+      route.fulfill({ json: { error: "customer_required" }, status: 409 })
+    );
+    await page.goto("/account");
+    await page.getByRole("button", { exact: true, name: "Account" }).click();
+    await page.getByRole("menuitem", { name: "Manage billing" }).click();
+    await expect(page).toHaveURL(/\/account\?billing=managed$/);
+    await expect(page.getByRole("tab", { name: "Billing" })).toBeVisible();
+    await expect(checkoutButton(page)).toHaveCount(0);
+    await expect(page.getByText(/No automatic overage/)).toBeVisible();
+    await expect(page.getByText(/Per-sandbox policy caps/)).toBeVisible();
+    await page
+      .getByRole("button", { exact: true, name: "Manage subscription" })
+      .click();
+    await expect(page.getByText(/no Stripe billing record/)).toBeVisible();
+    await page.screenshot({
+      fullPage: true,
+      path: testInfo.outputPath("billing-recovery.png"),
+    });
+  });
+
+  test("billing recovery ignores a portal response after the signed-in account changes", async ({
+    page,
+  }) => {
+    const otherId = "00000000-0000-4000-8000-000000000002";
+    let currentSession = sessionFor("demo");
+    const heldResponse = Promise.withResolvers<void>();
+    const requestStarted = Promise.withResolvers<void>();
+    const responseHandled = Promise.withResolvers<void>();
+    await setServerSession(page.context(), "demo");
+    await mockAccountDependencies(page);
+    await page.route("**/api/auth/session", (route) =>
+      route.fulfill({ json: currentSession })
+    );
+    await page.route("**/api/billing/portal", async (route) => {
+      requestStarted.resolve();
+      await heldResponse.promise;
+      await route.fulfill({
+        json: { url: "https://billing.stripe.test/obsolete-account" },
+      });
+      responseHandled.resolve();
+    });
+    await page.route("https://billing.stripe.test/**", (route) =>
+      route.fulfill({ body: "Unexpected stale navigation", status: 200 })
+    );
+    await page.goto("/account?billing=managed");
+    await page
+      .getByRole("button", { exact: true, name: "Manage subscription" })
+      .click();
+    await requestStarted.promise;
+    currentSession = sessionFor("demo", {
+      email: "other-account@example.invalid",
+      id: otherId,
+    });
+    await setServerSession(page.context(), "demo", {
+      email: "other-account@example.invalid",
+      id: otherId,
+    });
+    await notifySessionChange(page);
+    await expect(
+      page.getByText("other-account@example.invalid").first()
+    ).toBeVisible();
+    heldResponse.resolve();
+    await responseHandled.promise;
+    await page.waitForLoadState("networkidle");
+    await expect(
+      page.getByRole("button", { exact: true, name: "Manage subscription" })
+    ).toBeEnabled();
+    await expect(page).toHaveURL(/\/account\?billing=managed$/);
+  });
+
   test("subscriber billing remains visible with the flag off and never offers a duplicate purchase", async ({
     page,
   }) => {
@@ -348,6 +425,8 @@ test.describe("Subscriber checkout", () => {
     await expect(
       page.locator(".oc-subscription-paid-through time")
     ).toHaveAttribute("datetime", "2099-01-01T00:00:00.000Z");
+    await expect(page.getByText("Paid through", { exact: true })).toBeVisible();
+    await expect(page.getByText("Renews on", { exact: true })).toHaveCount(0);
     await expect(checkoutButton(page)).toHaveCount(0);
     await expect(
       page.getByRole("button", { exact: true, name: "Manage subscription" })

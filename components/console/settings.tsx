@@ -27,6 +27,7 @@ import { useApplicationLoginPath } from "@/hooks/use-application-login-path";
 import { useResponsiveTabOrientation } from "@/hooks/use-responsive-tab-orientation";
 import { browserApplicationPath } from "@/lib/application-path";
 import { RUN_MINUTE_RESERVATION } from "@/lib/billing/limits";
+import { CLOUD_PILOT_PLAN } from "@/lib/billing/pilot-plan";
 import { glyphFor } from "@/lib/console/format";
 import {
   isSessionOperationCurrent,
@@ -1079,6 +1080,11 @@ export function Settings({
                   blurb="Sign-in is GitHub-only. There is no password to change."
                   title="Account"
                 />
+                {account ? (
+                  <Link href={CLOUD_PILOT_PLAN.billingManagementPath}>
+                    Manage billing
+                  </Link>
+                ) : null}
                 <div
                   style={{
                     alignItems: "center",

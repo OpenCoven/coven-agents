@@ -1,13 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { DaytonaTimeoutError, type Sandbox, SandboxState } from "@daytona/sdk";
 import {
+  configuredDaytonaRunnerExecutor,
   DAYTONA_EXECUTOR_ADAPTER_VERSION,
   daytonaExecutionProvenance,
   daytonaRunnerExecutor,
 } from "./daytona/executor";
 import type { DaytonaProcessSandbox } from "./daytona/process";
 import { DaytonaProcessError } from "./daytona/process";
-import { DaytonaSandboxLifecycleError } from "./daytona/sandbox";
+import {
+  DAYTONA_CREDENTIAL_BOUNDARY_VERSION,
+  DaytonaSandboxLifecycleError,
+} from "./daytona/sandbox";
 import {
   HOSTED_EXECUTION_CAPABILITY_CONTRACT_VERSION,
   type RunnerExecutionProvenance,
@@ -335,6 +340,121 @@ function executorContract(
 
 executorContract("deterministic fake executor", fakeExecutorExercise);
 executorContract("Daytona executor adapter", daytonaExecutorExercise);
+
+test("Daytona retains non-retryable reuse cleanup instead of compensating its exact attempt", () => {
+  assert.equal(
+    daytonaExecutorExercise().executor.isCleanupPending(
+      new DaytonaProcessError(
+        "Approved reset required.",
+        "sandbox_reuse_required",
+        false
+      )
+    ),
+    true
+  );
+});
+
+test("configured dispatch checks snapshot policy and legacy containment before credential staging", async () => {
+  await Promise.all(
+    [
+      { accepted: false, boundary: true, cpu: undefined, timeout: false },
+      { accepted: false, boundary: true, cpu: 2, timeout: true },
+      { accepted: false, boundary: false, cpu: 2, timeout: false },
+      { accepted: true, boundary: true, cpu: 2, timeout: false },
+    ].map(async (scenario) => {
+      const calls: string[] = [];
+      let snapshotUnavailable = scenario.timeout;
+      const executor = configuredDaytonaRunnerExecutor({
+        operator: { kind: "runner-operator" },
+        sandboxConfiguration: {
+          autoArchiveInterval: 10_080,
+          autoDeleteInterval: -1,
+          autoStopInterval: 15,
+          resources: { cpu: 2, disk: 10, memory: 4 },
+          snapshotName: "coven-agents-copilot-2",
+          target: "us",
+          ttlMinutes: 0,
+        },
+        sandboxDependencies: {
+          daytona: {
+            create: () => {
+              calls.push("forbidden-create");
+              return Promise.reject(new Error("must not mutate"));
+            },
+            get: () => {
+              calls.push("sandbox");
+              return Promise.resolve({
+                id: "sandbox",
+                labels: scenario.boundary
+                  ? {
+                      credentialBoundaryVersion:
+                        DAYTONA_CREDENTIAL_BOUNDARY_VERSION,
+                    }
+                  : {},
+                state: SandboxState.STARTED,
+              } as Sandbox);
+            },
+            snapshot: {
+              get: (name) => {
+                calls.push("snapshot");
+                if (snapshotUnavailable) {
+                  return Promise.reject(new DaytonaTimeoutError("timeout"));
+                }
+                return Promise.resolve({
+                  cpu: scenario.cpu,
+                  disk: 10,
+                  mem: 4,
+                  name,
+                  state: "active",
+                });
+              },
+            },
+          },
+        },
+        store: {
+          getDispatchAgent: () => {
+            calls.push("dispatch-fence");
+            return Promise.resolve({ agent: agent(), kind: "found" });
+          },
+        } as never,
+      });
+      if (scenario.accepted) {
+        assert.equal(
+          (await executor.ensureExecutionContext(authority)).agent.id,
+          agent().id
+        );
+      } else {
+        await assert.rejects(
+          executor.ensureExecutionContext(authority),
+          (error: unknown) => {
+            assert.equal(executor.isCleanupPending(error), !scenario.boundary);
+            return error instanceof DaytonaSandboxLifecycleError;
+          }
+        );
+      }
+      assert.equal(calls.includes("forbidden-create"), false);
+      assert.deepEqual(
+        calls,
+        scenario.cpu === undefined || scenario.timeout
+          ? ["snapshot"]
+          : ["snapshot", "dispatch-fence", "sandbox"]
+      );
+      if (scenario.timeout) {
+        snapshotUnavailable = false;
+        assert.equal(
+          (await executor.ensureExecutionContext(authority)).agent.id,
+          agent().id
+        );
+        assert.deepEqual(calls, [
+          "snapshot",
+          "snapshot",
+          "dispatch-fence",
+          "sandbox",
+        ]);
+      }
+    })
+  );
+});
 
 test("Daytona adapter treats only proven ambiguous sandbox lifecycle errors as cleanup-pending", () => {
   const exercise = daytonaExecutorExercise();

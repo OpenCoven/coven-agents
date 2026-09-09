@@ -1,34 +1,20 @@
 import { approvedApplicationOrigin } from "@/lib/auth/application-origin";
+import {
+  DAYTONA_SANDBOX_RESOURCE_POLICY_CAPS,
+  DAYTONA_SANDBOX_RESOURCE_POLICY_DEFAULTS,
+} from "./resource-policy";
+
+export {
+  DAYTONA_PROVIDER_RESOURCE_MAXIMA,
+  DAYTONA_SANDBOX_RESOURCE_POLICY_CAPS,
+  DAYTONA_SANDBOX_RESOURCE_POLICY_DEFAULTS,
+} from "./resource-policy";
 
 export const DAYTONA_DEFAULT_API_URL = "https://app.daytona.io/api";
 export const DAYTONA_DEFAULT_TARGET = "us";
 export const DAYTONA_DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 export const DAYTONA_MAX_REQUEST_TIMEOUT_MS = 120_000;
 export const DAYTONA_MIN_REQUEST_TIMEOUT_MS = 1000;
-/**
- * Daytona's documented per-sandbox maxima. A create above any of these is
- * rejected by the provider, so no policy this repository can express may
- * exceed them.
- */
-export const DAYTONA_PROVIDER_RESOURCE_MAXIMA = Object.freeze({
-  cpu: 4,
-  disk: 10,
-  memory: 8,
-});
-export const DAYTONA_SANDBOX_RESOURCE_POLICY_DEFAULTS = Object.freeze({
-  autoArchiveInterval: 10_080,
-  autoStopInterval: 15,
-  cpu: 2,
-  disk: DAYTONA_PROVIDER_RESOURCE_MAXIMA.disk,
-  memory: 4,
-});
-export const DAYTONA_SANDBOX_RESOURCE_POLICY_CAPS = Object.freeze({
-  autoArchiveInterval: 43_200,
-  autoStopInterval: 60,
-  cpu: DAYTONA_PROVIDER_RESOURCE_MAXIMA.cpu,
-  disk: DAYTONA_PROVIDER_RESOURCE_MAXIMA.disk,
-  memory: DAYTONA_PROVIDER_RESOURCE_MAXIMA.memory,
-});
 export const DAYTONA_SANDBOX_RESOURCE_POLICY_ENVIRONMENT_KEYS = [
   "DAYTONA_AUTO_ARCHIVE_MINUTES",
   "DAYTONA_AUTO_STOP_MINUTES",

@@ -1,6 +1,7 @@
 // biome-ignore-all lint/suspicious/noShadow: Isolated nested fixtures intentionally reuse conventional record names.
 import assert from "node:assert/strict";
 import test from "node:test";
+import { DaytonaTimeoutError } from "@daytona/sdk";
 import {
   AGENT_RUNNER_API_VERSION,
   runEventSchema,
@@ -13,6 +14,7 @@ import {
   daytonaProbeSessionName,
   daytonaRunSessionName,
 } from "./daytona/names";
+import { resetDaytonaSandboxForCancellation } from "./daytona/sandbox";
 import {
   hashRunRequest,
   MAX_EVENT_PAGE_BYTES,
@@ -3775,6 +3777,237 @@ test("cancellation sandbox reset reserves and clears a fenced generation", async
   assert.match(
     queryText(finish.statements[0] as RunnerStoreStatement),
     /"sandboxTrust" = 'clean'/u
+  );
+});
+
+test("an explicit reset retry after provider timeout renews the exact fenced attempt", async () => {
+  await Promise.all(
+    ["lookup", "delete"].map(async (failureStage) => {
+      const attemptId =
+        "53af1a29-4e98-43d6-ac5b-3b9dcba5e740" as RunnerDaytonaAttemptId;
+      const current = run({
+        cancellationRequestedAt: new Date("2026-01-01T00:00:00.000Z"),
+        daytonaAttemptId: attemptId,
+        daytonaCommandId: "command",
+        dispatchState: "running",
+        status: "running",
+      });
+      const ready = agent({
+        daytonaSandboxId: "sandbox",
+        sandboxGeneration: 2,
+        sandboxLifecycle: "ready",
+        version: 4,
+      });
+      const resetting = agent({
+        ...ready,
+        sandboxGeneration: 3,
+        sandboxLifecycle: "resetting",
+        version: 5,
+      });
+      const renewed = agent({ ...resetting, version: 6 });
+      const cleared = agent({
+        ...renewed,
+        daytonaSandboxId: null,
+        sandboxLifecycle: "unprovisioned",
+        version: 7,
+      });
+      const fixture = scripted(
+        [current],
+        [ready],
+        [resetting],
+        [current],
+        [resetting],
+        [renewed],
+        [cleared]
+      );
+      const authority = {
+        attemptId,
+        expectedVersion: current.version,
+        leaseToken: current.dispatchLeaseToken as string,
+        runId: current.id,
+      } as RunnerDispatchAuthority;
+      let lookups = 0;
+      let deletes = 0;
+      const dependencies = {
+        daytona: {
+          create: () => Promise.reject(new Error("must not create")),
+          get: () => {
+            lookups += 1;
+            return failureStage === "lookup" && lookups === 1
+              ? Promise.reject(new DaytonaTimeoutError("provider timeout"))
+              : Promise.resolve({
+                  delete: () => {
+                    deletes += 1;
+                    return failureStage === "delete" && deletes === 1
+                      ? Promise.reject(
+                          new DaytonaTimeoutError("delete timeout")
+                        )
+                      : Promise.resolve();
+                  },
+                } as never);
+          },
+        },
+        store: fixture.store,
+      };
+      const configuration = {
+        autoArchiveInterval: 10_080,
+        autoDeleteInterval: -1 as const,
+        autoStopInterval: 15,
+        resources: { cpu: 2, disk: 10, memory: 4 },
+        snapshotName: "coven-agents-copilot-2",
+        target: "us" as const,
+        ttlMinutes: 0 as const,
+      };
+      assert.deepEqual(
+        await resetDaytonaSandboxForCancellation(
+          operator,
+          authority,
+          configuration,
+          dependencies
+        ),
+        { kind: "unavailable", source: "provider" }
+      );
+      assert.deepEqual(
+        await resetDaytonaSandboxForCancellation(
+          operator,
+          authority,
+          configuration,
+          dependencies
+        ),
+        { kind: "reset" }
+      );
+      assert.equal(lookups, 2);
+      assert.equal(deletes, failureStage === "delete" ? 2 : 1);
+      const renewal = fixture.statements[5] as RunnerStoreStatement;
+      assert.equal(
+        renewal.args.expectedGeneration,
+        resetting.sandboxGeneration
+      );
+      assert.equal(renewal.args.expectedVersion, resetting.version);
+      assert.equal(renewal.args.attemptId, attemptId);
+      assert.equal(renewal.args.continuingReset, true);
+      const renewalSql = queryText(renewal);
+      assert.match(
+        renewalSql,
+        /SET "sandboxGeneration" = "sandboxGeneration",/u
+      );
+      assert.match(renewalSql, /"version" = "version" \+ 1/u);
+      assert.match(renewalSql, /"tenant" = \$\d+/u);
+      assert.match(renewalSql, /"version" = \$\d+/u);
+      assert.match(renewalSql, /"sandboxGeneration" = \$\d+/u);
+      assert.match(
+        renewalSql,
+        /"dispatchLeaseExpiresAt" > clock_timestamp\(\)/u
+      );
+      assert.match(
+        renewalSql,
+        /"daytonaAttemptId" IS NOT DISTINCT FROM \$\d+/u
+      );
+      assert.match(renewalSql, /"activeRun"/u);
+      const finish = fixture.statements[6] as RunnerStoreStatement;
+      assert.equal(finish.args.expectedGeneration, renewed.sandboxGeneration);
+      assert.equal(finish.args.expectedVersion, renewed.version);
+    })
+  );
+});
+
+test("explicit reset renewal rejects stale attempts and version-generation fence losses before provider I/O", async () => {
+  const attemptId =
+    "53af1a29-4e98-43d6-ac5b-3b9dcba5e740" as RunnerDaytonaAttemptId;
+  const current = run({
+    cancellationRequestedAt: new Date("2026-01-01T00:00:00.000Z"),
+    daytonaAttemptId: attemptId,
+    daytonaCommandId: "command",
+    dispatchState: "running",
+    status: "running",
+  });
+  const resetting = agent({
+    daytonaSandboxId: "sandbox",
+    sandboxGeneration: 3,
+    sandboxLifecycle: "resetting",
+    version: 5,
+  });
+  const authority = {
+    attemptId,
+    expectedVersion: current.version,
+    leaseToken: current.dispatchLeaseToken as string,
+    runId: current.id,
+  } as RunnerDispatchAuthority;
+  await Promise.all(
+    [
+      {
+        authority: {
+          ...authority,
+          attemptId: "53af1a29-4e98-43d6-ac5b-3b9dcba5e741",
+        } as RunnerDispatchAuthority,
+        fixture: scripted([current]),
+        kind: "stale_version",
+      },
+      {
+        authority: {
+          ...authority,
+          expectedVersion: current.version - 1,
+        } as RunnerDispatchAuthority,
+        fixture: scripted([current]),
+        kind: "stale_version",
+      },
+      {
+        authority: {
+          ...authority,
+          leaseToken: "superseded-lease",
+        } as RunnerDispatchAuthority,
+        fixture: scripted([current]),
+        kind: "stale_version",
+      },
+      {
+        authority,
+        fixture: scripted([{ ...current, cancellationRequestedAt: null }]),
+        kind: "stale_version",
+      },
+      {
+        authority,
+        // The version/generation/lease SQL guard matches no row.
+        fixture: scripted([current], [resetting], []),
+        kind: "stale_version",
+      },
+    ].map(async (scenario) => {
+      let providerCalls = 0;
+      const result = await resetDaytonaSandboxForCancellation(
+        operator,
+        scenario.authority,
+        {
+          autoArchiveInterval: 10_080,
+          autoDeleteInterval: -1,
+          autoStopInterval: 15,
+          resources: { cpu: 2, disk: 10, memory: 4 },
+          snapshotName: "coven-agents-copilot-2",
+          target: "us",
+          ttlMinutes: 0,
+        },
+        {
+          daytona: {
+            create: () => Promise.reject(new Error("must not create")),
+            get: () => {
+              providerCalls += 1;
+              return Promise.reject(new Error("must not resolve"));
+            },
+          },
+          store: scenario.fixture.store,
+        }
+      );
+      assert.equal(result.kind, scenario.kind);
+      assert.equal(providerCalls, 0);
+      const renewal = scenario.fixture.statements.find(
+        (entry) => entry.name === "begin-daytona-sandbox-reset-for-cancellation"
+      );
+      if (renewal) {
+        assert.equal(
+          renewal.args.expectedGeneration,
+          resetting.sandboxGeneration
+        );
+        assert.equal(renewal.args.expectedVersion, resetting.version);
+      }
+    })
   );
 });
 

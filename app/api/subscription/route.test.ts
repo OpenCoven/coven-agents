@@ -5,6 +5,7 @@ import { encode, type JWT } from "next-auth/jwt";
 import type { AbuseAdmission } from "@/lib/abuse/enforce";
 import { verifiedJwtIdentity } from "@/lib/auth/verified-jwt";
 import { subscriptionCheckoutEnabled } from "@/lib/billing/config-core";
+import { CLOUD_PILOT_PLAN } from "@/lib/billing/pilot-plan";
 import {
   type SubscriptionStatusDependencies,
   subscriptionResponse,
@@ -232,6 +233,7 @@ test("active and inactive status come from the database, not token type", async 
         active: expectedActive,
         checkoutEnabled: false,
         minutePacks: [],
+        plan: CLOUD_PILOT_PLAN,
         subscribedUntil: storedUntil?.toISOString() ?? null,
       });
       assertNoStore(response);
@@ -387,6 +389,7 @@ test("browser-supplied identity cannot select the database user", async () => {
     "active",
     "checkoutEnabled",
     "minutePacks",
+    "plan",
     "subscribedUntil",
   ]);
   for (const field of [

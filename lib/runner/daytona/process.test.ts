@@ -985,6 +985,63 @@ const startInput = (sandbox: DaytonaProcessSandbox) => ({
   workspace: "repo",
 });
 
+test("ambiguous staging or launch preserves redaction and the durable attempt fence", async () => {
+  await Promise.all(
+    [
+      { stageError: new DaytonaTimeoutError(SECRET) },
+      { startError: new DaytonaTimeoutError(SECRET) },
+      { startId: "" },
+    ].map(async (options) => {
+      const { calls, sandbox } = processDouble(options);
+      let retired = 0;
+      let released = 0;
+      await assert.rejects(
+        startDaytonaProcess({
+          ...startInput(sandbox),
+          deleteAttemptRedaction: () => {
+            retired += 1;
+            return Promise.resolve(true);
+          },
+          releasePreparation: () => {
+            released += 1;
+            return Promise.resolve(LAUNCH_AUTHORITY);
+          },
+        }),
+        (error: unknown) =>
+          error instanceof DaytonaProcessError &&
+          error.code === "sandbox_reuse_required" &&
+          !allReturnedText(error).includes(SECRET)
+      );
+      assert.equal(retired, 0);
+      assert.equal(released, 0);
+      assert.ok(
+        calls.some((call) => call.command.includes(`test ! -L '${PATH}'`))
+      );
+    })
+  );
+});
+
+test("session stop errors never skip exact credential and capability cleanup", async () => {
+  await Promise.all(
+    [new Error(SECRET), new DaytonaTimeoutError(SECRET)].map(async (error) => {
+      const { calls, fileCalls, sandbox } = processDouble({
+        deleteError: error,
+      });
+      const stopped = await stopDaytonaProcess(sandbox, {
+        attemptId: PREPARATION_CLAIM,
+        runId: RUN_ID,
+      });
+      assert.ok(
+        calls.some((call) => call.command.includes(`test ! -L '${PATH}'`))
+      );
+      assert.ok(fileCalls.some((call) => call.kind === "deleteFile"));
+      assert.equal(JSON.stringify(stopped).includes(SECRET), false);
+      assert.notEqual(stopped.kind, "stopped");
+      assert.notEqual(stopped.kind, "provider_not_found");
+    })
+  );
+});
+
 const stopInput = { attemptId: PREPARATION_CLAIM, runId: RUN_ID };
 
 function allReturnedText(value: unknown): string {
@@ -1544,7 +1601,7 @@ test("attaches the exact attempt and command only after execution accepts", asyn
 });
 
 test("persists attempt redaction before staging and retires it after proven failed cleanup", async () => {
-  const { sandbox } = processDouble({ stageError: new Error("stage failed") });
+  const { sandbox } = processDouble({ stageExitCode: 1 });
   const redaction: string[] = [];
 
   await assert.rejects(() =>
@@ -1624,7 +1681,7 @@ test("treats a failed durable preparation callback as a safe retryable start err
   assert.deepEqual(calls, []);
 });
 
-test("cleans only its prepared resources when launch authorization is rejected", async () => {
+test("cleans exact resources but retains the attempt when launch authorization is rejected", async () => {
   const { calls, sandbox, sessionIds } = processDouble();
   const cancellation = { recorded: false };
   const releases: unknown[] = [];
@@ -1644,7 +1701,7 @@ test("cleans only its prepared resources when launch authorization is rejected",
       }),
     (error: unknown) =>
       error instanceof DaytonaProcessError &&
-      error.code === "process_start_failed" &&
+      error.code === "sandbox_reuse_required" &&
       error.retryable === false
   );
 
@@ -1661,14 +1718,15 @@ test("cleans only its prepared resources when launch authorization is rejected",
     calls.some(
       (call) =>
         call.kind === "command" &&
-        call.command === `rm -f -- '${PATH}' && test ! -e '${PATH}'`
+        call.command ===
+          `rm -f -- '${PATH}' && test ! -e '${PATH}' && test ! -L '${PATH}'`
     )
   );
   assert.deepEqual(sessionIds(), []);
-  assert.deepEqual(releases, [{ attemptId: PREPARATION_CLAIM, runId: RUN_ID }]);
+  assert.deepEqual(releases, []);
 });
 
-test("cleans prepared resources when launch authorization throws and returns a retryable error", async () => {
+test("cleans exact resources and preserves the fence when launch authorization throws", async () => {
   const { calls, sandbox, sessionIds } = processDouble();
   const releases: unknown[] = [];
 
@@ -1684,8 +1742,8 @@ test("cleans prepared resources when launch authorization throws and returns a r
       }),
     (error: unknown) =>
       error instanceof DaytonaProcessError &&
-      error.code === "process_start_failed" &&
-      error.retryable === true &&
+      error.code === "sandbox_reuse_required" &&
+      error.retryable === false &&
       allReturnedText(error).includes(SECRET) === false
   );
 
@@ -1697,12 +1755,13 @@ test("cleans prepared resources when launch authorization throws and returns a r
     calls.some(
       (call) =>
         call.kind === "command" &&
-        call.command === `rm -f -- '${PATH}' && test ! -e '${PATH}'`
+        call.command ===
+          `rm -f -- '${PATH}' && test ! -e '${PATH}' && test ! -L '${PATH}'`
     )
   );
   assert.ok(calls.some((call) => call.kind === "delete"));
   assert.deepEqual(sessionIds(), []);
-  assert.deepEqual(releases, [{ attemptId: PREPARATION_CLAIM, runId: RUN_ID }]);
+  assert.deepEqual(releases, []);
 });
 
 test("cleans deterministic credentials and sessions at every failed start boundary", async () => {
@@ -1739,9 +1798,12 @@ test("cleans deterministic credentials and sessions at every failed start bounda
         calls.some((call) => call.kind === "delete"),
         sessionCleanup
       );
-      assert.deepEqual(releases, [
-        { attemptId: PREPARATION_CLAIM, runId: RUN_ID },
-      ]);
+      assert.deepEqual(
+        releases,
+        sessionCleanup || "stageError" in options
+          ? []
+          : [{ attemptId: PREPARATION_CLAIM, runId: RUN_ID }]
+      );
     })
   );
 });
@@ -1829,18 +1891,27 @@ test("an ambiguous creation still deletes its session when its first cleanup loo
   assert.equal(calls[6]?.command, SESSION);
 });
 
-test("removes and confirms a stale deterministic session before staging a new credential", async () => {
+test("a stale deterministic session requires reset without staging a new credential", async () => {
   const { calls, sandbox } = processDouble({
     sessions: [{ commands: [], sessionId: SESSION }],
   });
 
-  await startDaytonaProcess(startInput(sandbox));
+  await assert.rejects(
+    startDaytonaProcess(startInput(sandbox)),
+    (error: unknown) =>
+      error instanceof DaytonaProcessError &&
+      error.code === "sandbox_reuse_required"
+  );
 
   assert.deepEqual(
     calls.slice(0, 4).map((call) => call.kind),
     ["list", "delete", "list", "command"]
   );
-  assert.equal(calls.filter((call) => call.kind === "start").length, 1);
+  assert.equal(calls.filter((call) => call.kind === "start").length, 0);
+  assert.equal(
+    calls.some((call) => call.env !== undefined),
+    false
+  );
 });
 
 test("aborts with zero credential staging when stale-session cleanup is ambiguous", async () => {
@@ -1891,7 +1962,7 @@ test("surfaces safe combined cleanup failure without retaining provider secrets"
 
 test("retains the claim with a retryable durable-release error when cleanup succeeds but release fails", async () => {
   const { calls, sandbox, sessionIds } = processDouble({
-    stageError: new Error(SECRET),
+    stageExitCode: 1,
   });
   const releases: unknown[] = [];
 
@@ -1917,7 +1988,8 @@ test("retains the claim with a retryable durable-release error when cleanup succ
     calls.some(
       (call) =>
         call.kind === "command" &&
-        call.command === `rm -f -- '${PATH}' && test ! -e '${PATH}'`
+        call.command ===
+          `rm -f -- '${PATH}' && test ! -e '${PATH}' && test ! -L '${PATH}'`
     )
   );
 });
@@ -1927,7 +1999,7 @@ test("a stale attempt release cannot request a reset of a replacement attempt's 
   const sessionB = daytonaRunSessionName(RUN_ID, attemptB);
   const { calls, sandbox, sessionIds } = processDouble({
     sessions: [{ commands: [], sessionId: sessionB }],
-    stageError: new Error(SECRET),
+    stageExitCode: 1,
   });
   const releases: unknown[] = [];
 
@@ -2345,9 +2417,10 @@ test("derives its stop target from run and attempt IDs and ignores caller sessio
     ],
   });
 
-  assert.deepEqual(await stopDaytonaProcess(sandbox, legacyInput), {
-    kind: "stopped",
-  });
+  assert.equal(
+    (await stopDaytonaProcess(sandbox, legacyInput)).kind,
+    "cleanup_required"
+  );
   assert.deepEqual(
     calls.filter((call) => call.kind === "delete").map((call) => call.command),
     [SESSION]
@@ -2378,9 +2451,9 @@ test("rejects invalid stop IDs before any Daytona mutation", async () => {
   assert.deepEqual(calls, []);
 });
 
-test("stops sessions only after API absence confirmation and asks caller to reset on failure", async () => {
+test("session absence and cleanup failure both retain a non-destructive reset obligation", async () => {
   const stopped = await stopDaytonaProcess(processDouble().sandbox, stopInput);
-  assert.deepEqual(stopped, { kind: "stopped" });
+  assert.equal(stopped.kind, "cleanup_required");
 
   const reset = await stopDaytonaProcess(
     processDouble({
@@ -2389,17 +2462,17 @@ test("stops sessions only after API absence confirmation and asks caller to rese
     }).sandbox,
     stopInput
   );
-  assert.equal(reset.kind, "sandbox_reset_required");
+  assert.equal(reset.kind, "cleanup_required");
   assert.equal(
-    reset.kind === "sandbox_reset_required" && reset.error.code,
-    "sandbox_reset_required"
+    reset.kind === "cleanup_required" && reset.error.code,
+    "sandbox_reuse_required"
   );
 
   const deleteFailed = await stopDaytonaProcess(
     processDouble({ deleteError: new Error(SECRET) }).sandbox,
     stopInput
   );
-  assert.equal(deleteFailed.kind, "sandbox_reset_required");
+  assert.equal(deleteFailed.kind, "cleanup_required");
   assert.equal(JSON.stringify(deleteFailed).includes(SECRET), false);
 
   const retryableDeleteFailed = await stopDaytonaProcess(
@@ -2418,16 +2491,18 @@ test("stops sessions only after API absence confirmation and asks caller to rese
   assert.deepEqual(retryableLookupFailed, { kind: "provider_unavailable" });
 });
 
-test("requires deterministic credential cleanup and verification before stopped", async () => {
+test("verifies exact credential cleanup without declaring persistent reuse safe", async () => {
   const { calls, fileCalls, sandbox } = processDouble();
-  assert.deepEqual(await stopDaytonaProcess(sandbox, stopInput), {
-    kind: "stopped",
-  });
+  assert.equal(
+    (await stopDaytonaProcess(sandbox, stopInput)).kind,
+    "cleanup_required"
+  );
   assert.ok(
     calls.some(
       (call) =>
         call.kind === "command" &&
-        call.command === `rm -f -- '${PATH}' && test ! -e '${PATH}'` &&
+        call.command ===
+          `rm -f -- '${PATH}' && test ! -e '${PATH}' && test ! -L '${PATH}'` &&
         call.env === undefined
     )
   );
@@ -2443,18 +2518,18 @@ test("requires deterministic credential cleanup and verification before stopped"
     processDouble({ cleanupExitCode: 1 }).sandbox,
     stopInput
   );
-  assert.equal(reset.kind, "sandbox_reset_required");
+  assert.equal(reset.kind, "cleanup_required");
   assert.equal(JSON.stringify(reset).includes(SECRET), false);
 
   const cleanupAmbiguous = await stopDaytonaProcess(
     processDouble({ cleanupError: new Error(SECRET) }).sandbox,
     stopInput
   );
-  assert.equal(cleanupAmbiguous.kind, "sandbox_reset_required");
+  assert.equal(cleanupAmbiguous.kind, "cleanup_required");
   assert.equal(JSON.stringify(cleanupAmbiguous).includes(SECRET), false);
 });
 
-test("treats Daytona 404 and 410 session deletion responses as stopped only after credential cleanup", async () => {
+test("404 and 410 session absence still require credential cleanup and approved reset", async () => {
   const absenceErrors = [
     new DaytonaNotFoundError("session missing", 404),
     new DaytonaGoneError("session gone", 410),
@@ -2465,12 +2540,14 @@ test("treats Daytona 404 and 410 session deletion responses as stopped only afte
       assert.equal(classifyDaytonaProviderError(error), "not_found");
       const { calls, sandbox } = processDouble({ deleteError: error });
 
-      assert.deepEqual(await stopDaytonaProcess(sandbox, stopInput), {
-        kind: "provider_not_found",
-      });
-      assert.deepEqual(await stopDaytonaProcess(sandbox, stopInput), {
-        kind: "provider_not_found",
-      });
+      assert.equal(
+        (await stopDaytonaProcess(sandbox, stopInput)).kind,
+        "cleanup_required"
+      );
+      assert.equal(
+        (await stopDaytonaProcess(sandbox, stopInput)).kind,
+        "cleanup_required"
+      );
       assert.deepEqual(
         calls.map((call) => call.kind),
         ["delete", "command", "delete", "command"]
@@ -2480,7 +2557,8 @@ test("treats Daytona 404 and 410 session deletion responses as stopped only afte
           .filter((call) => call.kind === "command")
           .every(
             (call) =>
-              call.command === `rm -f -- '${PATH}' && test ! -e '${PATH}'`
+              call.command ===
+              `rm -f -- '${PATH}' && test ! -e '${PATH}' && test ! -L '${PATH}'`
           ),
         true
       );
@@ -2514,9 +2592,10 @@ test("a delayed old attempt can only clean its own names after replacement start
 
   await startDaytonaProcess(startInput(sandbox));
   assert.deepEqual(sessionIds(), [SESSION]);
-  assert.deepEqual(await stopDaytonaProcess(sandbox, stopInput), {
-    kind: "stopped",
-  });
+  assert.equal(
+    (await stopDaytonaProcess(sandbox, stopInput)).kind,
+    "cleanup_required"
+  );
   await startDaytonaProcess({
     ...startInput(sandbox),
     authorizePreparation: async () => attemptB,

@@ -11,6 +11,7 @@ import {
   SUPPORTED_HARNESS_SPECS,
 } from "@opencoven/harness";
 import type { DaytonaSnapshotConfiguration } from "./config";
+import { daytonaSnapshotProfileProblems } from "./snapshot-policy";
 
 export {
   DAYTONA_DEFAULT_API_URL,
@@ -68,6 +69,7 @@ const MARKER_NAMES = [
  * ordinary output stream without waiting for line endings.
  */
 export const DAYTONA_BUILD_LOG_LOOKBEHIND_SIZE = 96;
+export const DAYTONA_BUILD_LOG_MAX_CHARACTERS = 65_536;
 
 export type DaytonaSnapshot = Readonly<{
   cpu?: number;
@@ -137,11 +139,19 @@ export function createDaytonaCopilotImage(): Image {
 }
 
 export function createDaytonaSnapshotDefinition(
-  configuration: Pick<DaytonaSnapshotConfiguration, "snapshotName">
-): Readonly<{ image: Image; name: string }> {
+  configuration: Pick<
+    DaytonaSnapshotConfiguration,
+    "snapshotName" | "resources"
+  >
+): Readonly<{
+  image: Image;
+  name: string;
+  resources: DaytonaSnapshotConfiguration["resources"];
+}> {
   return {
     image: createDaytonaCopilotImage(),
     name: configuration.snapshotName,
+    resources: configuration.resources,
   };
 }
 
@@ -295,10 +305,20 @@ export function createDaytonaBuildLogSanitizer(
 ): DaytonaBuildLogSanitizer {
   let buffered = "";
   let suppressed = false;
+  let remaining = DAYTONA_BUILD_LOG_MAX_CHARACTERS;
   const lookbehind = Math.max(
     DAYTONA_BUILD_LOG_LOOKBEHIND_SIZE,
     apiKey.length - 1
   );
+  function bounded(text: string): string {
+    const emitted = text.slice(0, remaining);
+    remaining -= emitted.length;
+    if (remaining === 0) {
+      suppressed = true;
+      buffered = "";
+    }
+    return emitted;
+  }
 
   function redactMarker(text: string): string | undefined {
     const marker = findSensitiveMarker(text, apiKey);
@@ -318,14 +338,14 @@ export function createDaytonaBuildLogSanitizer(
 
       const redacted = redactMarker(buffered);
       if (redacted) {
-        return redacted;
+        return bounded(redacted);
       }
 
       const safeLength =
         buffered.length - possibleMarkerSuffixLength(buffered, apiKey);
       const remainder = buffered.slice(0, safeLength);
       buffered = "";
-      return remainder;
+      return bounded(remainder);
     },
     write(chunk) {
       if (suppressed || !chunk) {
@@ -335,12 +355,12 @@ export function createDaytonaBuildLogSanitizer(
       const text = buffered + chunk;
       const redacted = redactMarker(text);
       if (redacted) {
-        return redacted;
+        return bounded(redacted);
       }
 
       const safeLength = Math.max(0, text.length - lookbehind);
       buffered = text.slice(safeLength);
-      return text.slice(0, safeLength);
+      return bounded(text.slice(0, safeLength));
     },
   };
 }
@@ -361,6 +381,26 @@ function snapshotState(state: string): string {
   )
     ? state
     : "unknown";
+}
+
+export async function verifyDaytonaSnapshot(
+  configuration: DaytonaSnapshotConfiguration,
+  snapshotService: Pick<DaytonaSnapshotService, "get">
+): Promise<DaytonaSnapshot> {
+  let snapshot: DaytonaSnapshot;
+  try {
+    snapshot = await snapshotService.get(configuration.snapshotName);
+  } catch {
+    // biome-ignore lint/style/useErrorCause: Provider errors can contain credentials and unbounded output.
+    throw new Error("Unable to verify the configured Daytona snapshot.");
+  }
+  const problems = daytonaSnapshotProfileProblems(snapshot, configuration);
+  if (problems.length > 0) {
+    throw new Error(
+      `Daytona snapshot does not match the active resource policy (${problems.join(", ")}). Build a new immutable generation.`
+    );
+  }
+  return snapshot;
 }
 
 /**
@@ -442,33 +482,10 @@ export async function provisionDaytonaSnapshot(
     );
   }
 
-  // Verify what was asked for is what landed. Snapshots are immutable, so a
-  // snapshot clamped below policy — by an org quota, say — cannot be corrected
-  // in place: the runtime guard would then refuse the whole fleet permanently,
-  // and the only remedy is another generation. This is the one moment the
-  // mistake is still cheap, so it must fail here rather than at delete time.
-  const shortfalls = (
-    [
-      ["cpu", snapshot.cpu, configuration.resources.cpu],
-      ["disk", snapshot.disk, configuration.resources.disk],
-      [
-        "memory",
-        snapshot.mem ?? snapshot.memory,
-        configuration.resources.memory,
-      ],
-    ] as const
-  ).filter(
-    ([, provided, required]) => provided !== undefined && provided < required
-  );
-  if (shortfalls.length > 0) {
+  const problems = daytonaSnapshotProfileProblems(snapshot, configuration);
+  if (problems.length > 0) {
     throw new Error(
-      `Daytona snapshot "${configuration.snapshotName}" was created below policy (${shortfalls
-        .map(
-          ([field, provided, required]) => `${field} ${provided} < ${required}`
-        )
-        .join(
-          ", "
-        )}). Snapshots are immutable: build the next generation instead.`
+      `Daytona snapshot was created outside policy (${problems.join(", ")}). Snapshots are immutable: build the next generation instead.`
     );
   }
   return snapshot;

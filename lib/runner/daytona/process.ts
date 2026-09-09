@@ -150,6 +150,7 @@ export class DaytonaProcessError extends Error {
     | "harness_missing"
     | "process_start_failed"
     | "sandbox_reset_required"
+    | "sandbox_reuse_required"
     | "session_create_failed"
     | "workspace_required";
   readonly retryable: boolean;
@@ -180,7 +181,7 @@ function providerError(
 }
 
 function cleanupCommand(path: string): string {
-  return `rm -f -- ${shellQuote(path)} && test ! -e ${shellQuote(path)}`;
+  return `rm -f -- ${shellQuote(path)} && test ! -e ${shellQuote(path)} && test ! -L ${shellQuote(path)}`;
 }
 
 function stagingCommand(authName: string, path: string): string {
@@ -417,7 +418,7 @@ async function removeSessionWithOutcome(
   if (remaining.some((session) => session.sessionId === sessionId)) {
     throw new Error("Daytona session remained after deletion.");
   }
-  return { targetObserved: exists };
+  return { targetObserved: exists || lookupFailed };
 }
 
 async function removeSession(
@@ -442,11 +443,15 @@ async function cleanupFailedStart(
   credentialPath: string,
   sessionName: string,
   primary: DaytonaProcessError,
-  deleteAttemptRedaction: (attemptId: DaytonaAttemptId) => Promise<boolean>,
+  deleteAttemptRedaction: (
+    attemptId: DaytonaAttemptId,
+    preserveRedaction?: boolean
+  ) => Promise<boolean>,
   releasePreparation: (
     attemptId: DaytonaAttemptId
   ) => Promise<RunnerDispatchAuthority | null>,
-  attemptId: DaytonaAttemptId
+  attemptId: DaytonaAttemptId,
+  requiresReset = false
 ): Promise<never> {
   const failures: unknown[] = [];
   try {
@@ -459,7 +464,18 @@ async function cleanupFailedStart(
   } catch (error) {
     failures.push(error);
   }
+  if (requiresReset) {
+    await deleteAttemptRedaction(attemptId, true).catch(() => false);
+    // Keep the exact attempt and redaction envelope: session/file absence
+    // proves neither descendant termination nor that timed-out staging stopped.
+    throw new DaytonaProcessError(
+      "Daytona attempt cleanup requires an approved sandbox reset before reuse; the persistent workspace was preserved.",
+      "sandbox_reuse_required",
+      false
+    );
+  }
   if (failures.length > 0) {
+    await deleteAttemptRedaction(attemptId, true).catch(() => false);
     throw new DaytonaProcessError(
       `Daytona ${primary.code} cleanup could not be confirmed; reset the sandbox before retrying.`,
       "sandbox_reset_required",
@@ -761,7 +777,8 @@ export async function startDaytonaProcess(input: {
     | undefined;
 
   const deleteAttemptSecurity = async (
-    claim: DaytonaAttemptId
+    claim: DaytonaAttemptId,
+    preserveRedaction = false
   ): Promise<boolean> => {
     let cleaned = true;
     if (input.githubTool && githubFileStagingAttempted) {
@@ -788,6 +805,9 @@ export async function startDaytonaProcess(input: {
       } catch {
         cleaned = false;
       }
+    }
+    if (preserveRedaction) {
+      return cleaned;
     }
     try {
       if (
@@ -869,8 +889,31 @@ export async function startDaytonaProcess(input: {
   try {
     // A deterministic session can survive an ambiguous earlier create. Its
     // absence must be confirmed before a new credential is ever written.
-    await removeSession(input.sandbox, sessionId);
+    const cleanup = await removeSessionWithOutcome(input.sandbox, sessionId);
+    if (cleanup.targetObserved) {
+      return await cleanupFailedStart(
+        input.sandbox,
+        credentialPath,
+        sessionId,
+        new DaytonaProcessError(
+          "Daytona found a stale attempt session; reset is required before reuse.",
+          "sandbox_reuse_required",
+          false
+        ),
+        deleteAttemptSecurity,
+        (claim) =>
+          input.releasePreparation({ attemptId: claim, runId: input.runId }),
+        attemptId,
+        true
+      );
+    }
   } catch (error) {
+    if (
+      error instanceof DaytonaProcessError &&
+      error.code === "sandbox_reuse_required"
+    ) {
+      throw error;
+    }
     return await cleanupFailedStart(
       input.sandbox,
       credentialPath,
@@ -960,6 +1003,7 @@ export async function startDaytonaProcess(input: {
     }
   }
 
+  let stagingSettled = false;
   try {
     const staged = await process.executeCommand(
       stagingCommand(auth.name, credentialPath),
@@ -967,6 +1011,7 @@ export async function startDaytonaProcess(input: {
       { [auth.name]: auth.value },
       STAGING_TIMEOUT_SECONDS
     );
+    stagingSettled = true;
     if (staged.exitCode !== 0) {
       throw new DaytonaProcessError(
         "Daytona could not safely stage the harness credential.",
@@ -992,7 +1037,8 @@ export async function startDaytonaProcess(input: {
           attemptId: claim,
           runId: input.runId,
         }),
-      attemptId
+      attemptId,
+      !stagingSettled
     );
   }
 
@@ -1021,6 +1067,7 @@ export async function startDaytonaProcess(input: {
   }
 
   let commandId: string;
+  let launchMayHaveStarted = false;
   try {
     if (
       input.executionPermission === "unrestricted" &&
@@ -1035,6 +1082,7 @@ export async function startDaytonaProcess(input: {
         false
       );
     }
+    launchMayHaveStarted = true;
     const response = await process.executeSessionCommand(sessionId, {
       command: asyncCommand(
         auth.name,
@@ -1091,7 +1139,8 @@ export async function startDaytonaProcess(input: {
           attemptId: claim,
           runId: input.runId,
         }),
-      attemptId
+      attemptId,
+      launchMayHaveStarted
     );
   }
 
@@ -1119,7 +1168,8 @@ export async function startDaytonaProcess(input: {
           attemptId: claim,
           runId: input.runId,
         }),
-      attemptId
+      attemptId,
+      true
     );
   }
   if (!launchAuthority) {
@@ -1138,7 +1188,8 @@ export async function startDaytonaProcess(input: {
           attemptId: claim,
           runId: input.runId,
         }),
-      attemptId
+      attemptId,
+      true
     );
   }
   return {
@@ -1282,7 +1333,7 @@ export type DaytonaStopResult =
   | Readonly<{ kind: "provider_not_found" | "provider_unavailable" }>
   | Readonly<{
       error: DaytonaProcessError;
-      kind: "sandbox_reset_required";
+      kind: "cleanup_required" | "sandbox_reset_required";
     }>;
 
 export type DaytonaStopInput = Readonly<{
@@ -1292,36 +1343,29 @@ export type DaytonaStopInput = Readonly<{
 
 /**
  * `deleteSession` is the only session termination operation in SDK 0.207.
- * After confirmed absence, it removes and verifies the run's deterministic
+ * Regardless of session cleanup errors, it removes and verifies the exact
  * credential path. A classified 404 or 410 confirms session absence but does
  * not skip credential cleanup. Callers must record cancellation durably before
  * calling this function so the launch authorizer rejects a concurrent start.
- * Sandbox deletion remains the caller's job.
+ * Session/file absence does not prove descendant termination. Preserve the
+ * durable cleanup obligation without authorizing automatic workspace deletion.
  */
 export async function stopDaytonaProcess(
   sandbox: DaytonaProcessSandbox,
   input: DaytonaStopInput
 ): Promise<DaytonaStopResult> {
   const sessionId = daytonaRunSessionName(input.runId, input.attemptId);
+  const failures: unknown[] = [];
   let sessionAbsent = false;
   try {
     await sandbox.process.deleteSession(sessionId);
   } catch (error) {
     const failure = classifyDaytonaProviderError(error);
-    if (failure !== "not_found") {
-      if (failure === "retryable") {
-        return { kind: "provider_unavailable" };
-      }
-      return {
-        error: providerError(
-          "sandbox_reset_required",
-          "Daytona could not confirm process session termination; reset the sandbox.",
-          error
-        ),
-        kind: "sandbox_reset_required",
-      };
+    if (failure === "not_found") {
+      sessionAbsent = true;
+    } else {
+      failures.push(error);
     }
-    sessionAbsent = true;
   }
 
   if (!sessionAbsent) {
@@ -1331,17 +1375,7 @@ export async function stopDaytonaProcess(
         throw new Error("Daytona session remained after deletion.");
       }
     } catch (error) {
-      if (classifyDaytonaProviderError(error) === "retryable") {
-        return { kind: "provider_unavailable" };
-      }
-      return {
-        error: providerError(
-          "sandbox_reset_required",
-          "Daytona could not confirm process session termination; reset the sandbox.",
-          error
-        ),
-        kind: "sandbox_reset_required",
-      };
+      failures.push(error);
     }
   }
 
@@ -1351,17 +1385,7 @@ export async function stopDaytonaProcess(
       daytonaRunCredentialPath(input.runId, input.attemptId)
     );
   } catch (error) {
-    if (classifyDaytonaProviderError(error) === "retryable") {
-      return { kind: "provider_unavailable" };
-    }
-    return {
-      error: providerError(
-        "sandbox_reset_required",
-        "Daytona could not confirm deterministic credential removal; reset the sandbox.",
-        error
-      ),
-      kind: "sandbox_reset_required",
-    };
+    failures.push(error);
   }
   if (sandbox.fs) {
     try {
@@ -1370,22 +1394,26 @@ export async function stopDaytonaProcess(
       );
     } catch (error) {
       const failure = classifyDaytonaProviderError(error);
-      if (failure === "retryable") {
-        return { kind: "provider_unavailable" };
-      }
       if (failure !== "not_found") {
-        return {
-          error: providerError(
-            "sandbox_reset_required",
-            "Daytona could not confirm deterministic capability removal; reset the sandbox.",
-            error
-          ),
-          kind: "sandbox_reset_required",
-        };
+        failures.push(error);
       }
     }
   }
-  return { kind: sessionAbsent ? "provider_not_found" : "stopped" };
+  if (
+    failures.some(
+      (error) => classifyDaytonaProviderError(error) === "retryable"
+    )
+  ) {
+    return { kind: "provider_unavailable" };
+  }
+  return {
+    error: new DaytonaProcessError(
+      "Daytona attempt cleanup requires an approved sandbox reset before reuse; the persistent workspace was preserved.",
+      "sandbox_reuse_required",
+      false
+    ),
+    kind: "cleanup_required",
+  };
 }
 
 /** Deletes only deterministic per-run paths after terminal or expired starts. */
@@ -1403,14 +1431,18 @@ export async function sweepDaytonaCredentials(
   if (paths.length === 0) {
     return;
   }
-  const command = `${paths.map((path) => `rm -f -- ${shellQuote(path)}`).join("; ")}; test ${paths.map((path) => `! -e ${shellQuote(path)}`).join(" -a ")}`;
-  const result = await sandbox.process.executeCommand(
-    command,
-    undefined,
-    undefined,
-    STAGING_TIMEOUT_SECONDS
-  );
-  if (result.exitCode !== 0) {
+  const command = paths.map(cleanupCommand).join(" && ");
+  try {
+    const result = await sandbox.process.executeCommand(
+      command,
+      undefined,
+      undefined,
+      STAGING_TIMEOUT_SECONDS
+    );
+    if (result.exitCode !== 0) {
+      throw new Error("Credential cleanup failed.");
+    }
+  } catch {
     throw new DaytonaProcessError(
       "Daytona could not confirm stale credential-file removal.",
       "credential_cleanup_failed",

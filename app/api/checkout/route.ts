@@ -94,6 +94,13 @@ const checkoutDependencies: CheckoutDependencies = {
           await stripe.checkout.sessions.retrieve(sessionId)
         );
       },
+      async retrievePrice(priceId) {
+        const price = await stripe.prices.retrieve(priceId);
+        return {
+          ...price,
+          unit_amount_decimal: price.unit_amount_decimal?.toString() ?? null,
+        };
+      },
       async retrieveSubscription(subscriptionId) {
         const subscription =
           await stripe.subscriptions.retrieve(subscriptionId);

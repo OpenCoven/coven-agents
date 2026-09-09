@@ -129,6 +129,12 @@ Cleanup verifies path absence even when Daytona returns session `404` or
 cleanup/recovery/reset-required and cannot report a successful outcome.
 Sandbox reset and decommission retain their independent durable version and
 generation fences.
+The current adapter refuses reuse after any launched or possibly launched
+attempt: session/file absence does not prove descendant termination.
+`cleanup_required` preserves the attempt fence and workspace; it does not
+authorize automatic deletion. A deliberately authorized, exact-fenced reset is
+required before another credential transfer. Legacy sandboxes without the
+current credential-boundary marker also fail closed.
 
 ### B4. Reconciliation and diagnostics
 
@@ -145,10 +151,12 @@ not an eligibility upgrade.
 Sandbox creation requests server-owned auto-stop and auto-archive values
 rather than accepting provider defaults. CPU, memory, and disk are not named on
 the create, because Daytona refuses a create that names them; a sandbox takes
-them from the snapshot it was built from, and the pinned snapshot declares
-none, so sandboxes currently run on provider defaults and no upper bound on
-those three is enforced anywhere. Restoring one requires a snapshot built with
-a policy the provider accepts. Public previews
+them from the snapshot it was built from. Provisioning supplies all three
+explicitly, and configured dispatch requires the exact active snapshot profile.
+Absent, non-integer, conflicting, or out-of-policy metadata fails closed before
+sandbox preparation. The public resource defaults/caps are policy, not proof of
+deployed resources; retain read-only snapshot verification before promotion.
+Public previews
 are false; no volume, linked/forked sandbox, or warm-pool setting is used. TTL
 is explicitly disabled and automatic deletion is disabled because each agent's
 persistent workspace is deleted only by an existing database-fenced lifecycle

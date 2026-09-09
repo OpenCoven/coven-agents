@@ -61,8 +61,25 @@ before changing entitlement, checkout, webhook, grace, or run-cap behavior.
 New subscription sales are default-off through
 `SUBSCRIPTION_CHECKOUT_ENABLED`; use the
 [release-readiness Stripe checklist](docs/roadmap/release-readiness.md#stripe-webhook-delivery)
-before enabling it. Customer Portal and automatic Stripe Tax collection are
-not part of the current release.
+before enabling it. Hosted Customer Portal is implemented and remains
+available to a current authenticated billing owner when sales are paused or
+paid access has expired. It requires a configured Stripe portal; complimentary
+accounts receive an explicit non-billed response. Automatic Stripe Tax
+collection is not implemented.
+
+The cloud pilot uses one fixed monthly Stripe Price, checked before Checkout
+mutations, with 300 included execution minutes and a 15-minute maximum run.
+There is no automatic overage, and model inference/provider entitlement is
+customer-supplied. `lib/billing/pilot-plan.ts` reuses the enforced allowance
+constants for the public policy returned by `/api/subscription`. Its `active`
+field is product billing state, not canonical familiar execution authority.
+Exact Price amount/currency are shown by hosted Checkout from that same
+configured Price, not copied into application pricing text. Optional prepaid
+minute packs remain separately configured and do not enable automatic overage.
+
+The [cloud pilot integration boundary](docs/product/cloud-pilot-integration.md)
+records canonical ownership, source gaps, billing-recovery and storefront
+policy, and the independent native/provider release gates.
 
 ## Install
 

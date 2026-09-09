@@ -45,11 +45,13 @@ import {
   daytonaSandboxLabels,
   daytonaSandboxName,
 } from "./names";
+import { daytonaSnapshotProfileProblems } from "./snapshot-policy";
 
 const SANDBOX_OPERATION_TIMEOUT_SECONDS = 60;
 const SANDBOX_TRANSITION_POLL_INTERVAL_MS = 1000;
 export const DAYTONA_CODE_TOOLBOX_LANGUAGE_LABEL = "code-toolbox-language";
 export const DAYTONA_SANDBOX_LANGUAGE = "python";
+export const DAYTONA_CREDENTIAL_BOUNDARY_VERSION = "attempt-reset-v1";
 export const SANDBOX_PROVISIONING_TIMEOUT_MS = 5 * 60 * 1000;
 export const SANDBOX_WARM_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -271,6 +273,7 @@ function sandboxCreateParameters(
     ephemeral: false,
     labels: {
       ...daytonaSandboxLabels(agent.tenant, agent.id),
+      credentialBoundaryVersion: DAYTONA_CREDENTIAL_BOUNDARY_VERSION,
       sandboxGeneration: String(agent.sandboxGeneration),
       ...(configuration.configurationId
         ? { configurationId: configuration.configurationId }
@@ -282,6 +285,20 @@ function sandboxCreateParameters(
     snapshot: configuration.snapshotName,
     ttlMinutes: configuration.ttlMinutes,
   };
+}
+
+export function assertDaytonaCredentialBoundary(
+  sandbox: Pick<Sandbox, "labels">
+): void {
+  if (
+    sandbox.labels?.credentialBoundaryVersion !==
+    DAYTONA_CREDENTIAL_BOUNDARY_VERSION
+  ) {
+    throw new DaytonaSandboxLifecycleError(
+      "Daytona sandbox requires an approved reset before credential staging; the persistent workspace was preserved.",
+      { kind: "cleanup_needed", retryable: false }
+    );
+  }
 }
 
 export function daytonaSandboxProvisioningIdentityMatches(
@@ -378,53 +395,27 @@ export async function assertReplacementSnapshotReady(
   // `snapshot.get` resolves for building, pending, error and build_failed
   // alike, so existence is not usability. A create against anything but an
   // active snapshot fails, and by then the workspace is already gone.
-  if (
-    snapshot.state !== undefined &&
-    snapshot.state !== SNAPSHOT_ACTIVE_STATE
-  ) {
+  if (snapshot.state !== SNAPSHOT_ACTIVE_STATE) {
     // Building, pulling, pending and snapshotting all resolve here, and they
     // are exactly the states a freshly built generation passes through — the
     // deploy window this change creates. Treating them as permanent turns a
     // self-healing few minutes into a hard 422 for every tenant, so only a
     // terminal build outcome refuses for good.
     throw new DaytonaSandboxLifecycleError(
-      `Refusing to delete a persistent sandbox: replacement snapshot "${configuration.snapshotName}" is not active (state: ${snapshot.state}).`,
+      "Refusing to delete a persistent sandbox: replacement snapshot is not active.",
       {
         kind: "cleanup_needed",
-        retryable: SETTLING_SNAPSHOT_STATES.has(snapshot.state),
+        retryable: SETTLING_SNAPSHOT_STATES.has(snapshot.state ?? ""),
       }
     );
   }
 
-  // A sandbox cannot exceed what its snapshot carries, so a snapshot built
-  // below policy silently reproduces the drift this replacement exists to
-  // remove. Daytona reports memory as `mem` on a snapshot and `memory` on a
-  // sandbox; reading only the latter made this check dead code. An absent
-  // field is still not evidence of a mismatch.
-  const reported = {
-    cpu: snapshot.cpu,
-    disk: snapshot.disk,
-    memory: snapshot.mem ?? snapshot.memory,
-  };
-  const shortfalls = (["cpu", "disk", "memory"] as const).filter((field) => {
-    const provided = reported[field];
-    return provided !== undefined && provided < configuration.resources[field];
-  });
-  if (shortfalls.length > 0) {
+  const problems = daytonaSnapshotProfileProblems(snapshot, configuration);
+  if (problems.length > 0) {
     throw new DaytonaSandboxLifecycleError(
-      `Refusing to delete a persistent sandbox: replacement snapshot "${configuration.snapshotName}" is below policy (${shortfalls.join(", ")}).`,
+      `Refusing to delete a persistent sandbox: replacement snapshot is outside policy (${problems.join(", ")}).`,
       { kind: "cleanup_needed", retryable: false }
     );
-  }
-}
-
-async function deleteMismatchedSandbox(sandbox: Sandbox): Promise<void> {
-  try {
-    await sandbox.delete(SANDBOX_OPERATION_TIMEOUT_SECONDS, true);
-  } catch (error) {
-    if (classifyDaytonaProviderError(error) !== "not_found") {
-      throw error;
-    }
   }
 }
 
@@ -733,24 +724,12 @@ type DaytonaSandboxPersistence = Readonly<{
     | { kind: "not_found" }
     | { current?: RunnerAgentRecord; kind: "stale_version" }
   >;
-  beginReset: (
-    reserved: RunnerAgentRecord
-  ) => Promise<
-    | { kind: "updated"; value: RunnerAgentRecord }
-    | { kind: "not_found" | "not_live" | "stale_version" }
-  >;
   fail: (
     reserved: RunnerAgentRecord
   ) => Promise<
     | { kind: "updated"; value: RunnerAgentRecord }
     | { kind: "not_found" }
     | { kind: "stale_version" }
-  >;
-  finishReset: (
-    resetting: RunnerAgentRecord
-  ) => Promise<
-    | { kind: "updated"; value: RunnerAgentRecord }
-    | { kind: "not_found" | "stale_version" }
   >;
   markAmbiguous: (
     reserved: RunnerAgentRecord
@@ -781,23 +760,11 @@ function subscriberSandboxPersistence(
         expectedVersion: reserved.version,
         sandboxId,
       }),
-    beginReset: (reserved) =>
-      dependencies.store.beginDaytonaSandboxReset(principal, {
-        agentId: reserved.id,
-        expectedGeneration: reserved.sandboxGeneration,
-        expectedVersion: reserved.version,
-      }),
     fail: (reserved) =>
       dependencies.store.failDaytonaSandboxReservation(principal, {
         agentId: reserved.id,
         expectedGeneration: reserved.sandboxGeneration,
         expectedVersion: reserved.version,
-      }),
-    finishReset: (resetting) =>
-      dependencies.store.finishDaytonaSandboxReset(principal, {
-        agentId: resetting.id,
-        expectedGeneration: resetting.sandboxGeneration,
-        expectedVersion: resetting.version,
       }),
     markAmbiguous: (reserved) =>
       dependencies.store.markDaytonaSandboxReservationAmbiguous(principal, {
@@ -945,13 +912,7 @@ async function createSandbox(
       configuration
     )
   ) {
-    return resetMismatchedSandboxAndReprovision(
-      reserved.value,
-      sandbox,
-      configuration,
-      dependencies,
-      persistence
-    );
+    return refuseMismatchedSandboxReuse(configuration, dependencies);
   }
 
   if (lifecycleAborted(dependencies.lifecycle)) {
@@ -1002,47 +963,17 @@ async function createSandbox(
   return { agent: persisted, sandbox };
 }
 
-async function resetMismatchedSandboxAndReprovision(
-  reserved: RunnerAgentRecord,
-  sandbox: Sandbox,
+async function refuseMismatchedSandboxReuse(
   configuration: DaytonaSandboxConfiguration,
-  dependencies: DaytonaSandboxDependencies,
-  persistence: DaytonaSandboxPersistence
-): Promise<{ agent: RunnerAgentRecord; sandbox: Sandbox }> {
-  // Before anything durable happens. `beginReset` commits the agent row to
-  // `resetting`, and the recovery scanner deletes `resetting` sandboxes on the
-  // next tick — so throwing after this line does not save the workspace, it
-  // only postpones its destruction by one reconcile.
+  dependencies: DaytonaSandboxDependencies
+): Promise<never> {
   await assertReplacementSnapshotReady(configuration, dependencies);
-  const resetting = await persistence.beginReset(reserved);
-  if (resetting.kind !== "updated") {
-    throw new DaytonaSandboxLifecycleError(
-      resetting.kind === "not_live"
-        ? "Daytona sandbox is running an attempt and cannot be replaced yet."
-        : "Daytona sandbox generation changed before stale cleanup.",
-      { retryable: true }
-    );
-  }
-  try {
-    await deleteMismatchedSandbox(sandbox);
-  } catch (error) {
-    throw new DaytonaSandboxLifecycleError(
-      "Daytona stale sandbox cleanup requires reconciliation.",
-      {
-        cause: error,
-        kind: "cleanup_needed",
-        retryable: classifyDaytonaProviderError(error) !== "non_retryable",
-      }
-    );
-  }
-  const reset = await persistence.finishReset(resetting.value);
-  if (reset.kind !== "updated") {
-    throw new DaytonaSandboxLifecycleError(
-      "Daytona stale sandbox cleanup remains durably fenced.",
-      { kind: "cleanup_needed", retryable: true }
-    );
-  }
-  return createSandbox(reset.value, configuration, dependencies, persistence);
+  // Neither configuration drift nor a provider label is tenant deletion consent.
+  // Do not even enter `resetting`: older recovery workers may delete that state.
+  throw new DaytonaSandboxLifecycleError(
+    "Daytona sandbox configuration requires an approved reset; the persistent workspace was preserved.",
+    { kind: "cleanup_needed", retryable: false }
+  );
 }
 
 async function failSandboxReservation(
@@ -1060,7 +991,8 @@ async function failSandboxReservation(
 
 async function deleteFirstDaytonaSandbox(
   identifiers: readonly string[],
-  dependencies: DaytonaSandboxDependencies
+  dependencies: DaytonaSandboxDependencies,
+  resetWithoutProviderId?: RunnerAgentRecord
 ): Promise<"deleted" | "provider_not_found"> {
   const [identifier, ...remaining] = identifiers;
   if (!identifier) {
@@ -1073,7 +1005,27 @@ async function deleteFirstDaytonaSandbox(
     if (classifyDaytonaProviderError(error) !== "not_found") {
       throw error;
     }
-    return await deleteFirstDaytonaSandbox(remaining, dependencies);
+    return await deleteFirstDaytonaSandbox(
+      remaining,
+      dependencies,
+      resetWithoutProviderId
+    );
+  }
+  if (
+    resetWithoutProviderId &&
+    (sandbox.labels?.sandboxGeneration !==
+      String(resetWithoutProviderId.sandboxGeneration - 1) ||
+      Object.entries(
+        daytonaSandboxLabels(
+          resetWithoutProviderId.tenant,
+          resetWithoutProviderId.id
+        )
+      ).some(([key, value]) => sandbox.labels?.[key] !== value))
+  ) {
+    throw new DaytonaSandboxLifecycleError(
+      "The named sandbox does not match the authorized reset generation; the workspace was preserved.",
+      { kind: "cleanup_needed", retryable: false }
+    );
   }
   try {
     await sandbox.delete(SANDBOX_OPERATION_TIMEOUT_SECONDS, true);
@@ -1156,11 +1108,12 @@ export async function resetDaytonaSandboxForCancellation(
   let deleted: "deleted" | "provider_not_found";
   try {
     deleted = await deleteFirstDaytonaSandbox(
-      [
-        ...(agent.daytonaSandboxId ? [agent.daytonaSandboxId] : []),
-        daytonaSandboxName(agent.tenant, agent.id),
-      ],
-      dependencies
+      agent.daytonaSandboxId
+        ? [agent.daytonaSandboxId]
+        : [daytonaSandboxName(agent.tenant, agent.id)],
+      dependencies,
+      // A stable name may already resolve to a successor after another retry.
+      agent.daytonaSandboxId ? undefined : agent
     );
   } catch (error) {
     return classifyDaytonaProviderError(error) === "retryable"
@@ -1215,13 +1168,7 @@ async function reconcileAmbiguousDaytonaSandbox(
     if (
       !daytonaSandboxProvisioningIdentityMatches(sandbox, agent, configuration)
     ) {
-      return resetMismatchedSandboxAndReprovision(
-        agent,
-        sandbox,
-        configuration,
-        dependencies,
-        persistence
-      );
+      return refuseMismatchedSandboxReuse(configuration, dependencies);
     }
     const persisted = await persistSandbox(agent, sandbox, persistence, false);
     await startOrRecoverSandbox(sandbox, dependencies.lifecycle);
@@ -1245,8 +1192,7 @@ async function ensureDaytonaSandboxWithPersistence(
   agent: RunnerAgentRecord,
   configuration: DaytonaSandboxConfiguration,
   dependencies: DaytonaSandboxDependencies,
-  persistence: DaytonaSandboxPersistence,
-  replaceMismatchedConfiguration: boolean
+  persistence: DaytonaSandboxPersistence
 ): Promise<{ agent: RunnerAgentRecord; sandbox: Sandbox }> {
   if (
     agent.sandboxLifecycle === "resetting" ||
@@ -1287,19 +1233,7 @@ async function ensureDaytonaSandboxWithPersistence(
     return createSandbox(agent, configuration, dependencies, persistence);
   }
   if (!sandboxConfigurationMatches(sandbox, configuration)) {
-    if (!replaceMismatchedConfiguration) {
-      throw new DaytonaSandboxLifecycleError(
-        "Daytona sandbox configuration changed and requires reprovisioning.",
-        { retryable: true }
-      );
-    }
-    return resetMismatchedSandboxAndReprovision(
-      agent,
-      sandbox,
-      configuration,
-      dependencies,
-      persistence
-    );
+    return refuseMismatchedSandboxReuse(configuration, dependencies);
   }
   await startOrRecoverSandbox(sandbox, dependencies.lifecycle);
   return { agent, sandbox };
@@ -1319,15 +1253,7 @@ export function ensureDaytonaSandbox(
     agent,
     configuration,
     dependencies,
-    subscriberSandboxPersistence(principal, dependencies),
-    /**
-     * Prewarm replaces a sandbox whose configuration no longer matches, the
-     * same as dispatch does. It is safe here because the subscriber reset
-     * refuses while an attempt is live; before that guard existed this had to
-     * be false, which left a drifted agent raising a retryable error on every
-     * prewarm and never repairing itself.
-     */
-    true
+    subscriberSandboxPersistence(principal, dependencies)
   );
 }
 
@@ -1376,26 +1302,6 @@ export async function ensureDaytonaSandboxForDispatch(
                   : result.kind,
             };
       },
-      beginReset: async (reserved) => {
-        const result =
-          await dependencies.store.beginDaytonaSandboxResetForDispatch(
-            operator,
-            authority,
-            {
-              agentId: reserved.id,
-              expectedGeneration: reserved.sandboxGeneration,
-              expectedVersion: reserved.version,
-            }
-          );
-        return result.kind === "updated"
-          ? result
-          : {
-              kind:
-                result.kind === "not_live"
-                  ? ("stale_version" as const)
-                  : result.kind,
-            };
-      },
       fail: async (reserved) => {
         const result =
           await dependencies.store.failDaytonaSandboxReservationForDispatch(
@@ -1409,26 +1315,6 @@ export async function ensureDaytonaSandboxForDispatch(
         return result.kind === "not_live"
           ? { kind: "stale_version" as const }
           : result;
-      },
-      finishReset: async (resetting) => {
-        const result =
-          await dependencies.store.finishDaytonaSandboxResetForDispatch(
-            operator,
-            authority,
-            {
-              agentId: resetting.id,
-              expectedGeneration: resetting.sandboxGeneration,
-              expectedVersion: resetting.version,
-            }
-          );
-        return result.kind === "updated"
-          ? result
-          : {
-              kind:
-                result.kind === "not_live"
-                  ? ("stale_version" as const)
-                  : result.kind,
-            };
       },
       markAmbiguous: async (reserved) => {
         const result =
@@ -1459,8 +1345,7 @@ export async function ensureDaytonaSandboxForDispatch(
           ? { kind: "stale_version" as const }
           : result;
       },
-    },
-    true
+    }
   );
 }
 

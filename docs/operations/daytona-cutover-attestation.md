@@ -293,18 +293,20 @@ and sandbox reset whenever file or session absence cannot be proved.
 1. Derive the only permitted session and credential path from the durable run
    and attempt UUIDs. A worker must not accept caller-provided session or path
    identifiers.
-2. Before a new staging call, remove and confirm absence of a stale session
-   with the same deterministic attempt identity. Do not stage while its
-   absence is ambiguous.
+2. Before a new staging call, inspect and clean the same deterministic session.
+   A stale observed session or ambiguous lookup requires an approved reset;
+   removing that session alone cannot authorize another credential transfer.
 3. On every pre-launch failure, remove and verify both that credential path
-   and that attempt session before releasing durable preparation.
+   and that attempt session. Release durable preparation only for a
+   known-settled failure before possible launch; an ambiguous staging request
+   may still complete later.
 4. On terminal or cancellation cleanup, again remove and verify both exact
    resources. A session `404` or `410` proves only the session's absence; it
    does not skip credential-path cleanup.
 5. Keep any ambiguous lookup, deletion, or path verification as an explicit
    cleanup/recovery/reset-required state. It cannot be reported as a
    successful start, stop, cancellation, or terminal cleanup.
-6. Reset or decommission only through the existing durable agent
+6. Reset or decommission only after deliberate authorization through the existing durable agent
    version/generation fence. An older attempt must not reset a replacement
    sandbox, and a reset sandbox must not be reused until provider absence and
    database finalization are confirmed.
@@ -313,6 +315,14 @@ and sandbox reset whenever file or session absence cannot be proved.
    that evidence exists, session-record absence alone cannot prove that a
    residual process cannot observe a later staging file; treat the sandbox as
    reset-required before persistent reuse.
+
+The hardened source retains `cleanup_required` after a launched or possibly
+launched attempt and refuses repeat staging. Background recovery does not
+delete an existing workspace merely because its row says `resetting`: legacy
+workers could enter that state automatically. This is a source-policy change,
+not a new production receipt. Repeated-run availability and a safe
+workspace-preserving reset workflow remain release gates; see the
+[cloud pilot integration boundary](../product/cloud-pilot-integration.md).
 
 ## Production cutover and retirement evidence
 

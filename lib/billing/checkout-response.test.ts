@@ -153,6 +153,10 @@ test("enabled checkout preserves the required operation order", async () => {
           calls.push("create Customer");
           return Promise.resolve({ id: "cus_new" });
         },
+        retrievePrice(priceId) {
+          calls.push("validate Price");
+          return defaultProvider().retrievePrice(priceId);
+        },
       });
     },
     enforceAbuse: () => {
@@ -190,6 +194,7 @@ test("enabled checkout preserves the required operation order", async () => {
     "checkout lease claim",
     "read user",
     "create Stripe client",
+    "validate Price",
     "create Customer",
     "checkout lease checkpoint",
     "attach customer",
@@ -200,6 +205,81 @@ test("enabled checkout preserves the required operation order", async () => {
     "idempotency renew",
     "idempotency release",
   ]);
+});
+
+test("invalid or unavailable pilot pricing prevents Customer and Checkout mutations", async () => {
+  await Promise.all(
+    (["inactive", "annual", "unavailable"] as const).map(async (failure) => {
+      const mutations: string[] = [];
+      const provider = defaultProvider({
+        createCheckoutSession() {
+          mutations.push("checkout");
+          return Promise.resolve({
+            url: "https://checkout.stripe.test/unexpected",
+          });
+        },
+        createCustomer() {
+          mutations.push("customer");
+          return Promise.resolve({ id: "cus_unexpected" });
+        },
+        async retrievePrice(priceId) {
+          if (failure === "unavailable") {
+            throw new Error("private provider diagnostic");
+          }
+          const price = await defaultProvider().retrievePrice(priceId);
+          return failure === "inactive"
+            ? { ...price, active: false }
+            : {
+                ...price,
+                recurring: {
+                  interval: "year",
+                  interval_count: 1,
+                  trial_period_days: null,
+                  usage_type: "licensed",
+                },
+              };
+        },
+      });
+      const response = await checkoutResponse(
+        request(),
+        dependenciesFor({
+          createProvider: () => provider,
+          findUser: () => Promise.resolve({ stripeCustomerId: null }),
+        }),
+        null
+      );
+      assert.equal(response.status, 503);
+      assert.deepEqual(await response.json(), { error: "billing_unavailable" });
+      assert.deepEqual(mutations, []);
+    })
+  );
+});
+
+test("a failed Price read preserves the attempt and recovers without duplicate Checkout", async () => {
+  let failRead = true;
+  let creates = 0;
+  const provider = defaultProvider({
+    createCheckoutSession() {
+      creates += 1;
+      return Promise.resolve({ url: "https://checkout.stripe.test/session" });
+    },
+    retrievePrice(priceId) {
+      return failRead
+        ? Promise.reject(new Error("provider unavailable"))
+        : defaultProvider().retrievePrice(priceId);
+    },
+  });
+  const dependencies = dependenciesFor({ createProvider: () => provider });
+  assert.equal(
+    (await checkoutResponse(request(), dependencies, null)).status,
+    503
+  );
+  failRead = false;
+  assert.equal(
+    (await checkoutResponse(request(), dependencies, null)).status,
+    200
+  );
+  assert.equal(creates, 1);
 });
 
 test("same browser key reuses provider keys and integration identifier on retry", async () => {
@@ -4174,6 +4254,24 @@ function defaultProvider(
     createCustomer: () => Promise.resolve({ id: "cus_new" }),
     hasBlockingSubscription: () => Promise.resolve(false),
     listCustomers: () => Promise.resolve({ data: [], hasMore: false }),
+    retrievePrice: (priceId) =>
+      Promise.resolve({
+        active: true,
+        billing_scheme: "per_unit",
+        currency: "usd",
+        custom_unit_amount: null,
+        id: priceId,
+        recurring: {
+          interval: "month",
+          interval_count: 1,
+          trial_period_days: null,
+          usage_type: "licensed",
+        },
+        transform_quantity: null,
+        type: "recurring",
+        unit_amount: 2500,
+        unit_amount_decimal: "2500",
+      }),
     retrieveSubscription: () =>
       Promise.reject(new Error("No Subscription was configured.")),
     ...overrides,
