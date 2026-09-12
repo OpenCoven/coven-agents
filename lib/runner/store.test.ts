@@ -985,6 +985,87 @@ test("restricted retries accept only their exact legacy pre-migration hash", asy
   assert.equal(conflict.kind, "conflict");
 });
 
+test("an ordinary run binds SQL NULL, not JSON null, for its broker policy", async () => {
+  const inserted = run();
+  const accepted = {
+    createdAt: inserted.createdAt,
+    event: {},
+    eventId: 1,
+    runId: inserted.id,
+  };
+  const creation = scripted(
+    [agent({ id: inserted.agentId, sandboxLifecycle: "ready" })],
+    [],
+    [inserted],
+    [accepted],
+    [{ ...inserted, logCursor: 1, version: inserted.version + 1 }]
+  );
+
+  const result = await creation.store.startRun(principal, {
+    agentId: inserted.agentId,
+    authVersion: 8,
+    id: inserted.id,
+    operationId: inserted.operationId,
+    requestHash: inserted.requestHash,
+    task: inserted.task,
+  });
+
+  assert.equal(result.kind, "created");
+  const insert = creation.statements.find(
+    (statement) => statement.name === "insert-run"
+  );
+  assert.ok(insert);
+  assert.equal(insert.args.githubBrokerPolicy, null);
+  assert.equal(insert.args.teamStepId, null);
+  // `'null'::jsonb IS NOT NULL` would trip the ordinary-run trigger guard.
+  const params = queryParams(insert);
+  assert.equal(params.includes("null"), false);
+  assert.equal(params.at(-1), null);
+});
+
+test("a team child binds its broker policy as a JSON document", async () => {
+  const teamStepId = "66666666-6666-4666-8666-666666666666";
+  const brokerPolicy = { connectionGeneration: 3, maxCallCount: 32 };
+  const inserted = run({
+    executionPermission: "github_only",
+    githubBrokerPolicy: brokerPolicy,
+    teamStepId,
+  } as never);
+  const accepted = {
+    createdAt: inserted.createdAt,
+    event: {},
+    eventId: 1,
+    runId: inserted.id,
+  };
+  const creation = scripted(
+    [agent({ id: inserted.agentId, sandboxLifecycle: "ready" })],
+    [],
+    [],
+    [inserted],
+    [accepted],
+    [{ ...inserted, logCursor: 1, version: inserted.version + 1 }]
+  );
+
+  const result = await creation.store.startRun(principal, {
+    agentId: inserted.agentId,
+    authVersion: 8,
+    executionPermission: "github_only",
+    githubBrokerPolicy: brokerPolicy as never,
+    id: inserted.id,
+    operationId: inserted.operationId,
+    requestHash: inserted.requestHash,
+    task: inserted.task,
+    teamStepId,
+  });
+
+  assert.equal(result.kind, "created");
+  const insert = creation.statements.find(
+    (statement) => statement.name === "insert-run"
+  );
+  assert.ok(insert);
+  assert.equal(queryParams(insert).at(-1), JSON.stringify(brokerPolicy));
+});
+
 test("new runs persist trusted authority and internal hydration preserves it", async () => {
   const inserted = { ...run(), authVersion: 8 } as RunnerRunRecord;
   const accepted = {
