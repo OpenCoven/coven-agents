@@ -117,6 +117,10 @@
   background: transparent;
 }
 
+.oc-palette-panel {
+  animation: oc-settle var(--duration-base) var(--ease-decelerate) backwards;
+}
+
 .oc-console button {
   font: inherit;
   color: inherit;
@@ -142,6 +146,50 @@
 .oc-tint:hover {
   background: var(--bg-raised);
   border-color: var(--border-strong);
+}
+
+/* Buttons. Every `Btn` carries `.oc-btn`; the primary variant owns its own
+   fill so no shared hover can dim it. Press is a half-pixel settle, not a
+   scale — a control that shrinks under the cursor reads as flinching. */
+.oc-btn {
+  transition:
+    border-color var(--duration-fast) var(--ease-standard),
+    background var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard),
+    box-shadow var(--duration-fast) var(--ease-standard),
+    transform var(--duration-fast) var(--ease-standard);
+}
+
+.oc-btn:not(:disabled):active {
+  transform: translateY(0.5px);
+}
+
+.oc-btn--primary {
+  background: linear-gradient(
+    180deg,
+    color-mix(in oklch, var(--accent-presence) 90%, white),
+    var(--accent-presence) 62%
+  );
+  box-shadow:
+    inset 0 1px 0 color-mix(in oklch, white 26%, transparent),
+    0 1px 2px oklch(0 0 0 / 0.35);
+}
+
+.oc-btn--primary:not(:disabled):hover {
+  background: linear-gradient(
+    180deg,
+    color-mix(in oklch, var(--accent-presence) 80%, white),
+    color-mix(in oklch, var(--accent-presence) 94%, white) 62%
+  );
+  box-shadow:
+    inset 0 1px 0 color-mix(in oklch, white 30%, transparent),
+    0 8px 20px -8px color-mix(in oklch, var(--accent-presence) 70%, transparent),
+    0 1px 2px oklch(0 0 0 / 0.35);
+}
+
+.oc-btn--primary:not(:disabled):active {
+  background: var(--accent-presence);
+  box-shadow: inset 0 1px 2px oklch(0 0 0 / 0.25);
 }
 
 .oc-row:hover {
@@ -2481,6 +2529,94 @@
   animation: oc-in var(--duration-slow) var(--ease-decelerate) both;
 }
 
+/* Staged reveal — the console's one choreographed moment.
+
+   A new surface (composer, run record, creation paths) does not appear all
+   at once: the panel settles first, then its sections rise in reading order
+   about 55ms apart. Long enough to register as sequence, short enough that
+   the last section lands before anyone reaches for it. Opacity and a 10px
+   travel only; the reduced-motion block collapses it to a fade. */
+@keyframes oc-rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes oc-settle {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.995);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.oc-composer-grid {
+  animation: oc-settle var(--duration-slow) var(--ease-decelerate) backwards;
+}
+
+.oc-composer-main > *,
+.oc-session-ledger > * {
+  animation: oc-rise 420ms var(--ease-decelerate) backwards;
+  animation-delay: calc(60ms + var(--oc-stagger, 0) * 55ms);
+}
+
+.oc-composer-main > :nth-child(2),
+.oc-session-ledger > :nth-child(2) {
+  --oc-stagger: 1;
+}
+
+.oc-composer-main > :nth-child(3),
+.oc-session-ledger > :nth-child(3) {
+  --oc-stagger: 2;
+}
+
+.oc-composer-main > :nth-child(4) {
+  --oc-stagger: 3;
+}
+
+.oc-composer-main > :nth-child(5) {
+  --oc-stagger: 4;
+}
+
+.oc-thread > .oc-block:nth-child(2) {
+  animation-delay: 55ms;
+}
+
+.oc-thread > .oc-block:nth-child(3) {
+  animation-delay: 110ms;
+}
+
+.oc-thread > .oc-block:nth-child(4) {
+  animation-delay: 165ms;
+}
+
+.oc-thread > .oc-block:nth-child(n + 5) {
+  animation-delay: 220ms;
+}
+
+.oc-create-agent-paths > * {
+  /* `backwards`, not `both`: a held final keyframe would pin `transform`
+     and swallow the card's hover lift. */
+  animation: oc-rise 420ms var(--ease-decelerate) backwards;
+  animation-delay: 80ms;
+}
+
+.oc-create-agent-paths > :nth-child(2) {
+  animation-delay: 150ms;
+}
+
+.oc-create-agent-paths > :nth-child(3) {
+  animation-delay: 220ms;
+}
+
 .oc-shim {
   background: linear-gradient(
     90deg,
@@ -2857,6 +2993,22 @@
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-card);
   box-shadow: var(--shadow-md);
+  transition:
+    border-color var(--duration-base) var(--ease-standard),
+    box-shadow var(--duration-base) var(--ease-standard);
+}
+
+/* The card takes the focus ring, not the textarea inside it: a ring drawn
+   on the textarea alone cut straight through the "Proof brief" label. */
+.oc-composer-brief:focus-within {
+  border-color: color-mix(
+    in oklch,
+    var(--accent-presence) 70%,
+    var(--border-strong)
+  );
+  box-shadow:
+    var(--shadow-md),
+    0 0 0 3px color-mix(in oklch, var(--accent-presence) 22%, transparent);
 }
 
 .oc-composer-brief > label {
@@ -2865,6 +3017,11 @@
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.12em;
+  transition: color var(--duration-base) var(--ease-standard);
+}
+
+.oc-composer-brief:focus-within > label {
+  color: var(--accent-presence);
 }
 
 .oc-composer-brief textarea {
@@ -2878,6 +3035,10 @@
   outline: none;
   background: transparent;
   border: 0;
+}
+
+.oc-console .oc-composer-brief textarea:focus-visible {
+  outline: none;
 }
 
 .oc-composer-controls {
