@@ -2111,6 +2111,9 @@ export function RunConsole({
                       agent={selectedAgent}
                       blocked={blocked}
                       draft={draft}
+                      // Keyed so choosing another agent replays the reveal;
+                      // the composer holds no local state worth preserving.
+                      key={selectedAgent.id}
                       now={now}
                       onDraft={setDraft}
                       onOpenRun={openRun}

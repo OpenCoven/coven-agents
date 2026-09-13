@@ -19,16 +19,26 @@ const HEIGHTS: Record<ButtonSize, number> = { md: 34, sm: 30, xs: 24 };
 const PADDING: Record<ButtonSize, number> = { md: 14, sm: 11, xs: 8 };
 const FONT_SIZE: Record<ButtonSize, number> = { md: 13, sm: 12, xs: 11 };
 
+// Weight lives inside the `font` shorthand below. Setting `fontWeight` beside
+// `font` made React drop one of them mid-rerender when the composer swapped
+// the run button between primary and secondary.
+const WEIGHT: Record<ButtonVariant, number> = {
+  "danger-ghost": 500,
+  ghost: 500,
+  primary: 600,
+  secondary: 500,
+};
+
 function variantStyle(variant: ButtonVariant): CSSProperties {
   switch (variant) {
     case "primary":
       // Dark ink on the accent rather than the near-white the rest of the
       // console uses: white on this lavender measures ~2.6:1, the dark ink 5.7:1.
+      // Fill, hover and press live in `.oc-btn--primary`; the shared `.oc-tint`
+      // hover would otherwise repaint the accent as chrome grey.
       return {
-        background: "var(--accent-presence)",
-        border: "1px solid var(--accent-presence)",
+        border: "1px solid transparent",
         color: "var(--accent-ink)",
-        fontWeight: 600,
       };
     case "secondary":
       return {
@@ -70,7 +80,9 @@ export function Btn({
 }) {
   return (
     <button
-      className="oc-tint"
+      className={
+        variant === "primary" ? "oc-btn oc-btn--primary" : "oc-btn oc-tint"
+      }
       disabled={disabled}
       onClick={onClick}
       style={{
@@ -79,7 +91,7 @@ export function Btn({
         cursor: disabled ? "not-allowed" : "pointer",
         display: "inline-flex",
         flex: "none",
-        font: `500 ${FONT_SIZE[size]}px/1 var(--font-ui)`,
+        font: `${WEIGHT[variant]} ${FONT_SIZE[size]}px/1 var(--font-ui)`,
         gap: 7,
         height: HEIGHTS[size],
         justifyContent: "center",

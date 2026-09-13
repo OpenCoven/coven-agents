@@ -390,15 +390,45 @@ export function StepsTimeline({
                 width: 3,
               }}
             />
-            <span
-              className="oc-shim"
-              style={{
-                backgroundColor: "var(--bg-raised)",
-                borderRadius: 999,
-                flex: 1,
-                height: 9,
-              }}
-            />
+            {steps.length === 0 ? (
+              <span
+                style={{
+                  display: "flex",
+                  flex: 1,
+                  flexDirection: "column",
+                  gap: 4,
+                  minWidth: 0,
+                }}
+              >
+                <span
+                  className="oc-breathe"
+                  style={{
+                    color: "var(--text-secondary)",
+                    font: "500 11px/1.3 var(--font-ui)",
+                  }}
+                >
+                  Waiting for the first step
+                </span>
+                <span
+                  style={{
+                    color: "var(--text-faint)",
+                    font: "400 10px/1.4 var(--font-mono)",
+                  }}
+                >
+                  commands, edits and reports land here as they happen
+                </span>
+              </span>
+            ) : (
+              <span
+                className="oc-shim"
+                style={{
+                  backgroundColor: "var(--bg-raised)",
+                  borderRadius: 999,
+                  flex: 1,
+                  height: 9,
+                }}
+              />
+            )}
           </div>
         ) : null}
 

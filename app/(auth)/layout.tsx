@@ -66,10 +66,8 @@ export default function AuthLayout({
 
             {children}
           </div>
-
-          <p className="text-center text-[12px] text-muted-foreground">
-            Agents run in isolated sandboxes with credentials you supply.
-          </p>
+          {/* No footer line: the card already states the sandbox boundary,
+              and saying it twice made the second reading feel like a caveat. */}
         </div>
       </div>
     </SessionProvider>

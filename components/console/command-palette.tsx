@@ -2,13 +2,15 @@
 
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Bot, CornerDownLeft, ScrollText, Zap } from "lucide-react";
 import {
-  hairline,
-  tabular,
-  truncate,
-  type as type_,
-} from "@/components/console/styles";
+  type ComponentType,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { hairline, truncate, type as type_ } from "@/components/console/styles";
 
 /**
  * ⌘K.
@@ -25,6 +27,22 @@ export type PaletteItem = {
   label: string;
   run: () => void;
 };
+
+const GROUP_LABELS: Record<string, string> = {
+  action: "Commands",
+  agent: "Agents",
+  run: "Runs",
+};
+
+const GROUP_ICONS: Record<string, ComponentType<{ size?: number }>> = {
+  action: Zap,
+  agent: Bot,
+  run: ScrollText,
+};
+
+function optionId(id: string): string {
+  return `oc-palette-option-${id}`;
+}
 
 export function CommandPalette({
   items,
@@ -66,6 +84,28 @@ export function CommandPalette({
     );
   }, [items, query]);
 
+  // Items keep the caller's order; sections appear in first-seen order so
+  // the caller still decides what leads.
+  const sections = useMemo(() => {
+    const byGroup = new Map<string, { index: number; item: PaletteItem }[]>();
+    matches.forEach((item, index) => {
+      const bucket = byGroup.get(item.group) ?? [];
+      bucket.push({ index, item });
+      byGroup.set(item.group, bucket);
+    });
+    return [...byGroup.entries()];
+  }, [matches]);
+
+  useEffect(() => {
+    const activeItem = matches[active];
+    if (!activeItem) {
+      return;
+    }
+    document
+      .getElementById(optionId(activeItem.id))
+      ?.scrollIntoView({ block: "nearest" });
+  }, [active, matches]);
+
   const choose = (index: number) => {
     const item = matches[index];
     if (item) {
@@ -105,6 +145,7 @@ export function CommandPalette({
       ref={dialogRef}
       style={{
         alignItems: "flex-start",
+        backdropFilter: "blur(6px)",
         background: "oklch(0 0 0 / 0.42)",
         border: 0,
         color: "var(--text-primary)",
@@ -134,6 +175,7 @@ export function CommandPalette({
         type="button"
       />
       <div
+        className="oc-palette-panel"
         style={{
           background: "var(--bg-elevated)",
           border: "1px solid var(--border-strong)",
@@ -148,6 +190,12 @@ export function CommandPalette({
         }}
       >
         <input
+          aria-activedescendant={
+            matches[active] ? optionId(matches[active].id) : undefined
+          }
+          aria-autocomplete="list"
+          aria-controls="oc-palette-options"
+          aria-expanded="true"
           aria-label="Search"
           onChange={(event) => {
             setQuery(event.target.value);
@@ -172,6 +220,7 @@ export function CommandPalette({
           }}
           placeholder="Search runs, agents, and commands"
           ref={inputRef}
+          role="combobox"
           style={{
             background: "transparent",
             border: 0,
@@ -184,6 +233,8 @@ export function CommandPalette({
         />
         <div
           className="oc-scroll"
+          id="oc-palette-options"
+          role="listbox"
           style={{ minHeight: 0, overflowY: "auto", padding: 6 }}
         >
           {matches.length === 0 ? (
@@ -198,49 +249,163 @@ export function CommandPalette({
               Nothing matches “{query}”.
             </p>
           ) : (
-            matches.map((item, index) => (
-              <button
-                className="oc-row"
-                key={item.id}
-                onClick={() => choose(index)}
-                onPointerEnter={() => setActive(index)}
-                style={{
-                  alignItems: "center",
-                  background:
-                    index === active ? "var(--bg-hover)" : "transparent",
-                  border: 0,
-                  borderRadius: "var(--radius-control)",
-                  cursor: "pointer",
-                  display: "flex",
-                  gap: 10,
-                  padding: "9px 12px",
-                  textAlign: "left",
-                  width: "100%",
-                }}
-                type="button"
-              >
-                <span
-                  style={{
-                    ...type_.meta,
-                    ...tabular,
-                    flex: "none",
-                    textTransform: "uppercase",
-                    width: 62,
-                  }}
+            sections.map(([group, entries]) => {
+              const Icon = GROUP_ICONS[group] ?? Zap;
+              return (
+                // biome-ignore lint/a11y/useSemanticElements: `group` is the ARIA role for option clusters inside a listbox; a fieldset is for form controls and is invalid here.
+                <div
+                  aria-label={GROUP_LABELS[group] ?? group}
+                  key={group}
+                  role="group"
+                  style={{ paddingBottom: 4 }}
                 >
-                  {item.group}
-                </span>
-                <span style={{ ...type_.label, flex: 1, ...truncate }}>
-                  {item.label}
-                </span>
-                {item.hint ? (
-                  <span style={{ ...type_.meta, ...truncate, maxWidth: 200 }}>
-                    {item.hint}
-                  </span>
-                ) : null}
-              </button>
-            ))
+                  <div
+                    aria-hidden="true"
+                    style={{
+                      alignItems: "center",
+                      display: "flex",
+                      gap: 8,
+                      padding: "8px 12px 4px",
+                    }}
+                  >
+                    <span
+                      style={{ ...type_.eyebrow, color: "var(--text-faint)" }}
+                    >
+                      {GROUP_LABELS[group] ?? group}
+                    </span>
+                    <span
+                      style={{
+                        background: "var(--border-hairline)",
+                        flex: 1,
+                        height: 1,
+                      }}
+                    />
+                  </div>
+                  {entries.map(({ index, item }) => (
+                    <button
+                      aria-selected={index === active}
+                      className="oc-row"
+                      id={optionId(item.id)}
+                      key={item.id}
+                      onClick={() => choose(index)}
+                      onPointerEnter={() => setActive(index)}
+                      role="option"
+                      style={{
+                        alignItems: "center",
+                        background:
+                          index === active ? "var(--bg-hover)" : "transparent",
+                        border: 0,
+                        borderRadius: "var(--radius-control)",
+                        cursor: "pointer",
+                        display: "flex",
+                        gap: 10,
+                        padding: "8px 10px",
+                        textAlign: "left",
+                        width: "100%",
+                      }}
+                      type="button"
+                    >
+                      <span
+                        aria-hidden="true"
+                        style={{
+                          alignItems: "center",
+                          background:
+                            index === active
+                              ? "var(--fill-info)"
+                              : "var(--bg-raised)",
+                          border: hairline,
+                          borderRadius: "var(--radius-sm)",
+                          color:
+                            index === active
+                              ? "var(--accent-presence)"
+                              : "var(--text-muted)",
+                          display: "inline-flex",
+                          flex: "none",
+                          height: 24,
+                          justifyContent: "center",
+                          width: 24,
+                        }}
+                      >
+                        <Icon size={12} />
+                      </span>
+                      <span style={{ ...type_.label, flex: 1, ...truncate }}>
+                        {item.label}
+                      </span>
+                      {item.hint ? (
+                        <span
+                          style={{ ...type_.meta, ...truncate, maxWidth: 200 }}
+                        >
+                          {item.hint}
+                        </span>
+                      ) : null}
+                      {index === active ? (
+                        <span
+                          aria-hidden="true"
+                          style={{
+                            color: "var(--text-faint)",
+                            display: "inline-flex",
+                            flex: "none",
+                          }}
+                        >
+                          <CornerDownLeft size={11} />
+                        </span>
+                      ) : null}
+                    </button>
+                  ))}
+                </div>
+              );
+            })
           )}
+        </div>
+        <div
+          aria-hidden="true"
+          style={{
+            alignItems: "center",
+            borderTop: hairline,
+            display: "flex",
+            gap: 14,
+            padding: "8px 14px",
+          }}
+        >
+          {[
+            ["↑↓", "navigate"],
+            ["↵", "open"],
+            ["esc", "close"],
+          ].map(([key, label]) => (
+            <span
+              key={key}
+              style={{
+                alignItems: "center",
+                color: "var(--text-faint)",
+                display: "inline-flex",
+                font: "400 10px/1 var(--font-mono)",
+                gap: 6,
+              }}
+            >
+              <kbd
+                style={{
+                  background: "var(--bg-raised)",
+                  border: hairline,
+                  borderRadius: 4,
+                  color: "var(--text-muted)",
+                  font: "500 10px/1 var(--font-mono)",
+                  padding: "3px 5px",
+                }}
+              >
+                {key}
+              </kbd>
+              {label}
+            </span>
+          ))}
+          <span
+            style={{
+              color: "var(--text-faint)",
+              font: "400 10px/1 var(--font-mono)",
+              marginLeft: "auto",
+            }}
+          >
+            {matches.length} {matches.length === 1 ? "result" : "results"}
+          </span>
         </div>
       </div>
     </dialog>
