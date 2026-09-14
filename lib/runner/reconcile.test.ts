@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { DaytonaNotFoundError } from "@daytona/sdk";
+import type { CommandEvidence, FileEvidence } from "@opencoven/agent-contracts";
 import { sanitizeEvidenceText } from "@opencoven/agent-contracts";
 import {
   attemptLeaseMsFromEnvironment,
@@ -15,6 +16,7 @@ import { reconcileDaytonaSandboxes } from "./daytona/resource-recovery";
 import { RUNNER_MID_RUN_ENTITLEMENT_POLICY } from "./entitlement-policy";
 import { encodeRunnerAttemptRedactionSecrets } from "./redaction-secrets";
 import type {
+  DispatchFence,
   RunnerAgentRecord,
   RunnerDaytonaAttemptId,
   RunnerDispatchAuthority,
@@ -1847,7 +1849,7 @@ test("slow attached observations keep active fencing long enough to append, then
       current.dispatchLeaseExpiresAt !== null &&
       current.dispatchLeaseExpiresAt.getTime() > now;
 
-    const sameAuthority = (authority: RunnerDispatchAuthority) =>
+    const sameAuthority = (authority: DispatchFence) =>
       authority.expectedVersion === current.version &&
       authority.leaseToken === current.dispatchLeaseToken &&
       authority.runId === current.id;
@@ -1922,9 +1924,12 @@ test("slow attached observations keep active fencing long enough to append, then
           run: {} as never,
         };
       },
+      claimExpiredDaytonaAttemptCleanup: async () => ({
+        kind: "not_found" as const,
+      }),
       cleanupTerminalLease: async (
         _operator: unknown,
-        authority: RunnerDispatchAuthority
+        authority: DispatchFence
       ) => {
         if (!sameAuthority(authority) || !leaseActive()) {
           return { kind: "not_live" as const };
@@ -1941,10 +1946,15 @@ test("slow attached observations keep active fencing long enough to append, then
       finalizeRun: async (
         _operator: unknown,
         input: {
-          commandEvidence: [];
+          commandEvidence: CommandEvidence[];
           completedAt: Date;
-          error: { code: string; retryable: boolean } | null;
-          fileEvidence: [];
+          error: {
+            code: string;
+            details?: string;
+            message: string;
+            retryable: boolean;
+          } | null;
+          fileEvidence: FileEvidence[];
           leaseToken: string;
           output: string;
           runId: string;
@@ -1979,6 +1989,9 @@ test("slow attached observations keep active fencing long enough to append, then
           run: current,
         };
       },
+      markDispatchRunningForDispatch: async () => ({
+        kind: "not_live" as const,
+      }),
       readAttemptRedaction: async () => ({
         kind: "found" as const,
         value: {
@@ -2038,6 +2051,10 @@ test("slow attached observations keep active fencing long enough to append, then
         renewedLeaseExpiries.push(input.leaseExpiresAt.toISOString());
         return { kind: "updated" as const, value: current };
       },
+      requestRunCancellation: async () => ({ kind: "not_found" as const }),
+      requeueAfterDaytonaAttemptCleanup: async () => ({
+        kind: "not_live" as const,
+      }),
       requeueExpiredDispatch: async () => ({ kind: "not_live" as const }),
       scanExpiredDispatchLeases: async () =>
         current.dispatchLeaseExpiresAt !== null &&
@@ -2301,7 +2318,12 @@ test("a slow short-cadence observation still appends progress and enforces the e
         _operator: unknown,
         input: {
           completedAt: Date;
-          error: { code: string; retryable: boolean } | null;
+          error: {
+            code: string;
+            details?: string;
+            message: string;
+            retryable: boolean;
+          } | null;
           leaseToken: string;
           output: string;
           runId: string;
