@@ -119,6 +119,40 @@ test("normalization removes credential URLs and obvious secrets before shortenin
   }
 });
 
+test("title input redacts credential labels that become plain text after markdown stripping", () => {
+  for (const input of [
+    "Help **password**: SYNTHETIC_VALUE",
+    "Help `password`: SYNTHETIC_VALUE",
+    "Help **api key** = `SYNTHETIC_VALUE`",
+    "Help `token` is **SYNTHETIC_VALUE**",
+  ]) {
+    assert.equal(titleInputFromMessage(message(input)), "Help");
+  }
+});
+
+test("generated titles redact credential labels that become plain text after markdown stripping", async () => {
+  await Promise.all(
+    [
+      "Help **password**: SYNTHETIC_VALUE",
+      "Help `password`: SYNTHETIC_VALUE",
+      "Help **api key** = `SYNTHETIC_VALUE`",
+      "Help `token` is **SYNTHETIC_VALUE**",
+    ].map(async (output) => {
+      assert.equal(
+        await generateTitleFromUserMessageInternal(
+          { message: message("Help") },
+          {
+            generate: () => Promise.resolve(output),
+            report: () =>
+              assert.fail("successful generation should not report failure"),
+          }
+        ),
+        "Help"
+      );
+    })
+  );
+});
+
 for (const [prefix, payload] of [
   ["ghp_", "x".repeat(25)],
   ["github_pat_", "x".repeat(25)],
