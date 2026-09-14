@@ -26,8 +26,15 @@ export default function Page() {
         in never starts an agent or a run. Sandbox warming begins only from an
         authenticated subscriber console.
       </p>
-      {/* The boundary, stated where a stranger first meets the product. */}
-      <p className="font-mono text-[11px] text-muted-foreground">
+      {/* The boundary, stated where a stranger first meets the product. Set
+          as a rule with a mark rather than loose fine print so it reads as a
+          guarantee, not a disclaimer. */}
+      <p className="flex items-center gap-2.5 border-border border-t pt-4 font-mono text-[11px] text-muted-foreground">
+        <span
+          aria-hidden="true"
+          className="size-1.5 shrink-0 rounded-full"
+          style={{ background: "var(--oc-accent)" }}
+        />
         Agents run in isolated Daytona sandboxes — never on your machine.
       </p>
 

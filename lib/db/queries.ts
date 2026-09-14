@@ -458,7 +458,28 @@ export async function recordStripeReconciliation(
         .onConflictDoNothing()
         .returning({ id: stripeEvent.id });
       if (claimed.length === 0) {
-        return "duplicate";
+        // The conflicting claim waits for its writer to commit, so this
+        // statement can see the evidence inserted with that marker. A bare
+        // marker still means processed; only a changed reason reopens evidence.
+        // Keep createdAt and eventType as the original event's provenance.
+        const [reopened] = await transaction
+          .update(stripeReconciliation)
+          .set({ reason: record.reason, status: "pending" })
+          .where(
+            and(
+              eq(stripeReconciliation.eventId, record.eventId),
+              ne(stripeReconciliation.reason, record.reason)
+            )
+          )
+          .returning({
+            eventId: stripeReconciliation.eventId,
+            eventType: stripeReconciliation.eventType,
+            reason: stripeReconciliation.reason,
+            status: stripeReconciliation.status,
+          });
+        return reopened
+          ? { kind: "manual_reconciliation", record: reopened }
+          : "duplicate";
       }
 
       await transaction.insert(stripeReconciliation).values({

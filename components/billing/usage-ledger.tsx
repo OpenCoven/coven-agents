@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { browserApplicationPath } from "@/lib/application-path";
+import { sessionFetch as fetch } from "@/lib/auth/session-recovery";
 import { MONTHLY_MINUTE_CAP } from "@/lib/billing/limits";
 
 /**

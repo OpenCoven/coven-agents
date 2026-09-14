@@ -586,11 +586,18 @@ const githubRepositoryPartSchema = z
   .max(100)
   .regex(/^[A-Za-z0-9_.-]+$/u);
 const githubDecimalSchema = z.string().regex(/^[1-9][0-9]{0,19}$/u);
+export const GITHUB_NODE_ID_MIN_LENGTH = 1;
+export const GITHUB_NODE_ID_MAX_LENGTH = 256;
+export const GITHUB_NODE_ID_CHARACTERS = "[A-Za-z0-9_=-]";
+export const GITHUB_NODE_ID_PATTERN = new RegExp(
+  `^${GITHUB_NODE_ID_CHARACTERS}{${GITHUB_NODE_ID_MIN_LENGTH},${GITHUB_NODE_ID_MAX_LENGTH}}$`,
+  "u"
+);
 const githubNodeIdSchema = z
   .string()
-  .min(1)
-  .max(256)
-  .regex(/^[A-Za-z0-9_=-]+$/u);
+  .min(GITHUB_NODE_ID_MIN_LENGTH)
+  .max(GITHUB_NODE_ID_MAX_LENGTH)
+  .regex(GITHUB_NODE_ID_PATTERN);
 const githubTextSchema = (maxBytes: number, maxLength = maxBytes) =>
   z
     .string()
@@ -1083,7 +1090,7 @@ export const githubOperationReceiptSchema = z
     kind: githubOperationKindSchema,
     providerRequestId: z.string().trim().max(256).nullable(),
     requestHash: z.string().regex(/^[a-f0-9]{64}$/u),
-    resultNodeId: z.string().trim().max(256).nullable(),
+    resultNodeId: z.string().trim().max(GITHUB_NODE_ID_MAX_LENGTH).nullable(),
     resultUrl: z.url().max(2048).nullable(),
     status: githubOperationStatusSchema,
     stepId: teamStepIdSchema,

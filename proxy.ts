@@ -124,10 +124,13 @@ export async function proxy(request: NextRequest) {
   // `invited` is load-bearing here. Without it a signed-in stranger is refused
   // at `/`, redirected to `/login`, bounced back to `/` for being signed in,
   // and loops forever.
+  // The recovery marker only bypasses this optimistic redirect. It grants no
+  // authority and does not decide cookie deletion; Auth.js checks revocation.
   if (
     token &&
     !isGuest &&
     invited &&
+    request.nextUrl.searchParams.get("reason") !== "session-expired" &&
     ["/login", "/register"].includes(pathname)
   ) {
     return NextResponse.redirect(new URL(`${base}/`, request.url));

@@ -3027,6 +3027,61 @@ test("a top-up whose payer is not the account's Customer is recorded, not claime
   ]);
 });
 
+test("a reopened owner mismatch reports its persisted reason rather than a deduped success", async () => {
+  const event = minutePackEvent({ id: "evt_pack_reopened" });
+  const reopened: StripeReconciliationRecord = {
+    eventId: event.id,
+    eventType: "checkout.session.completed",
+    reason: "minute_pack_owner_mismatch",
+    status: "pending",
+  };
+  const alerts: StripeReconciliationRecord[] = [];
+  const response = await webhookResponse(
+    request({ signature: "valid" }),
+    dependenciesFor(event, {
+      creditMinutePack: () => Promise.resolve("owner_mismatch"),
+      recordManualReconciliation: (record) => {
+        assert.deepEqual(record, reopened);
+        return Promise.resolve({
+          kind: "manual_reconciliation",
+          record: reopened,
+        });
+      },
+      reportManualReconciliation: (record) => {
+        alerts.push(record);
+      },
+    }),
+    null
+  );
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    reason: reopened.reason,
+    reconciliation: true,
+  });
+  assert.deepEqual(alerts, [reopened]);
+});
+
+test("an owner-mismatch evidence update failure remains retryable without a success response", async () => {
+  const alerts: StripeReconciliationRecord[] = [];
+  const response = await webhookResponse(
+    request({ signature: "valid" }),
+    dependenciesFor(minutePackEvent({ id: "evt_pack_reopen_failure" }), {
+      creditMinutePack: () => Promise.resolve("owner_mismatch"),
+      recordManualReconciliation: () =>
+        Promise.reject(new Error("reconciliation update failed")),
+      reportManualReconciliation: (record) => {
+        alerts.push(record);
+      },
+    }),
+    null
+  );
+
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { error: "webhook_retry" });
+  assert.deepEqual(alerts, []);
+});
+
 function dependenciesFor(
   event: Stripe.Event,
   overrides: Partial<WebhookDependencies> = {}

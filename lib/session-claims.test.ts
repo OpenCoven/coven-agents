@@ -6,11 +6,57 @@ import {
   claimsFromStoredUser,
   refreshClaimsForSessionUpdate,
   refreshTokenType,
+  validateSessionToken,
 } from "./session-claims";
 
 const NOW = new Date("2026-08-24T12:00:00.000Z");
 const LATER = new Date("2026-09-24T12:00:00.000Z");
 const USER_ID = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
+
+test("session reads reject revoked tokens even after a subscription grant", async () => {
+  assert.equal(
+    await validateSessionToken(
+      sessionToken(),
+      () =>
+        Promise.resolve({
+          authVersion: 5,
+          image: null,
+          subscribedUntil: LATER,
+        }),
+      NOW
+    ),
+    null
+  );
+});
+
+test("ordinary session reads do not promote claims from a newer stored plan", async () => {
+  const token = sessionToken();
+  assert.deepEqual(
+    await validateSessionToken(
+      token,
+      () =>
+        Promise.resolve({
+          authVersion: 4,
+          image: null,
+          subscribedUntil: LATER,
+        }),
+      NOW
+    ),
+    token
+  );
+});
+
+test("session read outages retain the cookie's claims without authorizing storage", async () => {
+  const token = sessionToken();
+  assert.strictEqual(
+    await validateSessionToken(
+      token,
+      () => Promise.reject(new ChatbotError("bad_request:database")),
+      NOW
+    ),
+    token
+  );
+});
 
 test("a subscriber whose subscription has lapsed loses the type", () => {
   // The shipped defect: `type` was written once at sign-in and never

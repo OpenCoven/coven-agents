@@ -32,6 +32,20 @@ the absent checks as a regression or re-add required status checks while it is
 off. It also means the list above is the *only* gate: nothing remote will
 catch a break, so run all five before every merge, not just before a PR.
 
+Migration PRs must also run `pnpm db:verify`: it applies the entire migration
+chain and requires the GitHub lifecycle, minute-pack, and Stripe reconciliation
+PostgreSQL assertions without Playwright.
+It owns a disposable PostgreSQL 16 Docker container by default. Alternatively,
+set `E2E_POSTGRES_URL` to a disposable PostgreSQL server and explicitly confirm
+`E2E_POSTGRES_DISPOSABLE=1`; the role must be able to create databases. The gate
+creates and drops only its unique child database, never the supplied database.
+Never point these commands at production. Release migration invocations must
+use `pnpm db:migrate --strict`; ordinary builds warn and skip without a URL.
+`pnpm check` includes the DB-free `pnpm db:check` drift gate: Drizzle generates
+against copied migration metadata in temporary output and refuses any new
+migration (including column, index, or foreign-key drift). It never leaves
+generated files in the working tree or reads local database credentials.
+
 ## Commits must be signed
 
 Every commit must land Verified on GitHub. Pass `-S` to every `git commit`,

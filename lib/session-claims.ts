@@ -125,3 +125,25 @@ export async function refreshClaimsForSessionUpdate(
 
   return claimsFromStoredUser(token, user, now);
 }
+
+/**
+ * Auth.js GET session reads must enforce revocation too. Unlike an explicit
+ * update, a read must not import a newer plan into the cookie. Page/API
+ * authority still comes from storage. An outage retains the exact old token.
+ */
+export async function validateSessionToken(
+  token: JWT,
+  findUser: (userId: string) => Promise<StoredUserClaims | null>,
+  now: Date
+): Promise<JWT | null> {
+  const checked = await refreshClaimsForSessionUpdate(
+    token,
+    undefined,
+    findUser,
+    now
+  );
+  if (checked === null || checked === token) {
+    return checked;
+  }
+  return refreshTokenType(token, now);
+}

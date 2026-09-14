@@ -1,10 +1,14 @@
 import { randomUUID } from "node:crypto";
+import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
 import NextAuth, { type DefaultSession, type Session } from "next-auth";
 import type { DefaultJWT } from "next-auth/jwt";
 import GitHub from "next-auth/providers/github";
+import { cache } from "react";
 import { enrollInCampaignIfEligible } from "@/lib/auth/campaign-enrollment";
 import { fetchGithubAccountCreatedAt } from "@/lib/auth/github-account-age";
 import { fetchGithubEmail } from "@/lib/auth/github-email-fetch";
+import { sessionExpiredLoginRoute } from "@/lib/auth/session-recovery";
 import {
   authVersionMatches,
   validAuthVersion,
@@ -20,6 +24,7 @@ import { isCanonicalUuid } from "@/lib/session";
 import {
   refreshClaimsForSessionUpdate,
   refreshTokenType,
+  validateSessionToken,
 } from "@/lib/session-claims";
 import { isSubscribedAt, userTypeFor } from "@/lib/subscription";
 import {
@@ -167,7 +172,9 @@ export const {
         token.campaignGrantedAt = user.campaignGrantedAt?.toISOString() ?? null;
       }
 
-      // Recomputed on every callback, so expiry is exact and costs no read.
+      if (!user && process.env.POSTGRES_URL) {
+        return validateSessionToken(token, findUserById, new Date());
+      }
       return refreshTokenType(token, new Date());
     },
     session({ session, token }) {
@@ -225,13 +232,8 @@ type ResolvedAuth =
       session: Session;
     };
 
-async function resolveAuth(now?: Date): Promise<ResolvedAuth | null> {
-  let session: Session | null;
-  try {
-    session = await nextAuth();
-  } catch {
-    return null;
-  }
+const resolveAuth = cache(async (now?: Date): Promise<ResolvedAuth | null> => {
+  const session = await nextAuth();
 
   if (!session) {
     return null;
@@ -257,7 +259,7 @@ async function resolveAuth(now?: Date): Promise<ResolvedAuth | null> {
     if (error instanceof ChatbotError && error.surface === "database") {
       return { kind: "storage-unavailable", session };
     }
-    return null;
+    throw error;
   }
   if (!owner || !authVersionMatches(owner.authVersion, tokenAuthVersion)) {
     return null;
@@ -268,19 +270,48 @@ async function resolveAuth(now?: Date): Promise<ResolvedAuth | null> {
   session.user.type = userTypeFor(owner, resolvedNow);
   session.user.image = owner.image ?? null;
   return { kind: "authorized", session, user: owner };
-}
+});
 
 export async function auth() {
   const resolved = await resolveAuth();
   return resolved?.kind === "authorized" ? resolved.session : null;
 }
 
+async function redirectRevokedPage(returnPath: string): Promise<void> {
+  const cookieStore = await cookies();
+  const hasSessionCookie = cookieStore
+    .getAll()
+    .some(({ name }) =>
+      /^(?:__Secure-)?authjs\.session-token(?:\.\d+)?$/.test(name)
+    );
+  if (hasSessionCookie) {
+    redirect(
+      sessionExpiredLoginRoute(
+        returnPath,
+        process.env.NEXT_PUBLIC_BASE_PATH ?? ""
+      )
+    );
+  }
+}
+
+export async function pageAuth(returnPath: string) {
+  const resolved = await resolveAuth();
+  if (!resolved) {
+    await redirectRevokedPage(returnPath);
+  }
+  return resolved?.session ?? null;
+}
+
 export async function subscriptionPageAuthority(
-  now: Date
+  now: Date,
+  returnPath?: string
 ): Promise<SubscriptionAuthority> {
   const resolved = await resolveAuth(now);
   const resolutionId = randomUUID();
   if (!resolved) {
+    if (returnPath) {
+      await redirectRevokedPage(returnPath);
+    }
     return serializeSubscriptionAuthority({
       authVersion: null,
       checkedAt: now,

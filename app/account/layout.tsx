@@ -1,5 +1,6 @@
 import { SessionProvider } from "next-auth/react";
 import { Toaster } from "sonner";
+import { SessionRecovery } from "@/components/auth/session-recovery";
 
 /**
  * Account settings sit outside the `(chat)` group deliberately.
@@ -21,6 +22,7 @@ export default function AccountLayout({
     <SessionProvider
       basePath={`${process.env.NEXT_PUBLIC_BASE_PATH ?? ""}/api/auth`}
     >
+      <SessionRecovery />
       <Toaster
         position="top-center"
         theme="system"

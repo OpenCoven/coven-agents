@@ -64,8 +64,8 @@ export type MinutePackCreditInput = {
 
 /**
  * `owner_mismatch` means the session named a user whose stored Customer is
- * not the paying one. The event is claimed so it is not retried; the money
- * and the mismatch are visible in Stripe and worth a human look.
+ * not the paying one. The webhook records reconciliation evidence, but the
+ * purchase remains creditable after repair because credits dedupe by session.
  */
 export type MinutePackCreditResult = "applied" | "duplicate" | "owner_mismatch";
 

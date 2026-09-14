@@ -3,14 +3,19 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import postgres from "postgres";
 
-config({
-  path: ".env.local",
-});
+if (process.env.COVEN_HERMETIC_RUNNER !== "1") {
+  config({ path: ".env.local" });
+}
 
 const runMigrate = async () => {
-  if (!process.env.POSTGRES_URL) {
-    console.log("POSTGRES_URL not defined, skipping migrations");
-    process.exit(0);
+  if (!process.env.POSTGRES_URL?.trim()) {
+    if (process.argv.includes("--strict")) {
+      throw new Error("POSTGRES_URL is required for strict migrations.");
+    }
+    console.warn(
+      "POSTGRES_URL not defined, skipping migrations; use --strict to require a database."
+    );
+    return;
   }
 
   const connection = postgres(process.env.POSTGRES_URL, { max: 1 });
@@ -19,15 +24,16 @@ const runMigrate = async () => {
   console.log("Running migrations...");
 
   const start = Date.now();
-  await migrate(db, { migrationsFolder: "./lib/db/migrations" });
-  const end = Date.now();
-
-  console.log("Migrations completed in", end - start, "ms");
-  process.exit(0);
+  try {
+    await migrate(db, { migrationsFolder: "./lib/db/migrations" });
+    console.log("Migrations completed in", Date.now() - start, "ms");
+  } finally {
+    await connection.end();
+  }
 };
 
 runMigrate().catch((err) => {
   console.error("Migration failed");
   console.error(err);
-  process.exit(1);
+  process.exitCode = 1;
 });

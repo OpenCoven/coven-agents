@@ -4,6 +4,7 @@ import Script from "next/script";
 import { SessionProvider } from "next-auth/react";
 import { Suspense } from "react";
 import { Toaster } from "sonner";
+import { SessionRecovery } from "@/components/auth/session-recovery";
 import { BrandMark } from "@/components/brand/brand-mark";
 import { AppSidebar } from "@/components/chat/app-sidebar";
 import { DataStreamProvider } from "@/components/chat/data-stream-provider";
@@ -11,28 +12,39 @@ import { ChatMotionProvider } from "@/components/chat/motion-provider";
 import { ChatShell } from "@/components/chat/shell";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { ActiveChatProvider } from "@/hooks/use-active-chat";
-import { auth } from "../(auth)/auth";
+import { browserApplicationPath } from "@/lib/application-path";
+import { pageAuth } from "../(auth)/auth";
 
-export default function Layout({ children }: { children: React.ReactNode }) {
+type ChatLayoutProps = {
+  children: React.ReactNode;
+  params: Promise<{ id?: string }>;
+};
+
+export default function Layout({ children, params }: ChatLayoutProps) {
   return (
     <SessionProvider
       basePath={`${process.env.NEXT_PUBLIC_BASE_PATH ?? ""}/api/auth`}
     >
+      <SessionRecovery />
       <Script
         src="https://cdn.jsdelivr.net/pyodide/v0.23.4/full/pyodide.js"
         strategy="lazyOnload"
       />
       <DataStreamProvider>
         <Suspense fallback={<div className="flex h-dvh bg-sidebar" />}>
-          <SidebarShell>{children}</SidebarShell>
+          <SidebarShell params={params}>{children}</SidebarShell>
         </Suspense>
       </DataStreamProvider>
     </SessionProvider>
   );
 }
 
-async function SidebarShell({ children }: { children: React.ReactNode }) {
-  const [session, cookieStore] = await Promise.all([auth(), cookies()]);
+async function SidebarShell({ children, params }: ChatLayoutProps) {
+  const { id } = await params;
+  const [session, cookieStore] = await Promise.all([
+    pageAuth(browserApplicationPath(id ? `/chat/${id}` : "/agents")),
+    cookies(),
+  ]);
   const isCollapsed = cookieStore.get("sidebar_state")?.value !== "true";
 
   if (session?.user?.type !== "subscriber") {

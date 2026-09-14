@@ -5094,6 +5094,9 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           runtime: column<RunnerAgentRecord["runtime"]>(agent, "runtime"),
           workspace: column<string | null>(agent, "workspace"),
         };
+        // An absent policy must be SQL NULL: `'null'::jsonb IS NOT NULL`, and
+        // the RunnerRun insert trigger refuses any ordinary run that carries
+        // a non-NULL "githubBrokerPolicy".
         const [inserted] = await transaction.execute(
           statement(
             "insert-run",
@@ -5124,7 +5127,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
               ${agentSnapshot.runtime}, ${agentSnapshot.workspace},
               ${input.authVersion}, ${input.operationId}, ${input.requestHash},
               ${input.task}, ${executionPermission}, ${teamStepId},
-              CAST(${JSON.stringify(githubBrokerPolicy)} AS jsonb)
+              CAST(${githubBrokerPolicy === null ? null : JSON.stringify(githubBrokerPolicy)} AS jsonb)
             ) ON CONFLICT ("agentId", "operationId") DO NOTHING RETURNING *`
           )
         );

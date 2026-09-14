@@ -1,3 +1,4 @@
+-- Historical in-place regex rewrite: 0035 had never been applied; Drizzle does not compare stored hashes, so subsequent changes must use forward migrations.
 ALTER TABLE "RunnerGitHubConnection" DROP CONSTRAINT "RGHConn_authority_valid";--> statement-breakpoint
 ALTER TABLE "RunnerGitHubOperation" DROP CONSTRAINT "RGHOp_connectionSnapshot_valid";--> statement-breakpoint
 ALTER TABLE "RunnerGitHubConnection" ADD COLUMN "userProjectAuthorityAuthVersion" integer;--> statement-breakpoint

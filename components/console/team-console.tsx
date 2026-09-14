@@ -38,6 +38,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { FamiliarPortrait } from "@/components/console/familiar-portrait";
 import { TEMPLATES } from "@/lib/agents/formations";
+import { sessionFetch as fetch } from "@/lib/auth/session-recovery";
 import { executionProfileForAgent } from "@/lib/console/agent-profile";
 import {
   isGitHubProjectCapabilityCurrent,
