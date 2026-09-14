@@ -5,6 +5,7 @@ import "server-only";
  * so they are safe for application telemetry and logs.
  */
 export type RunnerResourceOperation =
+  | "adopt"
   | "create"
   | "delete"
   | "inventory"
