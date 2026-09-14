@@ -1,5 +1,6 @@
 import "server-only";
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import {
   AGENT_RUNNER_API_VERSION,
@@ -527,7 +528,8 @@ function liveTail(
   const now = dependencies.now ?? Date.now;
   let last = now();
   let inFlight = false;
-  return (terminal) => {
+  // Backpressure can move later pulls outside Next's request-local context.
+  return AsyncLocalStorage.bind((terminal: boolean) => {
     if (terminal || inFlight || now() - last < interval) {
       return;
     }
@@ -536,7 +538,7 @@ function liveTail(
     startRetainedReconciliation(dependencies, service).finally(() => {
       inFlight = false;
     });
-  };
+  });
 }
 
 function startLiveRunReconciliation(

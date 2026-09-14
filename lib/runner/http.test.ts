@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { AsyncLocalStorage } from "node:async_hooks";
 import test from "node:test";
 import {
   AGENT_RUNNER_API_VERSION,
@@ -1468,6 +1469,66 @@ for (const end of ["idle", "abort", "cancel"] as const) {
     assert.equal(leaseHeld, false);
   });
 }
+
+test("backpressured SSE retains later work in its original request context", async () => {
+  const context = new AsyncLocalStorage<string>();
+  const retained: Promise<unknown>[] = [];
+  const first: RunEvent = {
+    at: "2026-08-28T15:00:00.000Z",
+    id: 1,
+    operationId: OPERATION_ID,
+    runId: RUN_ID,
+    type: "accepted",
+  };
+  let clock = 0;
+  let reconciled = 0;
+  const fixture = handlers({
+    after: (task) => {
+      assert.equal(context.getStore(), "original-request");
+      assert.ok(task instanceof Promise);
+      retained.push(task);
+    },
+    createEventStream: (options) =>
+      createRunEventStream({
+        ...options,
+        now: () => clock,
+        sleep: (milliseconds) => {
+          clock += milliseconds;
+          return Promise.resolve();
+        },
+      }),
+    liveTailMs: 5000,
+    now: () => clock,
+    service: service({
+      readRunEvents: async (_principal, _runId, cursor) => ({
+        events: cursor === 0 ? [first] : [],
+        kind: "found",
+        terminal: reconciled >= 2,
+      }),
+      reconcileAndDispatch: () => {
+        assert.equal(context.getStore(), "original-request");
+        reconciled += 1;
+        return Promise.resolve(counts());
+      },
+    }),
+  });
+  const response = await context.run("original-request", () =>
+    fixture.handlers.getRunEvents(
+      new Request(`https://app.test/api/runs/${RUN_ID}/events`),
+      RUN_ID
+    )
+  );
+  // Let the first event fill the stream's queue before a different context
+  // drains it and triggers the next pull, as an HTTP response writer does.
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(context.getStore(), undefined);
+  clock = 5000;
+  assert.match(await response.text(), /id: 1/u);
+  assert.equal(reconciled, 2);
+  assert.equal(retained.length, 2);
+  assert.equal(fixture.logs.length, 0);
+  await Promise.all(retained);
+});
 
 test("a rejected live-tail registration does not start unretained work or break polling", async () => {
   let clock = 0;
