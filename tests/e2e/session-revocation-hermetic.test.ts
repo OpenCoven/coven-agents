@@ -297,12 +297,18 @@ test.describe("hermetic session recovery", () => {
       .addCookies(await sessionCookies("subscriber", account));
     await page.goto("/account");
     await credentialField(page).fill("hermetic-never-saved-token");
-    const sql = database();
-    try {
-      await sql`UPDATE "User" SET "subscribedUntil" = now() - interval '1 day' WHERE id = ${account.id}`;
-    } finally {
-      await sql.end();
-    }
+    await page.route("**/api/credentials", async (route) => {
+      if (route.request().method() === "POST") {
+        // Expire after the mounted form submits, before the real API admits it.
+        const sql = database();
+        try {
+          await sql`UPDATE "User" SET "subscribedUntil" = now() - interval '1 day' WHERE id = ${account.id}`;
+        } finally {
+          await sql.end();
+        }
+      }
+      await route.fallback();
+    });
     const refusal = page.waitForResponse(
       (response) =>
         response.url().endsWith("/api/credentials") &&
