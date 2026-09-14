@@ -474,6 +474,37 @@ export function liveTailMsFromEnvironment(
   return parsed;
 }
 
+function startRetainedReconciliation(
+  dependencies: RunnerHttpDependencies,
+  service: RunnerService
+): Promise<void> {
+  const logger = dependencies.logger ?? console;
+  let canStart = false;
+  // Register the hot promise before taking leases, not a callback that waits
+  // for the stream to close. Failed registration must not orphan active work.
+  const task = Promise.resolve()
+    .then(async () => {
+      if (canStart) {
+        await service.reconcileAndDispatch();
+      }
+    })
+    .catch((error: unknown) => {
+      logger.error("Runner live reconciliation failed.", {
+        name:
+          error instanceof RunnerServiceError ? "runner_service" : "unknown",
+      });
+    });
+  try {
+    dependencies.after?.(task);
+    canStart = true;
+  } catch {
+    logger.error("Runner live reconciliation could not be retained.", {
+      name: "unknown",
+    });
+  }
+  return task;
+}
+
 /**
  * Turns an open event stream into a heartbeat for its run.
  *
@@ -482,7 +513,8 @@ export function liveTailMsFromEnvironment(
  * fires. Each nudge is a full leased `reconcileAndDispatch`; the lease makes
  * concurrent watchers and cron collapse into one pass, and the attempt lease
  * (`RUNNER_ATTEMPT_LEASE_MS`) decides whether a pass re-reads the sandbox.
- * The nudge is fire-and-forget: a failure here never disturbs the stream.
+ * Each nudge starts eagerly and is retained independently of stream closure.
+ * A failure here never disturbs the stream.
  */
 function liveTail(
   dependencies: RunnerHttpDependencies,
@@ -501,14 +533,9 @@ function liveTail(
     }
     last = now();
     inFlight = true;
-    service
-      .reconcileAndDispatch()
-      .catch(() => {
-        // The durable queue and authenticated cron are the correctness path.
-      })
-      .finally(() => {
-        inFlight = false;
-      });
+    startRetainedReconciliation(dependencies, service).finally(() => {
+      inFlight = false;
+    });
   };
 }
 
@@ -520,14 +547,7 @@ function startLiveRunReconciliation(
   if (!dependencies.after || !live) {
     return;
   }
-  try {
-    const task = service.reconcileAndDispatch().catch(() => {
-      // The durable queue and authenticated cron are the correctness path.
-    });
-    dependencies.after(task);
-  } catch {
-    // `after` is a latency optimization and must never change a response.
-  }
+  startRetainedReconciliation(dependencies, service);
 }
 
 async function warmAndReconcile(

@@ -29,7 +29,7 @@ import {
   type RunnerHttpHandlers,
 } from "./http";
 import { type RunnerService, RunnerServiceError } from "./service";
-import type { createRunEventStream } from "./sse";
+import { createRunEventStream, DEFAULT_SSE_IDLE_TIMEOUT_MS } from "./sse";
 import type { RunnerClaimedDispatch, RunnerDispatchAuthority } from "./types";
 
 const USER_ID = "9c858901-8a57-4791-81fe-4c455b099bc9";
@@ -1381,6 +1381,146 @@ test("an open live stream nudges reconciliation at the tail cadence, never overl
   await read(0);
   assert.equal(reconciled, 2);
   release?.();
+});
+
+for (const end of ["idle", "abort", "cancel"] as const) {
+  test(`a live-tail pass remains retained after SSE ${end}`, {
+    timeout: 2000,
+  }, async (context) => {
+    const pending = Promise.withResolvers<ReturnType<typeof counts>>();
+    const started = Promise.withResolvers<void>();
+    const sleeping = Promise.withResolvers<void>();
+    const abort = new AbortController();
+    let clock = 0;
+    let reconciled = 0;
+    let leaseHeld = false;
+    context.after(() => {
+      pending.resolve(counts());
+      sleeping.resolve();
+      abort.abort();
+    });
+    const fixture = handlers({
+      createEventStream: (options) =>
+        createRunEventStream({
+          ...options,
+          now: () => clock,
+          sleep: (milliseconds) => {
+            clock += milliseconds;
+            return end !== "idle" && reconciled > 1
+              ? sleeping.promise
+              : Promise.resolve();
+          },
+        }),
+      liveTailMs: 5000,
+      now: () => clock,
+      service: service({
+        readRunEvents: async () => ({
+          events: [],
+          kind: "found",
+          terminal: false,
+        }),
+        reconcileAndDispatch: () => {
+          reconciled += 1;
+          if (reconciled === 1) {
+            return Promise.resolve(counts());
+          }
+          leaseHeld = true;
+          started.resolve();
+          return pending.promise.finally(() => {
+            leaseHeld = false;
+          });
+        },
+      }),
+    });
+    const response = await fixture.handlers.getRunEvents(
+      new Request(`https://app.test/api/runs/${RUN_ID}/events`, {
+        signal: abort.signal,
+      }),
+      RUN_ID
+    );
+    assert.equal(response.status, 200);
+    assert.ok(response.body);
+    const reader = response.body.getReader();
+    const next = reader.read();
+    await started.promise;
+    if (end === "abort") {
+      abort.abort();
+    } else if (end === "cancel") {
+      await reader.cancel();
+    }
+    assert.equal((await next).done, true);
+    if (end === "idle") {
+      assert.equal(clock, DEFAULT_SSE_IDLE_TIMEOUT_MS);
+    }
+    assert.equal(reconciled, 2);
+    assert.equal(leaseHeld, true);
+    assert.equal(fixture.after.length, 2);
+    let drained = false;
+    const retained = Promise.all(
+      fixture.after.map((callback) => callback())
+    ).then(() => {
+      drained = true;
+    });
+    await Promise.resolve();
+    assert.equal(drained, false);
+    pending.resolve(counts());
+    await retained;
+    assert.equal(leaseHeld, false);
+  });
+}
+
+test("a rejected live-tail registration does not start unretained work or break polling", async () => {
+  let clock = 0;
+  let reconciled = 0;
+  let registrations = 0;
+  let poll: Parameters<typeof createRunEventStream>[0]["read"] | undefined;
+  const fixture = handlers({
+    after: () => {
+      registrations += 1;
+      if (registrations > 1) {
+        throw new Error("do-not-log-provider-detail");
+      }
+    },
+    createEventStream: (options) => {
+      poll = options.read;
+      return new ReadableStream<Uint8Array>();
+    },
+    liveTailMs: 5000,
+    now: () => clock,
+    service: service({
+      readRunEvents: async () => ({
+        events: [],
+        kind: "found",
+        terminal: false,
+      }),
+      reconcileAndDispatch: () => {
+        reconciled += 1;
+        return Promise.resolve(counts());
+      },
+    }),
+  });
+  const response = await fixture.handlers.getRunEvents(
+    new Request(`https://app.test/api/runs/${RUN_ID}/events`),
+    RUN_ID
+  );
+  assert.equal(response.status, 200);
+  assert.ok(poll);
+  clock = 5000;
+  assert.deepEqual(await poll(0), { events: [], terminal: false });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(registrations, 2);
+  assert.equal(reconciled, 1);
+  assert.equal(fixture.logs.length, 1);
+  assert.equal(
+    JSON.stringify(fixture.logs).includes("do-not-log-provider-detail"),
+    false
+  );
+  clock = 10_000;
+  await poll(0);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(registrations, 3);
+  assert.equal(reconciled, 1);
+  await response.body?.cancel();
 });
 
 test("a stream with the live tail disabled never nudges reconciliation", async () => {
