@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import {
   DaytonaBadRequestError,
+  DaytonaForbiddenError,
   DaytonaNotFoundError,
   DaytonaTimeoutError,
   type Sandbox,
   SandboxState,
 } from "@daytona/sdk";
+import type { RunnerResourceOperationObservation } from "../resource-observability";
 import type { RunnerStore } from "../store";
 import type { RunnerAgentRecord, RunnerPrincipal } from "../types";
 import {
@@ -16,6 +19,7 @@ import {
 } from "./names";
 import { probeDaytonaHarnesses } from "./process";
 import {
+  adoptDaytonaSandboxPolicy,
   assertDaytonaCredentialBoundary,
   assertReplacementSnapshotReady,
   classifyDaytonaProviderError,
@@ -26,6 +30,7 @@ import {
   DaytonaSandboxLifecycleError,
   type DaytonaSandboxService,
   daytonaSandboxConfiguration,
+  daytonaSandboxConfigurationIdentity,
   deleteDaytonaSandbox,
   ensureDaytonaSandbox,
   ensureDaytonaSandboxForDispatch,
@@ -120,6 +125,11 @@ function sandbox(
     delete?: (timeout?: number, wait?: boolean) => Promise<void>;
     refreshData?: () => Promise<void>;
     recover?: () => Promise<void>;
+    setAutoArchiveInterval?: (interval: number) => Promise<void>;
+    setAutostopInterval?: (interval: number) => Promise<void>;
+    setLabels?: (
+      labels: Record<string, string>
+    ) => Promise<Record<string, string>>;
     start?: () => Promise<void>;
     waitForResizeComplete?: (timeout?: number) => Promise<void>;
     waitUntilStarted?: (timeout?: number) => Promise<void>;
@@ -132,6 +142,12 @@ function sandbox(
     labels: {},
     recover: () => hooks.recover?.() ?? Promise.resolve(),
     refreshData: () => hooks.refreshData?.() ?? Promise.resolve(),
+    setAutoArchiveInterval: (interval: number) =>
+      hooks.setAutoArchiveInterval?.(interval) ?? Promise.resolve(),
+    setAutostopInterval: (interval: number) =>
+      hooks.setAutostopInterval?.(interval) ?? Promise.resolve(),
+    setLabels: (labels: Record<string, string>) =>
+      hooks.setLabels?.(labels) ?? Promise.resolve(labels),
     start: () => hooks.start?.() ?? Promise.resolve(),
     state,
     waitForResizeComplete: (timeout?: number) =>
@@ -2227,6 +2243,256 @@ test("sandbox configuration identity includes required GitHub gateway egress", (
   assert.equal(unrestricted.gatewayHostname, undefined);
 });
 
+test("sandbox identity covers only what forces a new sandbox; the resource policy is adoptable", () => {
+  const environment = {
+    DAYTONA_API_KEY: "test-key",
+    DAYTONA_DOMAIN_ALLOW_LIST: "github.com,api.github.com",
+    DAYTONA_SNAPSHOT: "coven-agents-copilot-2",
+    NODE_ENV: "production",
+  } as NodeJS.ProcessEnv;
+  const current = daytonaSandboxConfiguration(environment);
+
+  // Editing any resource or idle value leaves the identity alone (#224).
+  for (const [name, value] of [
+    ["DAYTONA_AUTO_ARCHIVE_MINUTES", "120"],
+    ["DAYTONA_AUTO_STOP_MINUTES", "30"],
+    ["DAYTONA_SANDBOX_CPU_CORES", "4"],
+    ["DAYTONA_SANDBOX_MEMORY_GIB", "8"],
+  ] as const) {
+    const edited = daytonaSandboxConfiguration({
+      ...environment,
+      [name]: value,
+    });
+    assert.equal(edited.configurationId, current.configurationId, name);
+    assert.notDeepEqual(
+      edited.priorConfigurationIds,
+      current.priorConfigurationIds,
+      name
+    );
+  }
+
+  // The image, region and egress policy still do.
+  for (const [name, value] of [
+    ["DAYTONA_DOMAIN_ALLOW_LIST", "github.com"],
+    ["DAYTONA_SNAPSHOT", "coven-agents-copilot-3"],
+    ["DAYTONA_TARGET", "eu"],
+  ] as const) {
+    const edited = daytonaSandboxConfiguration({
+      ...environment,
+      [name]: value,
+    });
+    assert.notEqual(edited.configurationId, current.configurationId, name);
+  }
+
+  // The fleet was stamped with a hash over the whole policy before the split.
+  // That exact digest must stay recognised or every workspace refuses on the
+  // first attach after deploy.
+  // Key order is part of the digest: the policy came first, then the identity
+  // fields. The spread keeps the formatter from re-sorting it.
+  const legacyPolicy = {
+    autoArchiveInterval: 10_080,
+    autoDeleteInterval: -1,
+    autoStopInterval: 15,
+    resources: { cpu: 2, disk: 10, memory: 4 },
+    ttlMinutes: 0,
+  };
+  const legacy = createHash("sha256")
+    .update(
+      JSON.stringify({
+        ...legacyPolicy,
+        domainAllowList: "api.github.com,github.com",
+        gatewayHostname: null,
+        snapshotName: "coven-agents-copilot-2",
+        target: "us",
+      }),
+      "utf8"
+    )
+    .digest("hex");
+  assert.deepEqual(current.priorConfigurationIds, [legacy]);
+  assert.notEqual(current.configurationId, legacy);
+});
+
+test("a stamped identity is current, a recognised prior one, or a mismatch", () => {
+  const configuration = {
+    configurationId: "split",
+    priorConfigurationIds: ["whole-policy"],
+  };
+  assert.equal(
+    daytonaSandboxConfigurationIdentity(
+      { labels: { configurationId: "split" } },
+      configuration
+    ),
+    "current"
+  );
+  assert.equal(
+    daytonaSandboxConfigurationIdentity(
+      { labels: { configurationId: "whole-policy" } },
+      configuration
+    ),
+    "prior"
+  );
+  assert.equal(
+    daytonaSandboxConfigurationIdentity(
+      { labels: { configurationId: "something-else" } },
+      configuration
+    ),
+    "mismatch"
+  );
+  assert.equal(
+    daytonaSandboxConfigurationIdentity({ labels: {} }, configuration),
+    "mismatch"
+  );
+  // A sandbox stamped with a prior id matches nothing once the deployment
+  // stops listing it; unconfigured identity never matches.
+  assert.equal(
+    daytonaSandboxConfigurationIdentity(
+      { labels: { configurationId: "whole-policy" } },
+      { configurationId: "split" }
+    ),
+    "mismatch"
+  );
+  assert.equal(
+    daytonaSandboxConfigurationIdentity(
+      { labels: { configurationId: "split" } },
+      { configurationId: undefined }
+    ),
+    "mismatch"
+  );
+});
+
+test("a sandbox stamped before the identity split is adopted, relabelled and retuned, never reset", async () => {
+  const calls: string[] = [];
+  const observations: RunnerResourceOperationObservation[] = [];
+  const configuration = {
+    ...config,
+    autoArchiveInterval: 4320,
+    autoStopInterval: 30,
+    configurationId: "split",
+    priorConfigurationIds: ["whole-policy"],
+  };
+  const existing = Object.assign(
+    sandbox(SandboxState.STOPPED, {
+      delete: () => {
+        calls.push("delete");
+        return Promise.resolve();
+      },
+      setAutoArchiveInterval: (interval) => {
+        calls.push(`archive:${interval}`);
+        return Promise.resolve();
+      },
+      setAutostopInterval: (interval) => {
+        calls.push(`stop:${interval}`);
+        return Promise.resolve();
+      },
+      setLabels: (labels) => {
+        calls.push(`labels:${labels.configurationId}:${labels.keep}`);
+        return Promise.resolve(labels);
+      },
+      start: () => {
+        calls.push("start");
+        return Promise.resolve();
+      },
+    }),
+    {
+      autoArchiveInterval: 10_080,
+      autoStopInterval: 15,
+      labels: { configurationId: "whole-policy", keep: "me" },
+    }
+  );
+
+  const result = await ensureDaytonaSandbox(
+    principal,
+    agent({ daytonaSandboxId: "stored", sandboxLifecycle: "ready" }),
+    configuration,
+    {
+      daytona: {
+        create: () => Promise.reject(new Error("must not create")),
+        get: () => Promise.resolve(existing),
+        snapshot: {
+          get: () => Promise.reject(new Error("must not need a snapshot")),
+        },
+      },
+      observe: (observation) => observations.push(observation),
+      store: store({}),
+    }
+  );
+
+  assert.equal(result.sandbox, existing);
+  assert.deepEqual(calls, [
+    "start",
+    "labels:split:me",
+    "stop:30",
+    "archive:4320",
+  ]);
+  assert.deepEqual(observations, [{ operation: "adopt", outcome: "repaired" }]);
+});
+
+test("a current sandbox already on policy is left untouched", async () => {
+  const observations: RunnerResourceOperationObservation[] = [];
+  const configuration = { ...config, configurationId: "split" };
+  const existing = Object.assign(
+    sandbox(SandboxState.STARTED, {
+      setAutoArchiveInterval: () => Promise.reject(new Error("must not tune")),
+      setAutostopInterval: () => Promise.reject(new Error("must not tune")),
+      setLabels: () => Promise.reject(new Error("must not relabel")),
+    }),
+    {
+      autoArchiveInterval: config.autoArchiveInterval,
+      autoStopInterval: config.autoStopInterval,
+      labels: { configurationId: "split" },
+    }
+  );
+  const result = await ensureDaytonaSandbox(
+    principal,
+    agent({ daytonaSandboxId: "stored", sandboxLifecycle: "ready" }),
+    configuration,
+    {
+      daytona: {
+        create: () => Promise.reject(new Error("must not create")),
+        get: () => Promise.resolve(existing),
+      },
+      observe: (observation) => observations.push(observation),
+      store: store({}),
+    }
+  );
+  assert.equal(result.sandbox, existing);
+  assert.deepEqual(observations, []);
+});
+
+test("a refused adoption keeps the workspace attached and reports the provider signal", async () => {
+  const observations: RunnerResourceOperationObservation[] = [];
+  const refusal = Object.assign(new DaytonaForbiddenError("no"), {
+    code: "SANDBOX_LABELS_FORBIDDEN",
+    source: "DAYTONA_API",
+    statusCode: 403,
+  });
+  const existing = Object.assign(
+    sandbox(SandboxState.STARTED, {
+      setLabels: () => Promise.reject(refusal),
+    }),
+    { autoStopInterval: 15, labels: { configurationId: "whole-policy" } }
+  );
+  await adoptDaytonaSandboxPolicy(
+    existing,
+    {
+      ...config,
+      autoStopInterval: 30,
+      configurationId: "split",
+      priorConfigurationIds: ["whole-policy"],
+    },
+    { observe: (observation) => observations.push(observation) }
+  );
+  assert.deepEqual(observations, [
+    {
+      operation: "adopt",
+      outcome: "failed",
+      providerCode: "SANDBOX_LABELS_FORBIDDEN",
+      providerSource: "DAYTONA_API",
+      providerStatus: 403,
+    },
+  ]);
+});
+
 test("sandbox policy supplies bounded resource limits and persistent lifecycle settings", () => {
   const environment = {
     DAYTONA_API_KEY: "test-key",
@@ -2238,13 +2504,18 @@ test("sandbox policy supplies bounded resource limits and persistent lifecycle s
   const configuration = daytonaSandboxConfiguration(environment);
   assert.match(configuration.configurationId ?? "", /^[a-f0-9]{64}$/u);
   assert.deepEqual(
-    { ...configuration, configurationId: undefined },
+    {
+      ...configuration,
+      configurationId: undefined,
+      priorConfigurationIds: undefined,
+    },
     {
       autoArchiveInterval: 10_080,
       autoDeleteInterval: -1,
       autoStopInterval: 15,
       configurationId: undefined,
       domainAllowList: "github.com",
+      priorConfigurationIds: undefined,
       resources: { cpu: 2, disk: 10, memory: 4 },
       snapshotName: "coven-agents-copilot-1",
       target: "us",

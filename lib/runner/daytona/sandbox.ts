@@ -105,9 +105,19 @@ export type DaytonaSandboxService = Readonly<{
 
 export type DaytonaSandboxConfiguration = DaytonaSandboxResourcePolicy &
   Readonly<{
+    /**
+     * Hash of the fields a sandbox cannot change in place: snapshot, target,
+     * egress allow list and gateway hostname. Resources and idle intervals
+     * are deliberately absent — see `daytonaSandboxConfiguration`.
+     */
     configurationId?: string;
     domainAllowList?: string;
     gatewayHostname?: string;
+    /**
+     * Identities this deployment still recognises on an existing sandbox. A
+     * sandbox stamped with one is adopted and relabelled rather than refused.
+     */
+    priorConfigurationIds?: readonly string[];
     snapshotName: string;
     target: "eu" | "us";
   }>;
@@ -163,27 +173,42 @@ export function daytonaSandboxConfiguration(
   );
   const resourcePolicy = daytonaSandboxResourcePolicy(environment);
   const snapshotConfiguration = daytonaSnapshotConfiguration(environment);
-  const configurationId = createHash("sha256")
-    .update(
-      JSON.stringify({
-        ...resourcePolicy,
-        domainAllowList:
-          domainAllowList?.split(",").sort(compareAscii).join(",") ?? null,
-        gatewayHostname: gatewayHostname ?? null,
-        snapshotName: snapshotConfiguration.snapshotName,
-        target: snapshotConfiguration.target,
-      }),
-      "utf8"
-    )
-    .digest("hex");
+  // Only what forces a new sandbox belongs in its identity. The snapshot and
+  // target fix the image and region; the allow list and gateway are network
+  // policy applied at create. CPU, memory and disk are properties of the
+  // snapshot the sandbox was built from (a change there is a snapshot
+  // change), and the idle intervals are settable on a live sandbox. Hashing
+  // those too meant a policy tweak locked every tenant out of a workspace
+  // that could have simply adopted it (#224).
+  const identity = {
+    domainAllowList:
+      domainAllowList?.split(",").sort(compareAscii).join(",") ?? null,
+    gatewayHostname: gatewayHostname ?? null,
+    snapshotName: snapshotConfiguration.snapshotName,
+    target: snapshotConfiguration.target,
+  };
+  const configurationId = hashConfiguration(identity);
+  // Sandboxes created before the identity split carry a hash over the full
+  // resource policy. Recognising it lets them attach and be relabelled; once
+  // the fleet is relabelled this entry can go.
+  const priorConfigurationIds = [
+    hashConfiguration({ ...resourcePolicy, ...identity }),
+  ];
   return {
     ...resourcePolicy,
     configurationId,
     ...(domainAllowList ? { domainAllowList } : {}),
     ...(gatewayHostname ? { gatewayHostname } : {}),
+    priorConfigurationIds,
     snapshotName: snapshotConfiguration.snapshotName,
     target: snapshotConfiguration.target,
   };
+}
+
+function hashConfiguration(value: Record<string, unknown>): string {
+  return createHash("sha256")
+    .update(JSON.stringify(value), "utf8")
+    .digest("hex");
 }
 
 /** Classifies provider failures without exposing provider messages or metadata. */
@@ -301,17 +326,42 @@ export function assertDaytonaCredentialBoundary(
   }
 }
 
+/**
+ * How a sandbox's stamped identity relates to the running configuration.
+ * `prior` is a recognised earlier identity: the sandbox is usable as-is and
+ * only needs its label brought forward.
+ */
+export function daytonaSandboxConfigurationIdentity(
+  sandbox: Pick<Sandbox, "labels">,
+  configuration: Pick<
+    DaytonaSandboxConfiguration,
+    "configurationId" | "priorConfigurationIds"
+  >
+): "current" | "mismatch" | "prior" {
+  const stamped = sandbox.labels?.configurationId;
+  if (stamped === undefined || configuration.configurationId === undefined) {
+    return "mismatch";
+  }
+  if (stamped === configuration.configurationId) {
+    return "current";
+  }
+  return configuration.priorConfigurationIds?.includes(stamped)
+    ? "prior"
+    : "mismatch";
+}
+
 export function daytonaSandboxProvisioningIdentityMatches(
   sandbox: Sandbox,
   agent: RunnerAgentRecord,
   configuration: DaytonaSandboxConfiguration
 ): boolean {
-  if (!configuration.configurationId) {
+  if (
+    daytonaSandboxConfigurationIdentity(sandbox, configuration) === "mismatch"
+  ) {
     return false;
   }
   const expectedLabels = {
     ...daytonaSandboxLabels(agent.tenant, agent.id),
-    configurationId: configuration.configurationId,
     sandboxGeneration: String(agent.sandboxGeneration),
   };
   return Object.entries(expectedLabels).every(
@@ -325,8 +375,68 @@ function sandboxConfigurationMatches(
 ): boolean {
   return (
     configuration.configurationId === undefined ||
-    sandbox.labels?.configurationId === configuration.configurationId
+    daytonaSandboxConfigurationIdentity(sandbox, configuration) !== "mismatch"
   );
+}
+
+/**
+ * Brings a matched sandbox up to the running policy without recreating it.
+ * Only what a live sandbox can change in place is touched: the identity label
+ * (so a sandbox stamped before the identity split graduates to the split
+ * identity) and the idle intervals. Resources are fixed by the snapshot the
+ * sandbox was created from, and a snapshot change is an identity change.
+ *
+ * Best-effort by design. A provider refusal leaves the workspace attached and
+ * is reported; it is never escalated into a reset.
+ */
+export async function adoptDaytonaSandboxPolicy(
+  sandbox: Sandbox,
+  configuration: DaytonaSandboxConfiguration,
+  dependencies: Pick<DaytonaSandboxDependencies, "observe">
+): Promise<void> {
+  const steps: (() => Promise<unknown>)[] = [];
+  const { configurationId } = configuration;
+  if (
+    configurationId !== undefined &&
+    daytonaSandboxConfigurationIdentity(sandbox, configuration) === "prior"
+  ) {
+    steps.push(() => sandbox.setLabels({ ...sandbox.labels, configurationId }));
+  }
+  if (
+    sandbox.autoStopInterval !== undefined &&
+    sandbox.autoStopInterval !== configuration.autoStopInterval
+  ) {
+    steps.push(() =>
+      sandbox.setAutostopInterval(configuration.autoStopInterval)
+    );
+  }
+  if (
+    sandbox.autoArchiveInterval !== undefined &&
+    sandbox.autoArchiveInterval !== configuration.autoArchiveInterval
+  ) {
+    steps.push(() =>
+      sandbox.setAutoArchiveInterval(configuration.autoArchiveInterval)
+    );
+  }
+  if (steps.length === 0) {
+    return;
+  }
+  try {
+    for (const step of steps) {
+      // biome-ignore lint/performance/noAwaitInLoops: provider writes to one sandbox are applied in order
+      await step();
+    }
+    observeRunnerResourceOperation(dependencies.observe, {
+      operation: "adopt",
+      outcome: "repaired",
+    });
+  } catch (error) {
+    observeRunnerResourceOperation(dependencies.observe, {
+      operation: "adopt",
+      outcome: "failed",
+      ...runnerResourceProviderSignal(error),
+    });
+  }
 }
 
 /**
@@ -960,6 +1070,9 @@ async function createSandbox(
   );
   throwIfTransitionAborted(dependencies.lifecycle);
   await startOrRecoverSandbox(sandbox, dependencies.lifecycle);
+  if (!created) {
+    await adoptDaytonaSandboxPolicy(sandbox, configuration, dependencies);
+  }
   return { agent: persisted, sandbox };
 }
 
@@ -1172,6 +1285,7 @@ async function reconcileAmbiguousDaytonaSandbox(
     }
     const persisted = await persistSandbox(agent, sandbox, persistence, false);
     await startOrRecoverSandbox(sandbox, dependencies.lifecycle);
+    await adoptDaytonaSandboxPolicy(sandbox, configuration, dependencies);
     return { agent: persisted, sandbox };
   } catch (error) {
     if (error instanceof DaytonaSandboxLifecycleError) {
@@ -1236,6 +1350,7 @@ async function ensureDaytonaSandboxWithPersistence(
     return refuseMismatchedSandboxReuse(configuration, dependencies);
   }
   await startOrRecoverSandbox(sandbox, dependencies.lifecycle);
+  await adoptDaytonaSandboxPolicy(sandbox, configuration, dependencies);
   return { agent, sandbox };
 }
 
