@@ -18,6 +18,7 @@ import {
   enforceAbusePolicy,
 } from "@/lib/abuse/enforce";
 import { abusePolicyFor } from "@/lib/abuse/policy";
+import { scheduleChatTitle } from "@/lib/ai/chat-title-stream";
 import { entitlementsByPlan } from "@/lib/ai/entitlements";
 import {
   allowedModelIds,
@@ -29,6 +30,7 @@ import {
 import { type RequestHints, systemPrompt } from "@/lib/ai/prompts";
 import { getLanguageModel } from "@/lib/ai/providers";
 import { generateTitleFromUserMessageInternal } from "@/lib/ai/title";
+import { DEFAULT_CHAT_TITLE } from "@/lib/ai/title-text";
 import { createDocument } from "@/lib/ai/tools/create-document";
 import { editDocument } from "@/lib/ai/tools/edit-document";
 import { getWeather } from "@/lib/ai/tools/get-weather";
@@ -136,7 +138,7 @@ export async function POST(request: Request) {
 
     const chat = await getChatById({ id });
     let messagesFromDb: DBMessage[] = [];
-    let titlePromise: Promise<string> | null = null;
+    let shouldGenerateTitle = false;
 
     if (chat) {
       if (chat.userId !== userId) {
@@ -146,11 +148,11 @@ export async function POST(request: Request) {
     } else if (message?.role === "user") {
       await saveChat({
         id,
-        title: "New chat",
+        title: DEFAULT_CHAT_TITLE,
         userId,
         visibility: selectedVisibilityType,
       });
-      titlePromise = generateTitleFromUserMessageInternal({ message });
+      shouldGenerateTitle = true;
     }
 
     let uiMessages: ChatMessage[];
@@ -223,8 +225,9 @@ export async function POST(request: Request) {
 
     const modelMessages = await convertToModelMessages(uiMessages);
 
+    let titleStreamOpen = true;
     const stream = createUIMessageStream({
-      execute: async ({ writer: dataStream }) => {
+      execute: ({ writer: dataStream }) => {
         const modelName = modelConfig?.name ?? chatModel;
         let hasModelActivity = false;
         let healthCheckTimer: ReturnType<typeof setTimeout> | undefined;
@@ -356,18 +359,28 @@ export async function POST(request: Request) {
           })
         );
 
-        if (titlePromise) {
-          try {
-            const title = await titlePromise;
-            dataStream.write({ data: title, type: "data-chat-title" });
-            updateChatTitleById({ chatId: id, title });
-          } catch {
-            /* non-fatal */
-          }
+        if (shouldGenerateTitle && message) {
+          dataStream.write({
+            data: { chatId: id, messageId: message.id },
+            transient: true,
+            type: "data-chat-title-pending",
+          });
+          scheduleChatTitle({
+            emit: (title) => {
+              if (titleStreamOpen && !request.signal.aborted) {
+                dataStream.write({ data: title, type: "data-chat-title" });
+              }
+            },
+            generate: () => generateTitleFromUserMessageInternal({ message }),
+            persist: (title) =>
+              updateChatTitleById({ chatId: id, title, userId }),
+            waitUntil: after,
+          });
         }
       },
       generateId: generateUUID,
       onEnd: async ({ messages: finishedMessages }) => {
+        titleStreamOpen = false;
         if (isToolApprovalFlow) {
           await Promise.all(
             finishedMessages.map(async (finishedMsg) => {
@@ -410,6 +423,7 @@ export async function POST(request: Request) {
         }
       },
       onError: (error) => {
+        titleStreamOpen = false;
         if (
           error instanceof Error &&
           error.message?.includes(
