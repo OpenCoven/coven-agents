@@ -341,16 +341,6 @@
   border-radius: var(--radius-pill);
 }
 
-.oc-block[data-kind="command"][data-tone="running"] .oc-block__node {
-  --node-ink: var(--color-warning);
-
-  animation: oc-node-pulse 1.6s var(--ease-standard) infinite;
-}
-
-.oc-block[data-kind="command"][data-tone="danger"] .oc-block__node {
-  --node-ink: var(--color-danger);
-}
-
 .oc-block[data-kind="files"] .oc-block__node {
   --node-ink: var(--text-muted);
 
@@ -374,6 +364,17 @@
   width: 14px;
   height: 14px;
   margin-inline: -1px;
+}
+
+/* Tone overrides sit after every kind rule so specificity only ascends. */
+.oc-block[data-kind="command"][data-tone="running"] .oc-block__node {
+  --node-ink: var(--color-warning);
+
+  animation: oc-node-pulse 1.6s var(--ease-standard) infinite;
+}
+
+.oc-block[data-kind="command"][data-tone="danger"] .oc-block__node {
+  --node-ink: var(--color-danger);
 }
 
 @keyframes oc-node-pulse {
