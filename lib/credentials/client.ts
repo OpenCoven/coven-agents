@@ -1,4 +1,5 @@
 import { browserApplicationPath } from "@/lib/application-path";
+import { sessionFetch as fetch } from "@/lib/auth/session-recovery";
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 

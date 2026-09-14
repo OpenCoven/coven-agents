@@ -3,6 +3,7 @@ import type {
   UIMessagePart,
 } from 'ai';
 import { formatISO } from 'date-fns';
+import { sessionFetch as fetch } from '@/lib/auth/session-recovery';
 import type { DBMessage, Document } from '@/lib/db/schema';
 export { cn } from '@/lib/cn';
 import { ChatbotError, type ErrorCode } from './errors';
@@ -12,6 +13,9 @@ export const fetcher = async (url: string) => {
   const response = await fetch(url);
 
   if (!response.ok) {
+    if (response.status === 401) {
+      throw new ChatbotError('unauthorized:auth');
+    }
     const { code, cause } = await response.json();
     throw new ChatbotError(code as ErrorCode, cause);
   }
@@ -27,13 +31,19 @@ export async function fetchWithErrorHandlers(
     const response = await fetch(input, init);
 
     if (!response.ok) {
+      if (response.status === 401) {
+        throw new ChatbotError('unauthorized:auth');
+      }
       const { code, cause } = await response.json();
       throw new ChatbotError(code as ErrorCode, cause);
     }
 
     return response;
   } catch (error: unknown) {
-    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    if (error instanceof ChatbotError) {
+      throw error;
+    }
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
       throw new ChatbotError('offline:chat');
     }
 

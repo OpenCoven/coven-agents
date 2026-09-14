@@ -1,25 +1,26 @@
 #!/usr/bin/env tsx
-import { execFile, spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { spawn } from "node:child_process";
 import type { EventEmitter } from "node:events";
 import { rm } from "node:fs/promises";
 import { createServer } from "node:net";
-import { promisify } from "node:util";
 import { HARNESS_SPECS } from "@opencoven/harness";
 import {
   applicationTableInventory,
   seedHermeticUsers,
 } from "../tests/e2e/hermetic-db";
+import {
+  migrateDisposableDatabase,
+  withDisposableDatabase,
+} from "./disposable-postgres";
 
-const executeFile = promisify(execFile);
-const COMMAND_TIMEOUT_MS = 120_000;
-const DATABASE_READY_TIMEOUT_MS = 30_000;
-export const DOCKER_COMMAND_TIMEOUT_MS = 10_000;
+export {
+  DOCKER_COMMAND_TIMEOUT_MS,
+  dockerRunArguments,
+  hermeticDatabaseUrl,
+  mappedPort,
+} from "./disposable-postgres";
+
 export const PORT_ALLOCATION_TIMEOUT_MS = 5000;
-const POSTGRES_IMAGE = "postgres:16-alpine";
-const POSTGRES_DATABASE = "coven_hermetic_e2e";
-const POSTGRES_PASSWORD = "test-hermetic-postgres";
-const POSTGRES_USER = "postgres";
 const TEST_KEK = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const HARNESS_AUTH_ENVIRONMENT_VARIABLES = [
   ...new Set(HARNESS_SPECS.flatMap((spec) => spec.authEnvVars)),
@@ -112,11 +113,6 @@ const EXTERNAL_ENVIRONMENT_PREFIXES = [
   "WEAVIATE_",
   "XAI_",
 ] as const;
-
-type CommandOptions = Readonly<{
-  env?: NodeJS.ProcessEnv;
-  timeout?: number;
-}>;
 
 type Environment = Readonly<Record<string, string | undefined>>;
 type PlaywrightChild = EventEmitter;
@@ -261,105 +257,9 @@ export function allocateHermeticPort(
   return bindAvailableLoopbackPort(explicitHermeticPort(environment) ?? 0);
 }
 
-async function command(
-  binary: string,
-  args: readonly string[],
-  options: CommandOptions = {}
-): Promise<string> {
-  try {
-    const result = await executeFile(binary, [...args], {
-      encoding: "utf8",
-      env: options.env,
-      maxBuffer: 1024 * 1024,
-      timeout: options.timeout ?? COMMAND_TIMEOUT_MS,
-    });
-    return result.stdout;
-  } catch (error) {
-    throw new Error(
-      `Hermetic E2E command failed: ${binary} ${args[0] ?? ""}.`,
-      { cause: error }
-    );
-  }
-}
-
-function containerName(random = () => randomBytes(8).toString("hex")): string {
-  return `coven-hermetic-e2e-${process.pid}-${random()}`;
-}
-
-export function dockerRunArguments(name: string): readonly string[] {
-  return [
-    "run",
-    "--detach",
-    "--name",
-    name,
-    "--env",
-    `POSTGRES_DB=${POSTGRES_DATABASE}`,
-    "--env",
-    `POSTGRES_PASSWORD=${POSTGRES_PASSWORD}`,
-    "--env",
-    `POSTGRES_USER=${POSTGRES_USER}`,
-    "--publish",
-    "127.0.0.1::5432",
-    POSTGRES_IMAGE,
-  ];
-}
-
-function postgresUrl(port: number): string {
-  return `postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:${port}/${POSTGRES_DATABASE}`;
-}
-
-export function hermeticDatabaseUrl(value: string): string {
-  const url = new URL(value);
-  const existingOptions = url.searchParams.getAll("options").at(-1)?.trim();
-  url.searchParams.set(
-    "options",
-    [existingOptions, "-c search_path=public", "-c timezone=UTC"]
-      .filter(Boolean)
-      .join(" ")
-  );
-  return url.toString();
-}
-
-export function mappedPort(output: string): number {
-  const match = /:(\d+)\s*$/u.exec(output.trim());
-  const port = Number(match?.[1]);
-  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
-    throw new Error("Docker returned no usable mapped PostgreSQL port.");
-  }
-  return port;
-}
-
 function isExternalEnvironmentVariable(name: string): boolean {
   return EXTERNAL_ENVIRONMENT_PREFIXES.some((prefix) =>
     name.startsWith(prefix)
-  );
-}
-
-async function waitForPostgres(name: string): Promise<void> {
-  const deadline = Date.now() + DATABASE_READY_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    try {
-      // biome-ignore lint/performance/noAwaitInLoops: Readiness checks must be sequential and bounded.
-      await command(
-        "docker",
-        [
-          "exec",
-          name,
-          "pg_isready",
-          "--username",
-          POSTGRES_USER,
-          "--dbname",
-          POSTGRES_DATABASE,
-        ],
-        { timeout: DOCKER_COMMAND_TIMEOUT_MS }
-      );
-      return;
-    } catch {
-      await new Promise((resolve) => setTimeout(resolve, 250));
-    }
-  }
-  throw new Error(
-    "Disposable PostgreSQL did not become ready within the bounded timeout."
   );
 }
 
@@ -409,15 +309,6 @@ export function hermeticEnvironment(
     RUN_ADMISSION_TENANT_QUEUE_MAX: "10",
     RUNNER_MANUAL_RECONCILE_SECRET: "test-hermetic-manual",
   };
-}
-
-async function migrate(
-  url: string,
-  environment: NodeJS.ProcessEnv
-): Promise<void> {
-  await command(executable("pnpm"), ["exec", "tsx", "lib/db/migrate.ts"], {
-    env: hermeticEnvironment(url, environment),
-  });
 }
 
 export function waitForPlaywrightExit(
@@ -483,101 +374,62 @@ async function removePlaywrightArtifacts(): Promise<void> {
   );
 }
 
-async function createDisposableDatabase(
-  environment: NodeJS.ProcessEnv
-): Promise<Readonly<{ cleanup: () => Promise<void>; url: string }>> {
-  const external = environment.E2E_POSTGRES_URL?.trim();
-  if (external) {
-    if (environment.E2E_POSTGRES_DISPOSABLE !== "1") {
-      throw new Error(
-        "E2E_POSTGRES_URL requires E2E_POSTGRES_DISPOSABLE=1; refusing an unconfirmed database."
-      );
-    }
-    return {
-      cleanup: async () => undefined,
-      url: hermeticDatabaseUrl(external),
-    };
-  }
-
-  const name = containerName();
-  try {
-    await command("docker", ["info"], { timeout: DOCKER_COMMAND_TIMEOUT_MS });
-    await command("docker", dockerRunArguments(name), {
-      timeout: DOCKER_COMMAND_TIMEOUT_MS,
-    });
-  } catch (error) {
-    throw new Error(
-      `Could not start disposable PostgreSQL within ${DOCKER_COMMAND_TIMEOUT_MS / 1000} seconds. Ensure Docker daemon is running and postgres:16-alpine is available.`,
-      { cause: error }
-    );
-  }
-  try {
-    await waitForPostgres(name);
-    const output = await command("docker", ["port", name, "5432/tcp"], {
-      timeout: DOCKER_COMMAND_TIMEOUT_MS,
-    });
-    return {
-      cleanup: async () => {
-        await command("docker", ["rm", "--force", name], {
-          timeout: DOCKER_COMMAND_TIMEOUT_MS,
-        });
-      },
-      url: hermeticDatabaseUrl(postgresUrl(mappedPort(output))),
-    };
-  } catch (error) {
-    try {
-      await command("docker", ["rm", "--force", name], {
-        timeout: DOCKER_COMMAND_TIMEOUT_MS,
-      });
-    } catch {
-      // A failed cleanup must not replace the actionable start-up error.
-    }
-    throw error;
-  }
-}
-
 export async function runHermeticE2E(
   environment: NodeJS.ProcessEnv = process.env
 ): Promise<void> {
-  const database = await createDisposableDatabase(environment);
-  try {
-    await migrate(database.url, environment);
-    await seedHermeticUsers(database.url);
-    // Allocate immediately before Playwright starts its owned web server, which
-    // minimizes the unavoidable release-to-bind race for a dynamically chosen port.
-    const port = await allocateHermeticPort(environment);
-    const testEnvironment = hermeticEnvironment(
-      database.url,
-      environment,
-      port
-    );
-    await playwright("tests/e2e/chat.test.ts", testEnvironment);
-    await playwright("tests/e2e/subscriber-hermetic.test.ts", testEnvironment);
-
-    const beforeDemo = await applicationTableInventory(database.url);
-    await playwright("tests/e2e/demo.test.ts", {
-      ...testEnvironment,
-      IS_DEMO: "1",
-    });
-    const afterDemo = await applicationTableInventory(database.url);
-    if (JSON.stringify(beforeDemo) !== JSON.stringify(afterDemo)) {
-      throw new Error("Anonymous demo replay wrote to the hermetic database.");
-    }
-
-    const beforeAdversarial = await applicationTableInventory(database.url);
-    await playwright("tests/e2e/demo-adversarial.test.ts", testEnvironment);
-    const afterAdversarial = await applicationTableInventory(database.url);
-    if (
-      JSON.stringify(beforeAdversarial) !== JSON.stringify(afterAdversarial)
-    ) {
-      throw new Error(
-        "Anonymous adversarial demo probes wrote to the hermetic database."
+  await withDisposableDatabase(environment, async (url) => {
+    try {
+      await migrateDisposableDatabase(
+        url,
+        hermeticEnvironment(url, environment)
       );
+      await seedHermeticUsers(url);
+      // Allocate immediately before Playwright starts its owned web server, which
+      // minimizes the unavoidable release-to-bind race for a dynamically chosen port.
+      const port = await allocateHermeticPort(environment);
+      const testEnvironment = hermeticEnvironment(url, environment, port);
+      await playwright("tests/e2e/chat.test.ts", testEnvironment);
+      await playwright(
+        "tests/e2e/subscriber-hermetic.test.ts",
+        testEnvironment
+      );
+      await seedHermeticUsers(url);
+      await playwright(
+        "tests/e2e/session-revocation-hermetic.test.ts",
+        testEnvironment
+      );
+
+      const beforeDemo = await applicationTableInventory(url);
+      await playwright("tests/e2e/demo.test.ts", {
+        ...testEnvironment,
+        IS_DEMO: "1",
+      });
+      const afterDemo = await applicationTableInventory(url);
+      if (JSON.stringify(beforeDemo) !== JSON.stringify(afterDemo)) {
+        throw new Error(
+          "Anonymous demo replay wrote to the hermetic database."
+        );
+      }
+
+      await playwright("tests/e2e/session-revocation-hermetic.test.ts", {
+        ...testEnvironment,
+        IS_DEMO: "1",
+      });
+
+      const beforeAdversarial = await applicationTableInventory(url);
+      await playwright("tests/e2e/demo-adversarial.test.ts", testEnvironment);
+      const afterAdversarial = await applicationTableInventory(url);
+      if (
+        JSON.stringify(beforeAdversarial) !== JSON.stringify(afterAdversarial)
+      ) {
+        throw new Error(
+          "Anonymous adversarial demo probes wrote to the hermetic database."
+        );
+      }
+    } finally {
+      await removePlaywrightArtifacts();
     }
-  } finally {
-    await removePlaywrightArtifacts();
-    await database.cleanup();
-  }
+  });
 }
 
 async function main(): Promise<void> {

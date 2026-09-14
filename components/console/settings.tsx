@@ -26,6 +26,7 @@ import {
 import { useApplicationLoginPath } from "@/hooks/use-application-login-path";
 import { useResponsiveTabOrientation } from "@/hooks/use-responsive-tab-orientation";
 import { browserApplicationPath } from "@/lib/application-path";
+import { sessionFetch as fetch } from "@/lib/auth/session-recovery";
 import { RUN_MINUTE_RESERVATION } from "@/lib/billing/limits";
 import { CLOUD_PILOT_PLAN } from "@/lib/billing/pilot-plan";
 import { glyphFor } from "@/lib/console/format";

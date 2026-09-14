@@ -187,6 +187,7 @@ const browserTransportHeaderNames = [
 ] as const;
 const browserTransportImports = [
   "@/lib/application-path",
+  "@/lib/auth/session-recovery",
   "@opencoven/agent-contracts",
   "@opencoven/harness",
   "zod",
@@ -366,6 +367,7 @@ const scriptNames = [
   "db:push",
   "db:studio",
   "db:up",
+  "db:verify",
   "demo:record",
   "dev",
   "familiar:assets",
@@ -1025,12 +1027,12 @@ test("package dependencies and scripts match the current application contract", 
   ]);
 });
 
-test("the required local check gate includes retired-platform residue validation", () => {
+test("the required local check gate includes retired-platform and database validation", () => {
   const manifest = readManifest("package.json");
 
   assert.equal(
     manifest.scripts?.check,
-    "pnpm validate:platform-residue && pnpm familiar:assets:check && ultracite check && pnpm planning:check"
+    "pnpm validate:platform-residue && pnpm familiar:assets:check && ultracite check && pnpm planning:check && pnpm db:check"
   );
 });
 

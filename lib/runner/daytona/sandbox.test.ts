@@ -1551,7 +1551,8 @@ test("an aborted warm stays recoverable when probe and fence cleanup never retur
   });
   const warming = agent({ ...current, version: 5, warmStatus: "provisioning" });
   const controller = new AbortController();
-  const deadline = Date.now() + 5;
+  const deadline = 5;
+  let now = 0;
   let probeStarted!: () => void;
   const started = new Promise<void>((resolve) => {
     probeStarted = resolve;
@@ -1581,11 +1582,13 @@ test("an aborted warm stays recoverable when probe and fence cleanup never retur
     },
     lifecycle: {
       deadline,
+      now: () => now,
       signal: controller.signal,
     },
     probe: (value, signal, timeoutSeconds, sessionId) =>
       probeDaytonaHarnesses(value, {
         deadline,
+        now: () => now,
         sessionId,
         signal,
         timeoutSeconds,
@@ -1603,7 +1606,8 @@ test("an aborted warm stays recoverable when probe and fence cleanup never retur
     }),
   });
 
-  await started;
+  await settlesWithin(started);
+  now = deadline;
   controller.abort(new Error("prewarm deadline exceeded"));
   const result = await settlesWithin(pending);
 

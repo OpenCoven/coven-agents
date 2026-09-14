@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { browserApplicationPath } from "@/lib/application-path";
+import { sessionFetch as fetch } from "@/lib/auth/session-recovery";
 
 /**
  * Where a tenant supplies their own harness credential.

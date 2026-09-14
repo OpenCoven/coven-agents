@@ -5,6 +5,7 @@
 import { useEffect, useState } from "react";
 import { Eyebrow } from "@/components/console/primitives";
 import { hairline, tabular, type as type_ } from "@/components/console/styles";
+import { sessionFetch as fetch } from "@/lib/auth/session-recovery";
 import type { DayCount, RunDurationSummary } from "@/lib/billing/history";
 
 /**

@@ -4,6 +4,12 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 
 const databaseUrl = process.env.GITHUB_TOOL_POSTGRES_TEST_URL;
+if (process.env.GITHUB_TOOL_POSTGRES_TEST_REQUIRED === "1") {
+  assert.ok(
+    databaseUrl,
+    "GITHUB_TOOL_POSTGRES_TEST_URL is required; refusing to skip lifecycle tests."
+  );
+}
 
 test("disconnect advances generation, revokes capability, and preserves an immutable receipt", {
   skip: !databaseUrl,
@@ -379,6 +385,128 @@ test("disconnect advances generation, revokes capability, and preserves an immut
         `;
     });
 
+    const projectOperationId = "10000000-0000-4000-8000-000000000023";
+    await sql`
+      INSERT INTO "RunnerGitHubOperation"
+      SELECT (jsonb_populate_record(NULL::"RunnerGitHubOperation",
+        to_jsonb(operation) || jsonb_build_object(
+          'id', ${projectOperationId}::text,
+          'operationId', '10000000-0000-4000-8000-000000000024',
+          'kind', 'project.item.add',
+          'requiredCapability', 'github.projects.write',
+          'projectAuthorityBound', true,
+          'projectId', 'P_original'
+        ))).*
+      FROM "RunnerGitHubOperation" AS operation
+      WHERE "id" = ${freshWriteId}
+    `;
+    // Exercise the applied CHECKs without NOT NULL masking their three-valued
+    // behavior if a future authority field becomes nullable.
+    await sql`CREATE TEMP TABLE authority_probe (LIKE "RunnerGitHubConnection" INCLUDING CONSTRAINTS)`;
+    await sql`ALTER TABLE authority_probe ALTER COLUMN "githubUserLogin" DROP NOT NULL`;
+    await sql`
+      INSERT INTO authority_probe SELECT * FROM "RunnerGitHubConnection" WHERE "id" = ${connectionId}
+    `;
+    await assert.rejects(
+      sql`UPDATE authority_probe SET "githubUserLogin" = NULL`,
+      /RGHConn_authority_valid/u
+    );
+    await sql`CREATE TEMP TABLE operation_authority_probe (LIKE "RunnerGitHubOperation" INCLUDING CONSTRAINTS)`;
+    await sql`ALTER TABLE operation_authority_probe ALTER COLUMN "projectAuthorityBound" DROP NOT NULL`;
+    await sql`
+      INSERT INTO operation_authority_probe SELECT * FROM "RunnerGitHubOperation" WHERE "id" = ${projectOperationId}
+    `;
+    await assert.rejects(
+      sql`UPDATE operation_authority_probe SET "projectAuthorityBound" = NULL`,
+      /RGHOp_connectionSnapshot_valid/u
+    );
+    const [threeValued] = await sql`
+      SELECT (true AND NULL::boolean) AS nullable,
+             ((true AND NULL::boolean) IS TRUE) AS "failClosed"
+    `;
+    assert.equal(threeValued.nullable, null);
+    assert.equal(threeValued.failClosed, false);
+    for (const ids of [
+      [123],
+      [null],
+      [["P_nested"]],
+      ["bad!"],
+      ["A".repeat(257)],
+    ]) {
+      // biome-ignore lint/performance/noAwaitInLoops: test each malformed JSON shape independently.
+      await assert.rejects(
+        sql`
+          UPDATE authority_probe
+          SET "userProjectManagementCeiling" = true, "userProjectManagementCurrent" = true,
+              "userProjectIds" = ${sql.json(ids)},
+              "userProjectAuthorityAuthVersion" = 7,
+              "userProjectAuthorityConnectionGeneration" = 0,
+              "userProjectAuthorityIssuedAt" = clock_timestamp(),
+              "userProjectAuthorityExpiresAt" = clock_timestamp() + interval '5 minutes'
+        `,
+        /RGHConn_authority_valid/u
+      );
+    }
+    for (const id of ["A", "A".repeat(255), "A".repeat(256)]) {
+      // biome-ignore lint/performance/noAwaitInLoops: PostgreSQL must accept every boundary in the shared 1..256 contract.
+      await sql`
+        UPDATE authority_probe
+        SET "userProjectManagementCeiling" = true, "userProjectManagementCurrent" = true,
+            "userProjectIds" = ${sql.json([id])},
+            "userProjectAuthorityAuthVersion" = 7,
+            "userProjectAuthorityConnectionGeneration" = 0,
+            "userProjectAuthorityIssuedAt" = clock_timestamp(),
+            "userProjectAuthorityExpiresAt" = clock_timestamp() + interval '5 minutes'
+      `;
+    }
+    const [authorityConstraint] = await sql<{ definition: string }[]>`
+      SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint
+      WHERE conrelid = '"RunnerGitHubConnection"'::regclass AND conname = 'RGHConn_authority_valid'
+    `;
+    assert.doesNotMatch(authorityConstraint.definition, /'\{\}'::jsonb, true/u);
+    for (const change of [
+      { projectId: "P_retargeted" },
+      { projectId: null },
+      { projectAuthorityBound: false },
+      { projectAuthorityBound: null },
+      { projectAuthorityBound: false, projectId: null },
+    ]) {
+      // biome-ignore lint/performance/noAwaitInLoops: each independent mutation must be rejected by the real trigger.
+      await assert.rejects(
+        sql`UPDATE "RunnerGitHubOperation" SET ${sql(change)} WHERE "id" = ${projectOperationId}`,
+        /GitHub operation request authority is immutable/u
+      );
+    }
+    for (const change of [
+      { projectId: "P_added_after_reservation" },
+      { projectAuthorityBound: true },
+    ]) {
+      // biome-ignore lint/performance/noAwaitInLoops: exercise both NULL-to-value and false-to-true changes.
+      await assert.rejects(
+        sql`UPDATE "RunnerGitHubOperation" SET ${sql(change)} WHERE "id" = ${freshWriteId}`,
+        /GitHub operation request authority is immutable/u
+      );
+    }
+    const [updatedProject] = await sql`
+      UPDATE "RunnerGitHubOperation"
+      SET "projectId" = "projectId", "projectAuthorityBound" = "projectAuthorityBound",
+          "executionLeaseExpiresAt" = clock_timestamp() + interval '2 minutes',
+          "providerRequestId" = 'request-project', "providerDispatchPhase" = 'sent',
+          "providerSentAt" = clock_timestamp(),
+          "updatedAt" = clock_timestamp(), "version" = "version" + 1
+      WHERE "id" = ${projectOperationId}
+      RETURNING "projectId", "projectAuthorityBound", "version"
+    `;
+    assert.equal(updatedProject.projectId, "P_original");
+    assert.equal(updatedProject.projectAuthorityBound, true);
+    assert.equal(updatedProject.version, 1);
+    await sql`
+      UPDATE "RunnerGitHubOperation"
+      SET "status" = 'completed', "completedAt" = clock_timestamp(),
+          "resultJson" = '{"kind":"project.item.add"}'::jsonb
+      WHERE "id" = ${projectOperationId}
+    `;
+
     const [capabilityModule, teamStoreModule] = await Promise.all([
       import("./capability"),
       import("@/lib/teams/store"),
@@ -458,6 +586,13 @@ test("disconnect advances generation, revokes capability, and preserves an immut
         RETURNING "id"
       `;
     assert.equal(deleted.length, 1);
+    const [unlinkedProject] = await sql`
+      SELECT "connectionId", "projectId", "projectAuthorityBound"
+      FROM "RunnerGitHubOperation" WHERE "id" = ${projectOperationId}
+    `;
+    assert.equal(unlinkedProject.connectionId, null);
+    assert.equal(unlinkedProject.projectId, "P_original");
+    assert.equal(unlinkedProject.projectAuthorityBound, true);
 
     const [state] = await sql<
       {

@@ -1,6 +1,7 @@
 import { connection } from "next/server";
 import { subscriptionPageAuthority } from "@/app/(auth)/auth";
 import { AccountSettings } from "@/components/account/account-settings";
+import { browserApplicationPath } from "@/lib/application-path";
 import { subscriptionCheckoutEnabled } from "@/lib/billing/config";
 import { offerableMinutePacksFromEnv } from "@/lib/billing/minute-packs";
 
@@ -20,7 +21,10 @@ export default async function AccountPage({ searchParams }: AccountPageProps) {
   await connection();
   const now = new Date();
   const [{ billing, checkout, minutes }, subscriptionAuthority] =
-    await Promise.all([searchParams, subscriptionPageAuthority(now)]);
+    await Promise.all([
+      searchParams,
+      subscriptionPageAuthority(now, browserApplicationPath("/account")),
+    ]);
   const checkoutResult =
     checkout === "success" || checkout === "cancelled" ? checkout : null;
   const minutePackResult =

@@ -165,6 +165,28 @@ production deployment or provider operation occurred.
 
 ### Hermetic browser certification
 
+Migration changes require `pnpm db:verify` before a PR or merge. This
+browser-free gate applies the full migration chain to PostgreSQL 16 and runs
+the real GitHub lifecycle, minute-pack, and Stripe reconciliation assertions
+with skipping disabled. It shares the
+disposable database lifecycle with the browser command below. Docker is the
+default; an explicitly disposable PostgreSQL server can instead be used:
+
+```bash
+E2E_POSTGRES_URL=postgresql://localhost/postgres E2E_POSTGRES_DISPOSABLE=1 pnpm db:verify
+```
+
+The supplied role needs `CREATEDB`. Each run creates a uniquely named child
+database and drops only that child on success or failure; it never migrates
+or drops the supplied database. Never use a production server. Local
+`pnpm db:migrate` warns when `POSTGRES_URL` is missing; release migration gates
+must use `pnpm db:migrate --strict` to fail instead.
+
+`pnpm db:check` also runs with no database: it validates migration metadata
+and asks Drizzle to generate against an isolated temporary copy. Any new
+migration is schema drift and fails the gate; temporary output is removed
+on success or failure. This gate is included in `pnpm check`.
+
 Run the explicit local PostgreSQL browser certification with:
 
 ```bash
@@ -173,7 +195,7 @@ pnpm test:e2e:hermetic
 
 It starts and removes one uniquely named `postgres:16-alpine` container unless
 `E2E_POSTGRES_URL` and the exact opt-in `E2E_POSTGRES_DISPOSABLE=1` are both
-provided. The command seeds fixed non-personal identities, uses signed Auth.js
+provided (using an owned child database as described above). The command seeds fixed non-personal identities, uses signed Auth.js
 cookies, and selects a server-only deterministic executor only when both
 hermetic E2E flags are set outside production. It exercises application APIs,
 durable storage, accounting, reconciliation, SSE, and cancellation without

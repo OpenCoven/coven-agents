@@ -1,4 +1,5 @@
 import { SessionProvider } from "next-auth/react";
+import { SessionRecovery } from "@/components/auth/session-recovery";
 
 /**
  * Session context for the console.
@@ -20,6 +21,7 @@ export default function AgentsLayout({
     <SessionProvider
       basePath={`${process.env.NEXT_PUBLIC_BASE_PATH ?? ""}/api/auth`}
     >
+      <SessionRecovery />
       {children}
     </SessionProvider>
   );

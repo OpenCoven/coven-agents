@@ -3,6 +3,9 @@ import "server-only";
 import {
   createSkillInputSchema,
   createTeamInputSchema,
+  GITHUB_NODE_ID_MAX_LENGTH,
+  GITHUB_NODE_ID_MIN_LENGTH,
+  GITHUB_NODE_ID_PATTERN,
   type GitHubOperationKind,
   type GitHubOperationStatus,
   githubOperationKindSchema,
@@ -1282,8 +1285,7 @@ function validateConnectionInput(input: {
     input.userProjectIds.length > 100 ||
     input.userProjectIds.some(
       (projectId) =>
-        typeof projectId !== "string" ||
-        !/^[A-Za-z0-9_=-]{1,256}$/u.test(projectId)
+        typeof projectId !== "string" || !GITHUB_NODE_ID_PATTERN.test(projectId)
     ) ||
     new Set(input.userProjectIds).size !== input.userProjectIds.length ||
     (input.userProjectManagementCurrent &&
@@ -1318,7 +1320,7 @@ function validateConnectionInput(input: {
     !input.repositoryName ||
     input.repositoryName.length > 100 ||
     !input.repositoryNodeId ||
-    input.repositoryNodeId.length > 256
+    input.repositoryNodeId.length > GITHUB_NODE_ID_MAX_LENGTH
   ) {
     throw new Error("GitHub connection metadata is invalid.");
   }
@@ -1452,7 +1454,8 @@ function validateReceipt(input: {
   }
   if (
     input.resultNodeId !== null &&
-    (input.resultNodeId.trim().length < 1 || input.resultNodeId.length > 256)
+    (input.resultNodeId.trim().length < GITHUB_NODE_ID_MIN_LENGTH ||
+      input.resultNodeId.length > GITHUB_NODE_ID_MAX_LENGTH)
   ) {
     throw new Error("Result node id is invalid.");
   }
