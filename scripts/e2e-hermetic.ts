@@ -299,6 +299,7 @@ export function hermeticEnvironment(
     NEXTAUTH_URL: origin,
     NODE_ENV: "development",
     OPERATOR_DIAGNOSTIC_TOKEN: "test-hermetic-diagnostic",
+    PLAYWRIGHT: "1",
     PORT: String(port),
     POSTGRES_URL: url,
     REDIS_URL: "",
@@ -391,6 +392,10 @@ export async function runHermeticE2E(
       // minimizes the unavoidable release-to-bind race for a dynamically chosen port.
       const port = await allocateHermeticPort(environment);
       const testEnvironment = hermeticEnvironment(url, environment, port);
+      await playwright(
+        "tests/e2e/chat-title-hermetic.test.ts",
+        testEnvironment
+      );
       await playwright("tests/e2e/chat.test.ts", testEnvironment);
       await playwright(
         "tests/e2e/subscriber-hermetic.test.ts",

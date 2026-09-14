@@ -75,6 +75,7 @@ test("hermetic runner environment explicitly blanks external configuration", asy
   });
   assert.equal(environment.COVEN_HERMETIC_RUNNER, "1");
   assert.equal(environment.E2E_HERMETIC_RUNNER, "1");
+  assert.equal(environment.PLAYWRIGHT, "1");
   assert.equal(environment.PORT, "3100");
   assert.equal(environment.NODE_ENV, "development");
   assert.equal(environment.DAYTONA_API_KEY, "");

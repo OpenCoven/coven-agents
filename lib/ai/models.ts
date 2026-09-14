@@ -66,6 +66,14 @@ export const chatModels: ChatModel[] = [
 export async function getCapabilities(): Promise<
   Record<string, ModelCapabilities>
 > {
+  if (isTestEnvironment) {
+    return Object.fromEntries(
+      chatModels.map(({ id }) => [
+        id,
+        { reasoning: false, tools: false, vision: false },
+      ])
+    );
+  }
   const results = await Promise.all(
     chatModels.map(async (model) => {
       try {
@@ -227,3 +235,5 @@ export async function getModelAvailability(
     return "unknown";
   }
 }
+
+import { isTestEnvironment } from "../constants";

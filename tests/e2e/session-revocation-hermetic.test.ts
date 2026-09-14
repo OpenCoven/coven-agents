@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Page, type Request, test } from "@playwright/test";
 import postgres from "postgres";
 import {
   HERMETIC_USERS,
@@ -22,6 +22,10 @@ function database() {
   return postgres(url, { max: 1 });
 }
 
+function isAuthJsSessionRead(request: Request): boolean {
+  return request.headers()["content-type"] === "application/json";
+}
+
 async function controlSessionReads(page: Page) {
   const network = {
     authJsFailures: 0,
@@ -29,8 +33,7 @@ async function controlSessionReads(page: Page) {
     successfulReadsRemaining: Number.POSITIVE_INFINITY,
   };
   await page.route("**/api/auth/session", async (route) => {
-    const authJsRead =
-      route.request().headers()["content-type"] === "application/json";
+    const authJsRead = isAuthJsSessionRead(route.request());
     const unavailable = () =>
       network.successfulReadsRemaining <= 0 ||
       (network.blockAuthJsReads && authJsRead);
@@ -262,7 +265,12 @@ test.describe("hermetic session recovery", () => {
       if (request.isNavigationRequest()) {
         navigating = true;
       }
-      if (!navigating && request.url().endsWith("/api/auth/session")) {
+      // Auth.js also reads this endpoint independently of the recovery flow.
+      if (
+        !navigating &&
+        request.url().endsWith("/api/auth/session") &&
+        !isAuthJsSessionRead(request)
+      ) {
         recoveryReads += 1;
       }
     });
@@ -289,12 +297,18 @@ test.describe("hermetic session recovery", () => {
       .addCookies(await sessionCookies("subscriber", account));
     await page.goto("/account");
     await credentialField(page).fill("hermetic-never-saved-token");
-    const sql = database();
-    try {
-      await sql`UPDATE "User" SET "subscribedUntil" = now() - interval '1 day' WHERE id = ${account.id}`;
-    } finally {
-      await sql.end();
-    }
+    await page.route("**/api/credentials", async (route) => {
+      if (route.request().method() === "POST") {
+        // Expire after the mounted form submits, before the real API admits it.
+        const sql = database();
+        try {
+          await sql`UPDATE "User" SET "subscribedUntil" = now() - interval '1 day' WHERE id = ${account.id}`;
+        } finally {
+          await sql.end();
+        }
+      }
+      await route.fallback();
+    });
     const refusal = page.waitForResponse(
       (response) =>
         response.url().endsWith("/api/credentials") &&
