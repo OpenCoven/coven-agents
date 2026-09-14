@@ -26,7 +26,7 @@ import { toast } from "@/components/chat/toast";
 import type { VisibilityType } from "@/components/chat/visibility-selector";
 import { useAutoResume } from "@/hooks/use-auto-resume";
 import { DEFAULT_CHAT_MODEL } from "@/lib/ai/models";
-import { createChatTitleReconciler } from "@/lib/chat-title-reconciliation";
+import { createChatTitleReconciliationManager } from "@/lib/chat-title-reconciliation";
 import type { Vote } from "@/lib/db/schema";
 import { ChatbotError } from "@/lib/errors";
 import type { ChatMessage } from "@/lib/types";
@@ -78,11 +78,10 @@ export function ActiveChatProvider({ children }: { children: ReactNode }) {
   const chatId = chatIdFromUrl ?? newChatIdRef.current;
 
   const titleReconcilerRef = useRef<ReturnType<
-    typeof createChatTitleReconciler
+    typeof createChatTitleReconciliationManager
   > | null>(null);
   useEffect(() => {
-    const reconciler = createChatTitleReconciler({
-      chatId,
+    const reconciler = createChatTitleReconciliationManager({
       revalidateHistory: () =>
         mutate<ChatHistory[]>(unstable_serialize(getChatHistoryPaginationKey)),
     });
@@ -91,7 +90,7 @@ export function ActiveChatProvider({ children }: { children: ReactNode }) {
       reconciler.dispose();
       titleReconcilerRef.current = null;
     };
-  }, [chatId, mutate]);
+  }, [mutate]);
 
   const [currentModelId, setCurrentModelId] = useState(DEFAULT_CHAT_MODEL);
   const currentModelIdRef = useRef(currentModelId);
@@ -220,7 +219,16 @@ export function ActiveChatProvider({ children }: { children: ReactNode }) {
     }
     if (chatData?.messages) {
       loadedChatIds.current.add(chatId);
-      setMessages(chatData.messages);
+      const savedMessages: ChatMessage[] = chatData.messages;
+      // A delayed initial fetch must not erase messages sent while it loaded.
+      setMessages((currentMessages) => [
+        ...new Map(
+          [...savedMessages, ...currentMessages].map((message) => [
+            message.id,
+            message,
+          ])
+        ).values(),
+      ]);
     }
   }, [chatId, chatData?.messages, setMessages]);
 

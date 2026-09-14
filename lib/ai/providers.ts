@@ -1,15 +1,16 @@
 import { customProvider, gateway } from "ai";
 import { isTestEnvironment } from "../constants";
-import { titleModel } from "./models";
+import { chatModels, titleModel } from "./models";
 
 export const myProvider = isTestEnvironment
   ? (() => {
       const {
         chatModel,
         titleModel: mockTitleModel,
-      } = require("./models.mock");
+      }: typeof import("./models.mock") = require("./models.mock");
       return customProvider({
         languageModels: {
+          ...Object.fromEntries(chatModels.map(({ id }) => [id, chatModel])),
           "chat-model": chatModel,
           "title-model": mockTitleModel,
         },

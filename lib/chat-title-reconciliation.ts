@@ -8,15 +8,18 @@ const MAX_RETRIES = 9;
 
 export function createChatTitleReconciler({
   chatId,
+  onComplete,
   revalidateHistory,
 }: {
   chatId: string;
+  onComplete?: () => void;
   revalidateHistory: () => Promise<TitleHistory | undefined>;
 }) {
   let pending = false;
   let pendingMessageId: string | undefined;
   let started = false;
   let disposed = false;
+  let completed = false;
   let attempts = 0;
   let expiresAt = 0;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -26,6 +29,10 @@ export function createChatTitleReconciler({
     pending = false;
     clearTimeout(retryTimer);
     clearTimeout(deadlineTimer);
+    if (!completed) {
+      completed = true;
+      onComplete?.();
+    }
   }
 
   async function reconcile() {
@@ -82,6 +89,49 @@ export function createChatTitleReconciler({
       deadlineTimer = setTimeout(stop, RECONCILIATION_WINDOW_MS);
       // onFinish already refreshes once. Retry only an explicitly pending title.
       retryTimer = setTimeout(reconcile, RETRY_INTERVAL_MS);
+    },
+  };
+}
+
+export function createChatTitleReconciliationManager({
+  revalidateHistory,
+}: {
+  revalidateHistory: () => Promise<TitleHistory | undefined>;
+}) {
+  const reconcilers = new Map<
+    string,
+    ReturnType<typeof createChatTitleReconciler>
+  >();
+  let disposed = false;
+  return {
+    dispose() {
+      disposed = true;
+      for (const reconciler of reconcilers.values()) {
+        reconciler.dispose();
+      }
+      reconcilers.clear();
+    },
+    markPending(title: { chatId: string; messageId: string }) {
+      if (disposed) {
+        return;
+      }
+      let reconciler = reconcilers.get(title.chatId);
+      if (!reconciler) {
+        reconciler = createChatTitleReconciler({
+          chatId: title.chatId,
+          onComplete: () => {
+            reconcilers.delete(title.chatId);
+          },
+          revalidateHistory,
+        });
+        reconcilers.set(title.chatId, reconciler);
+      }
+      reconciler.markPending(title);
+    },
+    responseSettled(messages: readonly { id: string }[]) {
+      for (const reconciler of reconcilers.values()) {
+        reconciler.responseSettled(messages);
+      }
     },
   };
 }

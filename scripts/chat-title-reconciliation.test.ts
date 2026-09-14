@@ -7,7 +7,10 @@ import {
   createUIMessageStreamResponse,
   DefaultChatTransport,
 } from "ai";
-import { createChatTitleReconciler } from "../lib/chat-title-reconciliation";
+import {
+  createChatTitleReconciler,
+  createChatTitleReconciliationManager,
+} from "../lib/chat-title-reconciliation";
 import type { ChatMessage } from "../lib/types";
 
 const chatId = "new-cloud-chat";
@@ -300,7 +303,58 @@ test("a hung history request cannot extend the retry deadline or overlap request
   assert.equal(reads, 1);
 });
 
-test("the cloud route and active-chat UI wire pending titles and disposal without changing legacy title events", () => {
+test("reconciliation releases its owner once, including later disposal", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  let completed = 0;
+  const reconciler = createChatTitleReconciler({
+    chatId,
+    onComplete: () => {
+      completed += 1;
+    },
+    revalidateHistory: () => Promise.resolve(history("Plan a garden")),
+  });
+  reconciler.markPending(pendingTitle);
+  reconciler.responseSettled(finishedMessages);
+  context.mock.timers.tick(1000);
+  await flush();
+  assert.equal(completed, 1);
+  reconciler.dispose();
+  assert.equal(completed, 1);
+});
+
+test("a provider-owned manager retains an earlier chat and correlates each completion", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  let title = "New chat";
+  let reads = 0;
+  const manager = createChatTitleReconciliationManager({
+    revalidateHistory: () => {
+      reads += 1;
+      return Promise.resolve(history(title));
+    },
+  });
+  context.after(() => manager.dispose());
+  manager.markPending(pendingTitle);
+  manager.responseSettled(finishedMessages);
+  manager.markPending({ chatId: "next-chat", messageId: "next-message" });
+  manager.responseSettled([{ id: "unrelated-completion" }]);
+  context.mock.timers.tick(1000);
+  await flush();
+  assert.equal(reads, 1);
+  title = "Plan a garden";
+  context.mock.timers.tick(1000);
+  await flush();
+  assert.equal(reads, 2);
+  context.mock.timers.tick(20_000);
+  await flush();
+  assert.equal(reads, 2);
+  manager.responseSettled([{ id: "next-message" }]);
+  manager.dispose();
+  context.mock.timers.tick(20_000);
+  await flush();
+  assert.equal(reads, 2);
+});
+
+test("the cloud route and provider-lifetime UI wire pending titles without changing legacy title events", () => {
   const route = readFileSync(
     new URL("../app/(chat)/api/chat/route.ts", import.meta.url),
     "utf8"
@@ -314,7 +368,11 @@ test("the cloud route and active-chat UI wire pending titles and disposal withou
     /if \(shouldGenerateTitle && message\) \{[\s\S]*?data: \{ chatId: id, messageId: message.id \},[\s\S]*?transient: true,[\s\S]*?type: "data-chat-title-pending"/u
   );
   assert.match(route, /data: title, type: "data-chat-title"/u);
-  assert.match(ui, /createChatTitleReconciler\(/u);
+  assert.match(ui, /createChatTitleReconciliationManager\(/u);
+  assert.match(
+    ui,
+    /titleReconcilerRef\.current = null;[\s\S]*?\}, \[mutate\]\)/u
+  );
   assert.match(
     ui,
     /revalidateHistory: \(\) =>[\s\S]*?mutate[\s\S]*?unstable_serialize\(getChatHistoryPaginationKey\)/u
