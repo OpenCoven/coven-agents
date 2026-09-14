@@ -371,6 +371,13 @@ export const runReservation = pgTable(
     costUnits: integer("costUnits").notNull(),
     durationSeconds: integer("durationSeconds"),
     expiresAt: timestamp("expiresAt").notNull(),
+    /**
+     * The monthly bucket admission judged this run against. Pack draws are
+     * whatever a period used beyond the bucket in force at the time, so a
+     * later cap change cannot rewrite what earlier periods took from packs.
+     * Null on rows admitted before the cap was recorded.
+     */
+    monthlyCap: integer("monthlyCap"),
     periodDay: date("periodDay").notNull(),
     periodMonth: timestamp("periodMonth").notNull(),
     releasedAt: timestamp("releasedAt"),
@@ -385,6 +392,14 @@ export const runReservation = pgTable(
       .notNull()
       .default("reserved"),
     tenantHash: varchar("tenantHash", { length: 64 }).notNull(),
+    /**
+     * The account whose packs this run may draw on. Packs are bought per
+     * account, so consumption is keyed the same way; `tenantHash` is an HMAC
+     * that changes with the abuse key and only bounds abuse buckets. Null
+     * for demo tenants, which own no account, and on rows admitted before
+     * the account was recorded.
+     */
+    userId: uuid("userId").references(() => user.id, { onDelete: "set null" }),
   },
   (table) => [
     index("RunReservation_tenant_day_state_idx").on(
@@ -397,6 +412,15 @@ export const runReservation = pgTable(
       table.tenantHash,
       table.periodMonth,
       table.state
+    ),
+    index("RunReservation_user_period_state_idx").on(
+      table.userId,
+      table.periodMonth,
+      table.state
+    ),
+    check(
+      "RunReservation_monthlyCap_positive",
+      sql`${table.monthlyCap} is null or ${table.monthlyCap} > 0`
     ),
     index("RunReservation_reserved_expiry_idx")
       .on(table.expiresAt)

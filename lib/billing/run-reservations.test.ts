@@ -75,21 +75,34 @@ class MemoryReservationDatabase
     cap: number;
     periodMonth: Date;
     tenantHash: string;
+    userId: string;
   }): Promise<number> {
-    const perPeriod = new Map<number, number>();
+    // Mirrors the SQL: match by account, or by tenant hash only for rows
+    // that predate the account column; judge each period against the
+    // largest recorded cap, falling back to the caller's cap for legacy rows.
+    const perPeriod = new Map<number, { cap: number | null; units: number }>();
     for (const reservation of this.reservations.values()) {
+      const matches =
+        reservation.userId === input.userId ||
+        (reservation.userId === null &&
+          reservation.tenantHash === input.tenantHash);
       if (
-        reservation.tenantHash === input.tenantHash &&
+        matches &&
         reservation.state === "consumed" &&
         reservation.periodMonth.getTime() < input.periodMonth.getTime()
       ) {
         const key = reservation.periodMonth.getTime();
-        perPeriod.set(key, (perPeriod.get(key) ?? 0) + reservation.costUnits);
+        const period = perPeriod.get(key) ?? { cap: null, units: 0 };
+        period.units += reservation.costUnits;
+        if (reservation.monthlyCap !== null) {
+          period.cap = Math.max(period.cap ?? 0, reservation.monthlyCap);
+        }
+        perPeriod.set(key, period);
       }
     }
     let overflow = 0;
-    for (const units of perPeriod.values()) {
-      overflow += Math.max(0, units - input.cap);
+    for (const period of perPeriod.values()) {
+      overflow += Math.max(0, period.units - (period.cap ?? input.cap));
     }
     return Promise.resolve(overflow);
   }
@@ -427,6 +440,150 @@ test("pack minutes carry over, less what earlier periods drew beyond their bucke
   });
   assert.equal(usage.tenantPackMinutes, 6);
   assert.equal(usage.tenantMonthlyRemaining, 9);
+});
+
+test("admission records the account and the bucket it judged the run against", async () => {
+  const db = new MemoryReservationDatabase();
+  const reserved = await reserveRun(
+    db,
+    reservationInput("recorded", {
+      tenant: PACK_TENANT,
+      tenantDailyCap: 100,
+      tenantMonthlyCap: 42,
+    })
+  );
+  assert.equal(reserved.kind, "reserved");
+  const row = db.reservations.get("recorded");
+  assert.equal(row?.userId, PACK_USER_ID);
+  assert.equal(row?.monthlyCap, 42);
+
+  const demo = await reserveRun(
+    db,
+    reservationInput("demo-recorded", {
+      tenant: "d_6ba7b8109dad11d180b400c04fd430c8",
+      tenantDailyCap: 100,
+      tenantMonthlyCap: 42,
+    })
+  );
+  assert.equal(demo.kind, "reserved");
+  assert.equal(db.reservations.get("demo-recorded")?.userId, null);
+});
+
+test("lowering the bucket later does not destroy pack minutes already paid for", async () => {
+  const db = new MemoryReservationDatabase();
+  const earlier = new Date("2026-07-20T12:00:00.000Z");
+  // July ran 4 against a bucket of 5: nothing came from packs.
+  await consumedRun(db, "july", {
+    costUnits: 4,
+    now: new Date("2026-07-25T12:00:00.000Z"),
+    periodStart: earlier,
+    tenantDailyCap: 100,
+    tenantMonthlyCap: 5,
+  });
+  // The customer then buys a pack, and the bucket is cut to 2.
+  db.packs.set(PACK_USER_ID, 3);
+
+  const usage = await reservationUsage(db, {
+    globalDailyCap: 500,
+    keySecret: SECRET,
+    now: NOW,
+    periodStart: PERIOD_START,
+    tenant: PACK_TENANT,
+    tenantDailyCap: 100,
+    tenantMonthlyCap: 2,
+  });
+  // Judged against today's cap July would owe 2 pack minutes it never drew.
+  assert.equal(usage.tenantPackMinutes, 3);
+  assert.equal(usage.tenantMonthlyRemaining, 5);
+});
+
+test("raising the bucket later does not hand back pack minutes already spent", async () => {
+  const db = new MemoryReservationDatabase();
+  db.packs.set(PACK_USER_ID, 10);
+  const earlier = new Date("2026-07-20T12:00:00.000Z");
+  // July ran 7 against a bucket of 3: four pack minutes were drawn.
+  await consumedRun(db, "july", {
+    costUnits: 7,
+    now: new Date("2026-07-25T12:00:00.000Z"),
+    periodStart: earlier,
+    tenantDailyCap: 100,
+    tenantMonthlyCap: 3,
+  });
+
+  const usage = await reservationUsage(db, {
+    globalDailyCap: 500,
+    keySecret: SECRET,
+    now: NOW,
+    periodStart: PERIOD_START,
+    tenant: PACK_TENANT,
+    tenantDailyCap: 100,
+    tenantMonthlyCap: 20,
+  });
+  assert.equal(usage.tenantPackMinutes, 6);
+});
+
+test("rotating the abuse key does not restore spent pack minutes", async () => {
+  const db = new MemoryReservationDatabase();
+  db.packs.set(PACK_USER_ID, 10);
+  const earlier = new Date("2026-07-20T12:00:00.000Z");
+  await consumedRun(db, "july", {
+    costUnits: 7,
+    keySecret: "the-secret-before-rotation",
+    now: new Date("2026-07-25T12:00:00.000Z"),
+    periodStart: earlier,
+    tenantDailyCap: 100,
+    tenantMonthlyCap: 3,
+  });
+
+  const usage = await reservationUsage(db, {
+    globalDailyCap: 500,
+    keySecret: "the-secret-after-rotation",
+    now: NOW,
+    periodStart: PERIOD_START,
+    tenant: PACK_TENANT,
+    tenantDailyCap: 100,
+    tenantMonthlyCap: 3,
+  });
+  assert.equal(usage.tenantPackMinutes, 6);
+});
+
+test("rows admitted before the ledger columns still count, by tenant hash and today's cap", async () => {
+  const db = new MemoryReservationDatabase();
+  db.packs.set(PACK_USER_ID, 10);
+  const earlier = new Date("2026-07-20T12:00:00.000Z");
+  await consumedRun(db, "legacy", {
+    costUnits: 7,
+    now: new Date("2026-07-25T12:00:00.000Z"),
+    periodStart: earlier,
+    tenantDailyCap: 100,
+    tenantMonthlyCap: 3,
+  });
+  const legacy = db.reservations.get("legacy");
+  assert.ok(legacy);
+  db.reservations.set("legacy", { ...legacy, monthlyCap: null, userId: null });
+
+  const usage = await reservationUsage(db, {
+    globalDailyCap: 500,
+    keySecret: SECRET,
+    now: NOW,
+    periodStart: PERIOD_START,
+    tenant: PACK_TENANT,
+    tenantDailyCap: 100,
+    tenantMonthlyCap: 3,
+  });
+  assert.equal(usage.tenantPackMinutes, 6);
+
+  // Such rows are the one place a rotation still loses history, by design.
+  const rotated = await reservationUsage(db, {
+    globalDailyCap: 500,
+    keySecret: "the-secret-after-rotation",
+    now: NOW,
+    periodStart: PERIOD_START,
+    tenant: PACK_TENANT,
+    tenantDailyCap: 100,
+    tenantMonthlyCap: 3,
+  });
+  assert.equal(rotated.tenantPackMinutes, 10);
 });
 
 test("a demo tenant never draws on packs", async () => {
@@ -1158,6 +1315,14 @@ test("RunReservation has the required key, indexes, and integrity checks", () =>
   assert.ok(checkNames.includes("RunReservation_state_valid"));
   assert.ok(checkNames.includes("RunReservation_state_timestamps_valid"));
   assert.ok(checkNames.includes("RunReservation_expiry_valid"));
+  assert.ok(checkNames.includes("RunReservation_monthlyCap_positive"));
+  assert.ok(
+    indexColumns.some(
+      (columns) =>
+        JSON.stringify(columns) ===
+        JSON.stringify(["userId", "periodMonth", "state"])
+    )
+  );
 });
 
 test("RunUsage indexes support global and tenant time-window scans", () => {

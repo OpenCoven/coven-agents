@@ -309,6 +309,13 @@
       "when": 1789372049754,
       "tag": "0043_github_authority_fail_closed",
       "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1789388683220,
+      "tag": "0044_reservation_pack_ledger",
+      "breakpoints": true
     }
   ]
 }
