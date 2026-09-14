@@ -7,6 +7,7 @@ import {
   attemptLeaseMsFromEnvironment,
   cancelRunnerRun,
   type ReconcileAndDispatchDependencies,
+  type RunnerAttemptLogSnapshot,
   reconcileAndDispatch,
 } from "./attempt-reconcile";
 import { daytonaProbeSessionName, daytonaSandboxLabels } from "./daytona/names";
@@ -1673,6 +1674,10 @@ test("a terminal command with an unsettled log tail remains retryable", async ()
     leaseToken: "adopted-lease",
     runId: attached.id,
   } as RunnerDispatchAuthority;
+  const afterEvent = {
+    ...authority,
+    expectedVersion: authority.expectedVersion + 1,
+  } as RunnerDispatchAuthority;
   const result = await reconcileAndDispatch({
     clock: () => new Date("2026-08-28T15:00:00.000Z"),
     openAttemptRedaction: async () => {
@@ -1728,7 +1733,7 @@ test("a terminal command with an unsettled log tail remains retryable", async ()
       appendDispatchEventBatch: async () => {
         calls.push("append-batch");
         return {
-          authority,
+          authority: afterEvent,
           events: [],
           kind: "appended" as const,
           run: {} as never,
@@ -1750,6 +1755,10 @@ test("a terminal command with an unsettled log tail remains retryable", async ()
           },
         };
       },
+      renewDispatchLease: async () => {
+        calls.push("renew-lease");
+        return { kind: "updated" as const, value: attached };
+      },
       requeueExpiredDispatch: async () => ({ kind: "not_live" as const }),
       scanExpiredDispatchLeases: async () => {
         calls.push("scan");
@@ -1766,101 +1775,370 @@ test("a terminal command with an unsettled log tail remains retryable", async ()
     "open-redaction",
     "snapshot",
     "append-batch",
+    "renew-lease",
   ]);
   assert.equal(result.deferred, 1);
   assert.equal(result.terminalized, 0);
 });
 
-test("the attempt lease granted on adoption follows the configured cadence", async () => {
-  const attached = run({
-    daytonaCommandId: "command",
-    daytonaSessionId: "session",
-    dispatchState: "running",
-    startedAt: new Date("2026-08-28T14:58:00.000Z"),
-    status: "running",
-  });
-  const authority = {
-    attemptId,
-    expectedVersion: attached.version + 1,
-    leaseToken: "adopted-lease",
-    runId: attached.id,
-  } as RunnerDispatchAuthority;
-  const leases: Date[] = [];
-  const dependencies = (attemptLeaseMs?: number) =>
-    ({
-      ...(attemptLeaseMs === undefined ? {} : { attemptLeaseMs }),
-      clock: () => new Date("2026-08-28T15:00:00.000Z"),
-      openAttemptRedaction: async () => "redaction-secret",
-      operator,
-      provider: {
-        resolveExecutionContext: async () => ({}) as never,
-        snapshot: async () => ({
-          cursor: 0,
-          events: [],
-          exitCode: null,
-          logsSettled: false,
-          status: "running" as const,
-          summary: {
-            fileOperations: [],
-            output: "",
-            premiumRequests: null,
-            sessionId: null,
-            status: "completed" as const,
-            toolCalls: [],
-          },
-        }),
-        stop: async () => ({ kind: "stopped" as const }),
+test("slow attached observations keep active fencing long enough to append, then rearm the configured cadence", async () => {
+  const runningSnapshot = (
+    cursor: number,
+    output: string
+  ): RunnerAttemptLogSnapshot => ({
+    cursor,
+    events: [
+      {
+        at: `2026-08-28T15:00:0${cursor}.000Z`,
+        kind: "message",
+        model: null,
+        text: output,
       },
-      randomToken: () => "adopted-lease",
-      store: {
-        adoptExpiredDaytonaProcess: async (
-          _operator: unknown,
-          input: { leaseExpiresAt: Date }
-        ) => {
-          leases.push(input.leaseExpiresAt);
-          return {
-            authority,
-            kind: "adopted" as const,
-            run: {
-              ...attached,
-              dispatchLeaseToken: authority.leaseToken,
-              version: authority.expectedVersion,
-            },
-          };
-        },
-        appendDispatchEventBatch: async () => ({
-          authority,
+    ],
+    exitCode: null,
+    logsSettled: false,
+    status: "running",
+    summary: {
+      fileOperations: [],
+      output,
+      premiumRequests: null,
+      sessionId: null,
+      status: "completed",
+      toolCalls: [],
+    },
+  });
+
+  const createAttachedObservationHarness = (
+    snapshots: readonly RunnerAttemptLogSnapshot[]
+  ) => {
+    let now = Date.parse("2026-08-28T15:00:00.000Z");
+    let current = run({
+      daytonaCommandId: "command",
+      daytonaLogCursor: 0,
+      daytonaSessionId: "session",
+      dispatchState: "running",
+      logCursor: 0,
+      startedAt: new Date("2026-08-28T14:58:00.000Z"),
+      status: "running",
+    });
+    const adoptedLeaseExpiries: string[] = [];
+    const renewedLeaseExpiries: string[] = [];
+    const adoptedAuthorities: RunnerDispatchAuthority[] = [];
+    const finalizations: Array<{
+      error: { code: string; retryable: boolean } | null;
+      status: string;
+    }> = [];
+    let staleWriteRejects = 0;
+    let snapshotIndex = 0;
+
+    const currentAuthority = (): RunnerDispatchAuthority => {
+      assert.ok(current.dispatchLeaseToken, "dispatch lease must stay active");
+      return {
+        expectedVersion: current.version,
+        leaseToken: current.dispatchLeaseToken,
+        runId: current.id,
+        ...(current.daytonaAttemptId
+          ? { attemptId: current.daytonaAttemptId }
+          : {}),
+      } as RunnerDispatchAuthority;
+    };
+
+    const leaseActive = () =>
+      current.dispatchLeaseExpiresAt !== null &&
+      current.dispatchLeaseExpiresAt.getTime() > now;
+
+    const sameAuthority = (authority: RunnerDispatchAuthority) =>
+      authority.expectedVersion === current.version &&
+      authority.leaseToken === current.dispatchLeaseToken &&
+      authority.runId === current.id;
+
+    const rejectStaleWrite = () => {
+      staleWriteRejects += 1;
+      return { kind: "not_live" as const };
+    };
+
+    const store = {
+      adoptExpiredDaytonaProcess: async (
+        _operator: unknown,
+        input: {
+          expectedDispatchState: "dispatching" | "running";
+          leaseExpiresAt: Date;
+          newLeaseToken: string;
+          oldLeaseToken: string;
+          runId: string;
+        }
+      ) => {
+        if (
+          current.id !== input.runId ||
+          current.dispatchState !== input.expectedDispatchState ||
+          current.dispatchLeaseToken !== input.oldLeaseToken
+        ) {
+          return { kind: "lease_lost" as const };
+        }
+        if (
+          current.dispatchLeaseExpiresAt === null ||
+          current.dispatchLeaseExpiresAt.getTime() > now
+        ) {
+          return { kind: "not_expired" as const };
+        }
+        current = {
+          ...current,
+          dispatchLeaseExpiresAt: input.leaseExpiresAt,
+          dispatchLeaseToken: input.newLeaseToken,
+          version: current.version + 1,
+        };
+        const authority = currentAuthority();
+        adoptedAuthorities.push(authority);
+        adoptedLeaseExpiries.push(input.leaseExpiresAt.toISOString());
+        return { authority, kind: "adopted" as const, run: current };
+      },
+      appendDispatchEventBatch: async (
+        _operator: unknown,
+        authority: RunnerDispatchAuthority,
+        batch: {
+          daytonaLogCursor: number;
+          events: readonly unknown[];
+          snapshot?: { output: string };
+        }
+      ) => {
+        if (
+          !sameAuthority(authority) ||
+          !leaseActive() ||
+          current.dispatchState !== "running"
+        ) {
+          return rejectStaleWrite();
+        }
+        current = {
+          ...current,
+          daytonaLogCursor: batch.daytonaLogCursor,
+          logCursor: current.logCursor + batch.events.length,
+          output: batch.snapshot?.output ?? current.output,
+          version: current.version + 1,
+        };
+        return {
+          authority: currentAuthority(),
           events: [],
           kind: "appended" as const,
           run: {} as never,
-        }),
-        readAttemptRedaction: async () => ({
-          kind: "found" as const,
-          value: {
-            aadVersion: 1,
-            attemptId,
-            ciphertext: "ciphertext",
-            createdAt: new Date(),
-            iv: "iv",
-            kekVersion: "v1",
-            runId: attached.id,
-            wrappedKey: "wrapped",
-          },
-        }),
-        requeueExpiredDispatch: async () => ({ kind: "not_live" as const }),
-        scanExpiredDispatchLeases: async () => [attached],
-      } as never,
-    }) as ReconcileAndDispatchDependencies;
+        };
+      },
+      cleanupTerminalLease: async (
+        _operator: unknown,
+        authority: RunnerDispatchAuthority
+      ) => {
+        if (!sameAuthority(authority) || !leaseActive()) {
+          return { kind: "not_live" as const };
+        }
+        current = {
+          ...current,
+          dispatchLeaseExpiresAt: null,
+          dispatchLeaseToken: null,
+          version: current.version + 1,
+        };
+        return { kind: "updated" as const, value: current };
+      },
+      deleteAttemptRedaction: async () => ({ kind: "deleted" as const }),
+      finalizeRun: async (
+        _operator: unknown,
+        input: {
+          commandEvidence: [];
+          completedAt: Date;
+          error: { code: string; retryable: boolean } | null;
+          fileEvidence: [];
+          leaseToken: string;
+          output: string;
+          runId: string;
+          status: "cancelled" | "completed" | "failed";
+        }
+      ) => {
+        if (
+          input.runId !== current.id ||
+          input.leaseToken !== current.dispatchLeaseToken ||
+          !leaseActive()
+        ) {
+          return { kind: "not_live" as const };
+        }
+        current = {
+          ...current,
+          commandEvidence: input.commandEvidence,
+          completedAt: input.completedAt,
+          dispatchState: "terminal",
+          error: input.error,
+          fileEvidence: input.fileEvidence,
+          output: input.output,
+          status: input.status,
+          version: current.version + 1,
+        };
+        finalizations.push({
+          error: input.error,
+          status: input.status,
+        });
+        return {
+          kind: "finalized" as const,
+          prunedRunIds: [],
+          run: current,
+        };
+      },
+      readAttemptRedaction: async () => ({
+        kind: "found" as const,
+        value: {
+          aadVersion: 1,
+          attemptId,
+          ciphertext: "ciphertext",
+          createdAt: new Date(),
+          iv: "iv",
+          kekVersion: "v1",
+          runId: current.id,
+          wrappedKey: "wrapped",
+        },
+      }),
+      releaseTerminalDaytonaAttempt: async (
+        _operator: unknown,
+        authority: RunnerDispatchAuthority,
+        input: { attemptId: string }
+      ) => {
+        if (
+          !sameAuthority(authority) ||
+          !leaseActive() ||
+          current.daytonaAttemptId !== input.attemptId
+        ) {
+          return { kind: "not_live" as const };
+        }
+        current = {
+          ...current,
+          daytonaAttemptId: null,
+          daytonaCommandId: null,
+          daytonaSessionId: null,
+          version: current.version + 1,
+        };
+        return { authority: currentAuthority(), kind: "released" as const };
+      },
+      renewDispatchLease: async (
+        _operator: unknown,
+        input: {
+          expectedVersion: number;
+          leaseExpiresAt: Date;
+          leaseToken: string;
+          runId: string;
+        }
+      ) => {
+        if (
+          input.runId !== current.id ||
+          input.expectedVersion !== current.version ||
+          input.leaseToken !== current.dispatchLeaseToken ||
+          !leaseActive()
+        ) {
+          return { kind: "lease_lost" as const };
+        }
+        current = {
+          ...current,
+          dispatchLeaseExpiresAt: input.leaseExpiresAt,
+          version: current.version + 1,
+        };
+        renewedLeaseExpiries.push(input.leaseExpiresAt.toISOString());
+        return { kind: "updated" as const, value: current };
+      },
+      requeueExpiredDispatch: async () => ({ kind: "not_live" as const }),
+      scanExpiredDispatchLeases: async () =>
+        current.dispatchLeaseExpiresAt !== null &&
+        current.dispatchLeaseExpiresAt.getTime() <= now &&
+        current.dispatchState === "running" &&
+        current.dispatchLeaseToken !== null
+          ? [current]
+          : [],
+    };
 
-  await reconcileAndDispatch(dependencies());
-  await reconcileAndDispatch(dependencies(15_000));
+    return {
+      adoptedAuthorities,
+      adoptedLeaseExpiries,
+      clock: () => new Date(now),
+      current: () => current,
+      finalizations,
+      provider: {
+        resolveExecutionContext: async () => ({}) as never,
+        snapshot: async () => {
+          const snapshot = snapshots[snapshotIndex];
+          assert.ok(snapshot, "unexpected extra snapshot");
+          snapshotIndex += 1;
+          now += 6000;
+          return snapshot;
+        },
+        stop: async () => ({ kind: "stopped" as const }),
+      },
+      renewedLeaseExpiries,
+      setNow: (value: string) => {
+        now = Date.parse(value);
+      },
+      staleWriteRejects: () => staleWriteRejects,
+      store,
+    };
+  };
 
+  const harness = createAttachedObservationHarness([
+    runningSnapshot(1, "first event"),
+    runningSnapshot(2, "second event"),
+    runningSnapshot(3, "third event"),
+  ]);
+  const dependencies = {
+    attemptLeaseMs: 5000,
+    clock: harness.clock,
+    openAttemptRedaction: async () => "redaction-secret",
+    operator,
+    provider: harness.provider,
+    randomToken: () => "adopted-lease",
+    store: harness.store,
+  } as ReconcileAndDispatchDependencies;
+
+  const first = await reconcileAndDispatch(dependencies);
+  assert.equal(first.deferred, 1);
+  assert.equal(first.logEvents, 1);
+  assert.equal(first.failures, 0);
+  assert.deepEqual(harness.adoptedLeaseExpiries, ["2026-08-28T15:01:00.000Z"]);
+  assert.deepEqual(harness.renewedLeaseExpiries, ["2026-08-28T15:00:11.000Z"]);
+
+  const [staleAuthority] = harness.adoptedAuthorities;
+  assert.ok(staleAuthority);
   assert.deepEqual(
-    leases.map((lease) => lease.toISOString()),
-    ["2026-08-28T15:01:00.000Z", "2026-08-28T15:00:15.000Z"]
+    await harness.store.appendDispatchEventBatch(operator, staleAuthority, {
+      daytonaLogCursor: 4,
+      events: [],
+      snapshot: { output: "stale write" },
+    }),
+    { kind: "not_live" }
   );
-  await assert.rejects(reconcileAndDispatch(dependencies(1000)));
-  await assert.rejects(reconcileAndDispatch(dependencies(10 * 60_000)));
+  assert.equal(harness.staleWriteRejects(), 1);
+
+  harness.setNow("2026-08-28T15:00:12.000Z");
+  const second = await reconcileAndDispatch(dependencies);
+  harness.setNow("2026-08-28T15:00:24.000Z");
+  const third = await reconcileAndDispatch(dependencies);
+
+  assert.equal(second.deferred, 1);
+  assert.equal(second.logEvents, 1);
+  assert.equal(third.deferred, 1);
+  assert.equal(third.logEvents, 1);
+  assert.deepEqual(harness.adoptedLeaseExpiries, [
+    "2026-08-28T15:01:00.000Z",
+    "2026-08-28T15:01:12.000Z",
+    "2026-08-28T15:01:24.000Z",
+  ]);
+  assert.deepEqual(harness.renewedLeaseExpiries, [
+    "2026-08-28T15:00:11.000Z",
+    "2026-08-28T15:00:23.000Z",
+    "2026-08-28T15:00:35.000Z",
+  ]);
+  assert.equal(harness.current().daytonaLogCursor, 3);
+  assert.equal(harness.current().logCursor, 3);
+  assert.equal(harness.current().output, "third event");
+  assert.equal(harness.current().status, "running");
+  assert.equal(harness.finalizations.length, 0);
+
+  await assert.rejects(
+    reconcileAndDispatch({ ...dependencies, attemptLeaseMs: 1000 })
+  );
+  await assert.rejects(
+    reconcileAndDispatch({ ...dependencies, attemptLeaseMs: 10 * 60_000 })
+  );
 });
 
 test("the attempt lease cadence is read from the environment within bounds", () => {
@@ -1870,6 +2148,256 @@ test("the attempt lease cadence is read from the environment within bounds", () 
   assert.equal(attemptLeaseMsFromEnvironment(env("15000")), 15_000);
   assert.throws(() => attemptLeaseMsFromEnvironment(env("100")));
   assert.throws(() => attemptLeaseMsFromEnvironment(env("soon")));
+});
+
+test("a slow short-cadence observation still appends progress and enforces the execution limit", async () => {
+  let now = Date.parse("2026-08-28T15:00:00.000Z");
+  let current = run({
+    daytonaCommandId: "command",
+    daytonaLogCursor: 0,
+    daytonaSessionId: "session",
+    dispatchState: "running",
+    logCursor: 0,
+    startedAt: new Date("2026-08-28T14:59:55.000Z"),
+    status: "running",
+  });
+  const adoptedLeaseExpiries: string[] = [];
+  const finalizedErrors: string[] = [];
+
+  const authority = (): RunnerDispatchAuthority => {
+    assert.ok(current.dispatchLeaseToken, "dispatch lease must stay active");
+    return {
+      expectedVersion: current.version,
+      leaseToken: current.dispatchLeaseToken,
+      runId: current.id,
+      ...(current.daytonaAttemptId
+        ? { attemptId: current.daytonaAttemptId }
+        : {}),
+    } as RunnerDispatchAuthority;
+  };
+
+  const leaseActive = () =>
+    current.dispatchLeaseExpiresAt !== null &&
+    current.dispatchLeaseExpiresAt.getTime() > now;
+
+  const sameAuthority = (value: RunnerDispatchAuthority) =>
+    value.expectedVersion === current.version &&
+    value.leaseToken === current.dispatchLeaseToken &&
+    value.runId === current.id;
+
+  const result = await reconcileAndDispatch({
+    attemptLeaseMs: 5000,
+    clock: () => new Date(now),
+    maxRunDurationMs: 5000,
+    openAttemptRedaction: async () => "redaction-secret",
+    operator,
+    provider: {
+      resolveExecutionContext: async () => ({}) as never,
+      snapshot: async () => {
+        now += 6000;
+        return {
+          cursor: 1,
+          events: [
+            {
+              at: "2026-08-28T15:00:06.000Z",
+              kind: "message",
+              model: null,
+              text: "still running",
+            },
+          ],
+          exitCode: null,
+          logsSettled: false,
+          status: "running" as const,
+          summary: {
+            fileOperations: [],
+            output: "still running",
+            premiumRequests: null,
+            sessionId: null,
+            status: "failed" as const,
+            toolCalls: [],
+          },
+        };
+      },
+      stop: async () => ({ kind: "stopped" as const }),
+    },
+    randomToken: () => "adopted-lease",
+    releaseCredentialResources: async () => Promise.resolve(),
+    store: {
+      adoptExpiredDaytonaProcess: async (
+        _operator: unknown,
+        input: {
+          expectedDispatchState: "dispatching" | "running";
+          leaseExpiresAt: Date;
+          newLeaseToken: string;
+          oldLeaseToken: string;
+          runId: string;
+        }
+      ) => {
+        if (
+          current.id !== input.runId ||
+          current.dispatchState !== input.expectedDispatchState ||
+          current.dispatchLeaseToken !== input.oldLeaseToken ||
+          current.dispatchLeaseExpiresAt === null ||
+          current.dispatchLeaseExpiresAt.getTime() > now
+        ) {
+          return { kind: "not_live" as const };
+        }
+        current = {
+          ...current,
+          dispatchLeaseExpiresAt: input.leaseExpiresAt,
+          dispatchLeaseToken: input.newLeaseToken,
+          version: current.version + 1,
+        };
+        adoptedLeaseExpiries.push(input.leaseExpiresAt.toISOString());
+        return {
+          authority: authority(),
+          kind: "adopted" as const,
+          run: current,
+        };
+      },
+      appendDispatchEventBatch: async (
+        _operator: unknown,
+        value: RunnerDispatchAuthority,
+        batch: {
+          daytonaLogCursor: number;
+          events: readonly unknown[];
+          snapshot?: { output: string };
+        }
+      ) => {
+        if (!sameAuthority(value) || !leaseActive()) {
+          return { kind: "not_live" as const };
+        }
+        current = {
+          ...current,
+          daytonaLogCursor: batch.daytonaLogCursor,
+          logCursor: current.logCursor + batch.events.length,
+          output: batch.snapshot?.output ?? current.output,
+          version: current.version + 1,
+        };
+        return {
+          authority: authority(),
+          events: [],
+          kind: "appended" as const,
+          run: {} as never,
+        };
+      },
+      cleanupTerminalLease: async (
+        _operator: unknown,
+        value: RunnerDispatchAuthority
+      ) => {
+        if (!sameAuthority(value) || !leaseActive()) {
+          return { kind: "not_live" as const };
+        }
+        current = {
+          ...current,
+          dispatchLeaseExpiresAt: null,
+          dispatchLeaseToken: null,
+          version: current.version + 1,
+        };
+        return { kind: "updated" as const, value: current };
+      },
+      deleteAttemptRedaction: async () => ({ kind: "deleted" as const }),
+      finalizeRun: async (
+        _operator: unknown,
+        input: {
+          completedAt: Date;
+          error: { code: string; retryable: boolean } | null;
+          leaseToken: string;
+          output: string;
+          runId: string;
+          status: "cancelled" | "completed" | "failed";
+        }
+      ) => {
+        if (
+          input.runId !== current.id ||
+          input.leaseToken !== current.dispatchLeaseToken ||
+          !leaseActive()
+        ) {
+          return { kind: "not_live" as const };
+        }
+        current = {
+          ...current,
+          completedAt: input.completedAt,
+          dispatchState: "terminal",
+          error: input.error,
+          output: input.output,
+          status: input.status,
+          version: current.version + 1,
+        };
+        if (input.error) {
+          finalizedErrors.push(input.error.code);
+        }
+        return {
+          kind: "finalized" as const,
+          prunedRunIds: [],
+          run: current,
+        };
+      },
+      readAttemptRedaction: async () => ({
+        kind: "found" as const,
+        value: {
+          aadVersion: 1,
+          attemptId,
+          ciphertext: "ciphertext",
+          createdAt: new Date(),
+          iv: "iv",
+          kekVersion: "v1",
+          runId: current.id,
+          wrappedKey: "wrapped",
+        },
+      }),
+      releaseTerminalDaytonaAttempt: async (
+        _operator: unknown,
+        value: RunnerDispatchAuthority,
+        input: { attemptId: string }
+      ) => {
+        if (
+          !sameAuthority(value) ||
+          !leaseActive() ||
+          current.daytonaAttemptId !== input.attemptId
+        ) {
+          return { kind: "not_live" as const };
+        }
+        current = {
+          ...current,
+          daytonaAttemptId: null,
+          daytonaCommandId: null,
+          daytonaSessionId: null,
+          version: current.version + 1,
+        };
+        return { authority: authority(), kind: "released" as const };
+      },
+      requeueExpiredDispatch: async () => ({ kind: "not_live" as const }),
+      scanExpiredDispatchLeases: async () =>
+        current.dispatchLeaseExpiresAt !== null &&
+        current.dispatchLeaseExpiresAt.getTime() <= now &&
+        current.dispatchLeaseToken !== null
+          ? [current]
+          : [],
+    } as never,
+  });
+
+  assert.deepEqual(adoptedLeaseExpiries, ["2026-08-28T15:01:00.000Z"]);
+  assert.deepEqual(finalizedErrors, ["run_timeout"]);
+  assert.equal(current.daytonaLogCursor, 1);
+  assert.equal(current.logCursor, 1);
+  assert.equal(current.dispatchState, "terminal");
+  assert.equal(current.status, "failed");
+  assert.equal(current.dispatchLeaseToken, null);
+  assert.equal(current.daytonaAttemptId, null);
+  assert.deepEqual(result, {
+    adopted: 1,
+    deferred: 0,
+    dispatched: 0,
+    expiredScanned: 1,
+    failures: 0,
+    logEvents: 1,
+    requeued: 0,
+    sandboxRecovered: 0,
+    terminalCleaned: 0,
+    terminalized: 1,
+    terminalLeaseCleaned: 0,
+  });
 });
 
 test("a terminal command with a persistently unsettled tail releases capacity after the run limit", async () => {

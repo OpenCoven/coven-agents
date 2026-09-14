@@ -48,10 +48,13 @@ const MAX_ATTEMPT_LEASE_MS = 5 * 60_000;
 
 /**
  * How long an attached attempt goes unobserved before the next reconciliation
- * pass snapshots its logs and renews the lease. This is the cadence at which
- * a watching console sees new steps, so it is tunable from the environment
- * (`RUNNER_ATTEMPT_LEASE_MS`) while staying bounded: too short and every pass
- * re-reads every live sandbox; too long and a run looks frozen for a minute.
+ * pass snapshots its logs and rearms the next observation. Active recovery
+ * uses at least the normal dispatch lease for provider calls and fenced
+ * writes, then rearms this cadence after a successful observation. This is the rate
+ * at which a watching console sees new steps, so it is tunable from the
+ * environment (`RUNNER_ATTEMPT_LEASE_MS`) while staying bounded: too short
+ * and every pass re-reads every live sandbox; too long and a run looks frozen
+ * for a minute.
  */
 export function attemptLeaseMsFromEnvironment(
   environment: NodeJS.ProcessEnv = process.env
@@ -148,6 +151,7 @@ type ReconciliationStore = Pick<
   | "requeueAfterDaytonaAttemptCleanup"
   | "requeueExpiredDispatch"
   | "releaseTerminalDaytonaAttempt"
+  | "renewDispatchLease"
   | "deleteAttemptRedaction"
   | "scanExpiredDispatchLeases"
 > &
@@ -182,7 +186,10 @@ export type RunnerReconciliationExecutionResult =
       Readonly<{ execution: "skipped"; reason: "overlap" }>);
 
 export type ReconcileAndDispatchDependencies = Readonly<{
-  /** Lease granted to an attached attempt after each observation. */
+  /**
+   * How soon a successfully observed attached attempt becomes eligible for the
+   * next log-pull pass.
+   */
   attemptLeaseMs?: number;
   batchSize?: number;
   claimTeamRuns?: () => Promise<
@@ -283,20 +290,23 @@ function nextLease(
   randomToken: () => string,
   leaseMs: number = DISPATCH_LEASE_MS
 ): Readonly<{ leaseExpiresAt: Date; leaseToken: string }> {
-  const now = clock();
+  const now = leaseExpiry(clock, 0);
   const leaseToken = randomToken();
-  if (
-    Number.isNaN(now.valueOf()) ||
-    !leaseToken ||
-    leaseToken.length > 80 ||
-    /\p{Cc}/u.test(leaseToken)
-  ) {
+  if (!leaseToken || leaseToken.length > 80 || /\p{Cc}/u.test(leaseToken)) {
     throw new Error("Reconciliation lease dependencies are invalid.");
   }
   return {
     leaseExpiresAt: new Date(now.getTime() + leaseMs),
     leaseToken,
   };
+}
+
+function leaseExpiry(clock: () => Date, leaseMs: number): Date {
+  const now = clock();
+  if (Number.isNaN(now.valueOf())) {
+    throw new Error("Reconciliation lease dependencies are invalid.");
+  }
+  return new Date(now.getTime() + leaseMs);
 }
 
 function secureToken(): string {
@@ -579,6 +589,7 @@ async function reconcileAttachedProcess(
   run: RunnerRunRecord,
   dependencies: ReconcileAndDispatchDependencies,
   lease: Readonly<{ leaseExpiresAt: Date; leaseToken: string }>,
+  observationLeaseMs: number,
   clock: () => Date,
   maxRunDurationMs: number
 ): Promise<RecoveryResult> {
@@ -779,6 +790,22 @@ async function reconcileAttachedProcess(
       !terminalOutputIncomplete &&
       (snapshot.status === "running" || !snapshot.logsSettled)
     ) {
+      const renewed = await dependencies.store.renewDispatchLease(
+        dependencies.operator,
+        {
+          expectedVersion: authority.expectedVersion,
+          leaseExpiresAt: leaseExpiry(clock, observationLeaseMs),
+          leaseToken: authority.leaseToken,
+          runId: liveRun.id,
+        }
+      );
+      if (renewed.kind !== "updated") {
+        return {
+          adopted: true,
+          kind: "deferred",
+          logEvents: projected.length,
+        };
+      }
       return {
         adopted: true,
         kind: "deferred",
@@ -880,6 +907,7 @@ async function recoverExpiredDispatch(
   run: RunnerRunRecord,
   dependencies: ReconcileAndDispatchDependencies,
   lease: Readonly<{ leaseExpiresAt: Date; leaseToken: string }>,
+  observationLeaseMs: number,
   maxRunDurationMs: number
 ): Promise<RecoveryResult> {
   if (
@@ -929,6 +957,7 @@ async function recoverExpiredDispatch(
       run,
       dependencies,
       lease,
+      observationLeaseMs,
       dependencies.clock ?? (() => new Date()),
       maxRunDurationMs
     );
@@ -1429,6 +1458,7 @@ export async function reconcileAndDispatch(
     "Maximum run duration",
     24 * 60 * 60 * 1000
   );
+  const activeRecoveryLeaseMs = Math.max(DISPATCH_LEASE_MS, attemptLeaseMs);
   const result = {
     adopted: 0,
     deferred: 0,
@@ -1462,7 +1492,8 @@ export async function reconcileAndDispatch(
         return await recoverExpiredDispatch(
           run,
           dependencies,
-          nextLease(clock, randomToken, attemptLeaseMs),
+          nextLease(clock, randomToken, activeRecoveryLeaseMs),
+          attemptLeaseMs,
           maxRunDurationMs
         );
       } catch {
