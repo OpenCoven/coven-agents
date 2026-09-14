@@ -1,8 +1,18 @@
 // biome-ignore-all lint/performance/noAwaitInLoops lint/suspicious/useAwait: The smoke server and subprocess preserve asynchronous lifecycle boundaries.
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { createServer } from "node:http";
+import { type ChildProcess, spawn } from "node:child_process";
+import { once } from "node:events";
+import { readFileSync } from "node:fs";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
+import { createServer, type Server } from "node:http";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -13,7 +23,12 @@ import {
   COVEN_GITHUB_TOOL_URL_ENV_REFERENCE,
 } from "./invocation";
 
-const PINNED_COPILOT_VERSION = "1.0.80";
+// This is the local smoke dependency, not the separately pinned runtime image.
+const smokeManifest = JSON.parse(
+  readFileSync(new URL("../../../package.json", import.meta.url), "utf8")
+) as { devDependencies: Record<string, string> };
+const PINNED_COPILOT_VERSION = smokeManifest.devDependencies["@github/copilot"];
+assert.match(PINNED_COPILOT_VERSION, /^\d+\.\d+\.\d+$/u);
 const CAPABILITY = "A".repeat(43);
 const TOOL_URL = "https://gateway.invalid/api/internal/github-tool";
 
@@ -34,20 +49,22 @@ function platformPackage(): string {
   throw new Error(`Unsupported Copilot smoke platform: ${process.platform}`);
 }
 
-async function pinnedCopilotApp(): Promise<string> {
+async function pinnedCopilotApp(
+  expectedVersion = PINNED_COPILOT_VERSION
+): Promise<string> {
   const require = createRequire(import.meta.url);
   const packageJson = require.resolve("@github/copilot/package.json");
   const packageValue = JSON.parse(await readFile(packageJson, "utf8")) as {
     version: string;
   };
-  assert.equal(packageValue.version, PINNED_COPILOT_VERSION);
+  assert.equal(packageValue.version, expectedVersion);
   const platformRequire = createRequire(packageJson);
   const platformEntry = platformRequire.resolve(platformPackage());
   const platformJson = join(dirname(platformEntry), "package.json");
   const platformValue = JSON.parse(await readFile(platformJson, "utf8")) as {
     version: string;
   };
-  assert.equal(platformValue.version, PINNED_COPILOT_VERSION);
+  assert.equal(platformValue.version, expectedVersion);
   return join(dirname(platformJson), "app.js");
 }
 
@@ -86,36 +103,26 @@ function providerResponse(): string {
   });
 }
 
-async function restrictedVisibleTools(
-  permissionMode: "workspace_read" | "workspace_write"
-): Promise<{
-  args: readonly string[];
-  visibleTools: string[];
-}> {
-  const scratch = join(
-    dirname(fileURLToPath(import.meta.url)),
-    `.copilot-tools-smoke-${permissionMode}-${process.pid}`
-  );
-  await rm(scratch, { force: true, recursive: true });
-  const attemptDir = join(scratch, "attempt");
-  const workspace = join(scratch, "workspace");
-  await mkdir(attemptDir, { recursive: true });
-  await mkdir(workspace, { recursive: true });
-  await chmod(attemptDir, 0o500);
-  await writeFile(join(workspace, "needle.txt"), "workspace needle\n", {
-    mode: 0o600,
-  });
-  const invocation = buildInvocation({
-    attemptDir,
-    configDir: join(scratch, "copilot-home"),
-    cwd: workspace,
-    harness: "copilot",
-    instructions: "Return smoke complete.",
-    model: "gpt-5.4",
-    permissionMode,
-    stream: true,
-    task: "Do not call tools.",
-  });
+interface SmokeFixture {
+  attemptDir: string;
+  child?: ChildProcess;
+  provider: Server;
+  requests: Record<string, unknown>[];
+  scratch: string;
+  startCli: (
+    args: readonly string[],
+    env?: Record<string, string>
+  ) => Promise<void>;
+  stderr: string;
+  workspace: string;
+}
+
+type ResolveSmokeApp = (fixture: SmokeFixture) => Promise<string>;
+
+async function withCopilotSmoke<T>(
+  run: (fixture: SmokeFixture) => Promise<T>,
+  resolveApp: ResolveSmokeApp = () => pinnedCopilotApp()
+): Promise<T> {
   const requests: Record<string, unknown>[] = [];
   const provider = createServer((request, response) => {
     let body = "";
@@ -129,29 +136,145 @@ async function restrictedVisibleTools(
       response.end(providerResponse());
     });
   });
-  await new Promise<void>((resolve) =>
-    provider.listen(0, "127.0.0.1", resolve)
+  const scratch = await mkdtemp(
+    join(dirname(fileURLToPath(import.meta.url)), ".copilot-smoke-")
   );
-  const address = provider.address();
-  assert.ok(address && typeof address === "object");
-  const app = await pinnedCopilotApp();
-  const child = spawn(process.execPath, [app, ...invocation.args], {
-    cwd: workspace,
-    env: {
-      ...process.env,
-      COPILOT_MODEL: "gpt-5.4",
-      COPILOT_PROVIDER_API_KEY: "smoke",
-      COPILOT_PROVIDER_BASE_URL: `http://127.0.0.1:${address.port}/v1`,
-      COPILOT_PROVIDER_WIRE_API: "responses",
+  const home = join(scratch, "home");
+  let childClosed: Promise<void> | undefined;
+  const fixture: SmokeFixture = {
+    attemptDir: join(scratch, "attempt"),
+    provider,
+    requests,
+    scratch,
+    async startCli(args, env = {}) {
+      assert.equal(fixture.child, undefined, "one CLI per smoke fixture");
+      const address = provider.address();
+      assert.ok(address && typeof address === "object");
+      const app = await resolveApp(fixture);
+      const child = spawn(process.execPath, [app, ...args], {
+        cwd: fixture.workspace,
+        env: {
+          ...env,
+          COPILOT_DISABLE_KEYTAR: "1",
+          COPILOT_HOME: join(scratch, "copilot-home"),
+          COPILOT_MODEL: "gpt-5.4",
+          // Offline mode disables GitHub auth, telemetry, and update traffic.
+          COPILOT_OFFLINE: "true",
+          COPILOT_PROVIDER_API_KEY: "smoke",
+          COPILOT_PROVIDER_BASE_URL: `http://127.0.0.1:${address.port}/v1`,
+          COPILOT_PROVIDER_WIRE_API: "responses",
+          HOME: home,
+          PATH: dirname(process.execPath),
+          SystemRoot: process.env.SystemRoot,
+          TEMP: join(scratch, "tmp"),
+          TMP: join(scratch, "tmp"),
+          TMPDIR: join(scratch, "tmp"),
+          USERPROFILE: home,
+          XDG_CACHE_HOME: join(home, ".cache"),
+          XDG_CONFIG_HOME: join(home, ".config"),
+        },
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+      fixture.child = child;
+      child.stderr?.setEncoding("utf8");
+      child.stderr?.on("data", (chunk: string) => {
+        fixture.stderr += chunk;
+      });
+      childClosed = new Promise<void>((resolve) =>
+        child.once("close", () => resolve())
+      );
+      await once(child, "spawn");
     },
-    stdio: ["ignore", "ignore", "ignore"],
-  });
+    stderr: "",
+    workspace: join(scratch, "workspace"),
+  };
 
   try {
-    const deadline = Date.now() + 45_000;
-    while (Date.now() < deadline && requests.length === 0) {
-      await new Promise((resolve) => setTimeout(resolve, 25));
+    await mkdir(fixture.attemptDir);
+    await mkdir(fixture.workspace);
+    await mkdir(home);
+    await mkdir(join(scratch, "tmp"));
+    await chmod(fixture.attemptDir, 0o500);
+    provider.listen(0, "127.0.0.1");
+    await once(provider, "listening");
+    return await run(fixture);
+  } finally {
+    try {
+      const { child } = fixture;
+      if (child) {
+        const killTimer = setTimeout(() => child.kill("SIGKILL"), 1000);
+        killTimer.unref();
+        try {
+          if (
+            child.pid &&
+            child.exitCode === null &&
+            child.signalCode === null
+          ) {
+            child.kill("SIGTERM");
+          }
+          await childClosed;
+        } finally {
+          clearTimeout(killTimer);
+        }
+      }
+    } finally {
+      try {
+        if (provider.listening) {
+          const closed = new Promise<void>((resolve, reject) =>
+            provider.close((error) => (error ? reject(error) : resolve()))
+          );
+          provider.closeAllConnections();
+          await closed;
+        }
+      } finally {
+        await rm(scratch, { force: true, recursive: true });
+      }
     }
+  }
+}
+
+async function waitForProvider(fixture: SmokeFixture): Promise<void> {
+  const deadline = Date.now() + 45_000;
+  while (fixture.requests.length === 0) {
+    assert.ok(
+      fixture.child &&
+        fixture.child.exitCode === null &&
+        fixture.child.signalCode === null,
+      `Copilot exited before contacting the mock provider: ${fixture.stderr}`
+    );
+    assert.ok(
+      Date.now() < deadline,
+      `Copilot did not contact the mock provider: ${fixture.stderr}`
+    );
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
+async function restrictedVisibleTools(
+  permissionMode: "workspace_read" | "workspace_write",
+  resolveApp?: ResolveSmokeApp
+): Promise<{
+  args: readonly string[];
+  visibleTools: string[];
+}> {
+  return await withCopilotSmoke(async (fixture) => {
+    const { attemptDir, scratch, workspace, requests } = fixture;
+    await writeFile(join(workspace, "needle.txt"), "workspace needle\n", {
+      mode: 0o600,
+    });
+    const invocation = buildInvocation({
+      attemptDir,
+      configDir: join(scratch, "copilot-home"),
+      cwd: workspace,
+      harness: "copilot",
+      instructions: "Return smoke complete.",
+      model: "gpt-5.4",
+      permissionMode,
+      stream: true,
+      task: "Do not call tools.",
+    });
+    await fixture.startCli(invocation.args);
+    await waitForProvider(fixture);
     assert.ok(requests.length > 0);
     const visibleTools = [
       ...new Set(
@@ -165,21 +288,112 @@ async function restrictedVisibleTools(
       ),
     ].sort();
     return { args: invocation.args, visibleTools };
-  } finally {
-    child.kill("SIGTERM");
-    await new Promise<void>((resolve) => {
-      child.once("exit", () => resolve());
-      setTimeout(() => {
-        child.kill("SIGKILL");
-        resolve();
-      }, 1000).unref();
-    });
-    await new Promise<void>((resolve) => provider.close(() => resolve()));
-    await rm(scratch, { force: true, recursive: true });
-  }
+  }, resolveApp);
 }
 
-test("Copilot 1.0.80 workspace_read exposes view, rg, and glob without write, shell, or network", {
+test("Copilot smoke version matches the repository's exact dependency pin", async () => {
+  const manifest = JSON.parse(
+    await readFile(new URL("../../../package.json", import.meta.url), "utf8")
+  ) as { devDependencies: Record<string, string> };
+  assert.match(manifest.devDependencies["@github/copilot"], /^\d+\.\d+\.\d+$/u);
+  assert.equal(
+    PINNED_COPILOT_VERSION,
+    manifest.devDependencies["@github/copilot"]
+  );
+  await pinnedCopilotApp();
+});
+
+for (const failure of [
+  "version validation",
+  "synchronous spawn",
+  "asynchronous spawn",
+] as const) {
+  test(`Copilot smoke cleans up after ${failure} failure`, {
+    timeout: 10_000,
+  }, async () => {
+    let resources: SmokeFixture | undefined;
+    try {
+      await assert.rejects(
+        restrictedVisibleTools("workspace_read", async (fixture) => {
+          resources = fixture;
+          if (failure === "asynchronous spawn") {
+            await rm(fixture.workspace, { recursive: true });
+            return await pinnedCopilotApp();
+          }
+          return failure === "version validation"
+            ? pinnedCopilotApp("0.0.0")
+            : Promise.resolve("\0");
+        }),
+        failure === "version validation"
+          ? { code: "ERR_ASSERTION" }
+          : {
+              code:
+                failure === "synchronous spawn"
+                  ? "ERR_INVALID_ARG_VALUE"
+                  : "ENOENT",
+            }
+      );
+      assert.ok(resources);
+      assert.equal(resources.provider.listening, false, "mock provider leaked");
+      await assert.rejects(stat(resources.scratch), {
+        code: "ENOENT",
+      });
+    } finally {
+      // Keep the regression runnable even when the smoke helper leaks.
+      if (resources) {
+        const { provider, scratch } = resources;
+        provider.closeAllConnections();
+        await new Promise<void>((resolve) => provider.close(() => resolve()));
+        await rm(scratch, { force: true, recursive: true });
+      }
+    }
+  });
+}
+
+for (const outcome of ["already exited", "ignores SIGTERM"] as const) {
+  test(`Copilot smoke cleans up a child that ${outcome}`, {
+    skip:
+      outcome === "ignores SIGTERM" && process.platform === "win32"
+        ? "Windows terminates children forcibly on SIGTERM"
+        : false,
+    timeout: 10_000,
+  }, async () => {
+    let resources: SmokeFixture | undefined;
+    await withCopilotSmoke(
+      async (fixture) => {
+        resources = fixture;
+        await fixture.startCli([]);
+        assert.ok(fixture.child);
+        if (outcome === "already exited") {
+          await once(fixture.child, "close");
+        } else {
+          assert.ok(fixture.child.stderr);
+          await once(fixture.child.stderr, "data");
+        }
+      },
+      async (fixture) => {
+        const app = join(fixture.scratch, "child.cjs");
+        await writeFile(
+          app,
+          outcome === "already exited"
+            ? "process.exitCode = 0;"
+            : 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000); process.stderr.write("ready");'
+        );
+        return app;
+      }
+    );
+    assert.ok(resources?.child);
+    assert.equal(resources.provider.listening, false);
+    await assert.rejects(stat(resources.scratch), { code: "ENOENT" });
+    if (outcome === "already exited") {
+      assert.equal(resources.child.exitCode, 0);
+    } else {
+      assert.equal(resources.child.signalCode, "SIGKILL");
+    }
+  });
+}
+
+test(`Copilot ${PINNED_COPILOT_VERSION} workspace_read exposes view, rg, and glob without write, shell, or network`, {
   timeout: 60_000,
 }, async () => {
   const smoke = await restrictedVisibleTools("workspace_read");
@@ -193,7 +407,7 @@ test("Copilot 1.0.80 workspace_read exposes view, rg, and glob without write, sh
   assert.equal(smoke.args.includes("--allow-tool"), false);
 });
 
-test("Copilot 1.0.80 workspace_write exposes apply_patch but no shell or network", {
+test(`Copilot ${PINNED_COPILOT_VERSION} workspace_write exposes apply_patch but no shell or network`, {
   timeout: 60_000,
 }, async () => {
   const smoke = await restrictedVisibleTools("workspace_write");
@@ -212,25 +426,19 @@ test("Copilot 1.0.80 workspace_write exposes apply_patch but no shell or network
   );
 });
 
-test("Copilot 1.0.80 isolates workspace MCP and exposes only bounded tools", {
-  timeout: 60_000,
-}, async () => {
-  const scratch = join(
-    dirname(fileURLToPath(import.meta.url)),
-    `.copilot-mcp-smoke-${process.pid}`
-  );
-  await rm(scratch, { force: true, recursive: true });
-  await mkdir(scratch, { recursive: true });
-  const attemptDir = join(scratch, "attempt");
-  const workspace = join(scratch, "workspace");
-  await mkdir(attemptDir, { recursive: true });
-  await mkdir(workspace, { recursive: true });
-  await chmod(attemptDir, 0o500);
-  const observedEnvPath = join(scratch, "observed-env.json");
-  const maliciousObservedPath = join(scratch, "malicious-started.json");
-  const maliciousProbePath = join(scratch, "malicious-probe.cjs");
-  const probePath = join(scratch, "probe.cjs");
-  const probeSource = `
+test(
+  `Copilot ${PINNED_COPILOT_VERSION} isolates workspace MCP and exposes only bounded tools`,
+  {
+    timeout: 60_000,
+  },
+  async () =>
+    withCopilotSmoke(async (fixture) => {
+      const { attemptDir, scratch, workspace, requests } = fixture;
+      const observedEnvPath = join(scratch, "observed-env.json");
+      const maliciousObservedPath = join(scratch, "malicious-started.json");
+      const maliciousProbePath = join(scratch, "malicious-probe.cjs");
+      const probePath = join(scratch, "probe.cjs");
+      const probeSource = `
 const fs = require("node:fs");
 const readline = require("node:readline");
 fs.writeFileSync(${JSON.stringify(observedEnvPath)}, JSON.stringify({
@@ -267,164 +475,112 @@ lines.on("line", (line) => {
   }
 });
 `;
-  await writeFile(probePath, probeSource, { mode: 0o600 });
-  await writeFile(
-    maliciousProbePath,
-    probeSource.replace(
-      JSON.stringify(observedEnvPath),
-      JSON.stringify(maliciousObservedPath)
-    ),
-    { mode: 0o600 }
-  );
-  await writeFile(
-    join(workspace, ".mcp.json"),
-    JSON.stringify({
-      mcpServers: {
-        WorkspaceOwned: {
-          args: [maliciousProbePath],
-          command: process.execPath,
-          type: "local",
-        },
-      },
-    }),
-    { mode: 0o600 }
-  );
+      await writeFile(probePath, probeSource, { mode: 0o600 });
+      await writeFile(
+        maliciousProbePath,
+        probeSource.replace(
+          JSON.stringify(observedEnvPath),
+          JSON.stringify(maliciousObservedPath)
+        ),
+        { mode: 0o600 }
+      );
+      await writeFile(
+        join(workspace, ".mcp.json"),
+        JSON.stringify({
+          mcpServers: {
+            WorkspaceOwned: {
+              args: [maliciousProbePath],
+              command: process.execPath,
+              type: "local",
+            },
+          },
+        }),
+        { mode: 0o600 }
+      );
 
-  const invocation = buildInvocation({
-    attemptDir,
-    configDir: join(scratch, "copilot-home"),
-    cwd: workspace,
-    githubTool: true,
-    harness: "copilot",
-    instructions: "Return smoke complete.",
-    model: "gpt-5.4",
-    permissionMode: "workspace_read",
-    stream: true,
-    task: "Do not call tools.",
-  });
-  const args = [...invocation.args];
-  const configIndex = args.indexOf("--additional-mcp-config") + 1;
-  const config = JSON.parse(args[configIndex] ?? "") as {
-    mcpServers: Record<
-      string,
-      {
-        args: string[];
-        command: string;
-        env: Record<string, string>;
-        tools: string[];
-        type: string;
-      }
-    >;
-  };
-  config.mcpServers.CovenGitHub.command = process.execPath;
-  config.mcpServers.CovenGitHub.args = [probePath];
-  args[configIndex] = JSON.stringify(config);
-  assert.deepEqual(args.slice(args.indexOf("-C"), args.indexOf("-C") + 4), [
-    "-C",
-    attemptDir,
-    "--add-dir",
-    workspace,
-  ]);
-  assert.deepEqual(config.mcpServers.CovenGitHub.env, {
-    COVEN_GITHUB_CAPABILITY: COVEN_GITHUB_CAPABILITY_ENV_REFERENCE,
-    COVEN_GITHUB_TOOL_URL: COVEN_GITHUB_TOOL_URL_ENV_REFERENCE,
-  });
-  assert.equal(args.join("\n").includes(CAPABILITY), false);
-  assert.equal(args.join("\n").includes(TOOL_URL), false);
+      const invocation = buildInvocation({
+        attemptDir,
+        configDir: join(scratch, "copilot-home"),
+        cwd: workspace,
+        githubTool: true,
+        harness: "copilot",
+        instructions: "Return smoke complete.",
+        model: "gpt-5.4",
+        permissionMode: "workspace_read",
+        stream: true,
+        task: "Do not call tools.",
+      });
+      const args = [...invocation.args];
+      const configIndex = args.indexOf("--additional-mcp-config") + 1;
+      const config = JSON.parse(args[configIndex] ?? "") as {
+        mcpServers: Record<
+          string,
+          {
+            args: string[];
+            command: string;
+            env: Record<string, string>;
+            tools: string[];
+            type: string;
+          }
+        >;
+      };
+      config.mcpServers.CovenGitHub.command = process.execPath;
+      config.mcpServers.CovenGitHub.args = [probePath];
+      args[configIndex] = JSON.stringify(config);
+      assert.deepEqual(args.slice(args.indexOf("-C"), args.indexOf("-C") + 4), [
+        "-C",
+        attemptDir,
+        "--add-dir",
+        workspace,
+      ]);
+      assert.deepEqual(config.mcpServers.CovenGitHub.env, {
+        COVEN_GITHUB_CAPABILITY: COVEN_GITHUB_CAPABILITY_ENV_REFERENCE,
+        COVEN_GITHUB_TOOL_URL: COVEN_GITHUB_TOOL_URL_ENV_REFERENCE,
+      });
+      assert.equal(args.join("\n").includes(CAPABILITY), false);
+      assert.equal(args.join("\n").includes(TOOL_URL), false);
 
-  const app = await pinnedCopilotApp();
-  const requests: Record<string, unknown>[] = [];
-  const provider = createServer((request, response) => {
-    let body = "";
-    request.setEncoding("utf8");
-    request.on("data", (chunk) => {
-      body += chunk;
-    });
-    request.on("end", () => {
-      requests.push(JSON.parse(body) as Record<string, unknown>);
-      response.writeHead(200, { "content-type": "application/json" });
-      response.end(providerResponse());
-    });
-  });
-  await new Promise<void>((resolve) =>
-    provider.listen(0, "127.0.0.1", resolve)
-  );
-  const address = provider.address();
-  assert.ok(address && typeof address === "object");
+      await fixture.startCli(args, {
+        COPILOT_GITHUB_TOKEN: "copilot-credential-must-not-reach-mcp",
+        COVEN_GITHUB_CAPABILITY: CAPABILITY,
+        COVEN_GITHUB_TOOL_URL: TOOL_URL,
+      });
 
-  const child = spawn(process.execPath, [app, ...args], {
-    cwd: workspace,
-    env: {
-      ...process.env,
-      COPILOT_GITHUB_TOKEN: "copilot-credential-must-not-reach-mcp",
-      COPILOT_MODEL: "gpt-5.4",
-      COPILOT_PROVIDER_API_KEY: "smoke",
-      COPILOT_PROVIDER_BASE_URL: `http://127.0.0.1:${address.port}/v1`,
-      COPILOT_PROVIDER_WIRE_API: "responses",
-      COVEN_GITHUB_CAPABILITY: CAPABILITY,
-      COVEN_GITHUB_TOOL_URL: TOOL_URL,
-    },
-    stdio: ["ignore", "ignore", "ignore"],
-  });
-
-  try {
-    const deadline = Date.now() + 45_000;
-    while (Date.now() < deadline) {
-      try {
-        if (requests.length > 0) {
-          await readFile(observedEnvPath, "utf8");
-          break;
-        }
-      } catch {
-        // The pinned CLI has not started the MCP process yet.
-      }
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-    const observed = JSON.parse(await readFile(observedEnvPath, "utf8")) as {
-      capability: string | null;
-      hasCopilotCredential: boolean;
-      toolUrl: string | null;
-    };
-    assert.deepEqual(observed, {
-      capability: CAPABILITY,
-      hasCopilotCredential: false,
-      toolUrl: TOOL_URL,
-    });
-    await assert.rejects(readFile(maliciousObservedPath, "utf8"));
-    assert.ok(requests.length > 0);
-    const visibleTools = [
-      ...new Set(
-        requests.flatMap((request) =>
-          Array.isArray(request.tools)
-            ? request.tools.map((tool) =>
-                String((tool as { name?: unknown }).name ?? "")
-              )
-            : []
-        )
-      ),
-    ];
-    assert.deepEqual(visibleTools.sort(), [
-      "CovenGitHub-execute",
-      "glob",
-      "rg",
-      "view",
-    ]);
-    assert.equal(
-      visibleTools.some((name) =>
-        /bash|shell|web|url|curl|network/iu.test(name)
-      ),
-      false
-    );
-  } finally {
-    child.kill("SIGTERM");
-    await new Promise<void>((resolve) => {
-      child.once("exit", () => resolve());
-      setTimeout(() => {
-        child.kill("SIGKILL");
-        resolve();
-      }, 1000).unref();
-    });
-    await new Promise<void>((resolve) => provider.close(() => resolve()));
-    await rm(scratch, { force: true, recursive: true });
-  }
-});
+      await waitForProvider(fixture);
+      const observed = JSON.parse(await readFile(observedEnvPath, "utf8")) as {
+        capability: string | null;
+        hasCopilotCredential: boolean;
+        toolUrl: string | null;
+      };
+      assert.deepEqual(observed, {
+        capability: CAPABILITY,
+        hasCopilotCredential: false,
+        toolUrl: TOOL_URL,
+      });
+      await assert.rejects(readFile(maliciousObservedPath, "utf8"));
+      assert.ok(requests.length > 0);
+      const visibleTools = [
+        ...new Set(
+          requests.flatMap((request) =>
+            Array.isArray(request.tools)
+              ? request.tools.map((tool) =>
+                  String((tool as { name?: unknown }).name ?? "")
+                )
+              : []
+          )
+        ),
+      ];
+      assert.deepEqual(visibleTools.sort(), [
+        "CovenGitHub-execute",
+        "glob",
+        "rg",
+        "view",
+      ]);
+      assert.equal(
+        visibleTools.some((name) =>
+          /bash|shell|web|url|curl|network/iu.test(name)
+        ),
+        false
+      );
+    })
+);
