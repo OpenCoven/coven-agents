@@ -20,6 +20,7 @@ import postgres from "postgres";
 import type { ArtifactKind } from "@/components/chat/artifact";
 import type { VisibilityType } from "@/components/chat/visibility-selector";
 import { adminAccounts, adminOverview } from "@/lib/admin/directory";
+import { DEFAULT_CHAT_TITLE } from "@/lib/ai/title-text";
 import type {
   IdempotencyClaimHandle,
   IdempotencyStore,
@@ -59,6 +60,7 @@ import type { CredentialDevicePollStore } from "../credentials/device-poll";
 import { commitCredentialDevicePollAuthorized } from "../credentials/device-poll-commit";
 import type { PreparedCredentialWrite } from "../credentials/store";
 import { ChatbotError } from "../errors";
+import { automaticChatTitleWhere } from "./chat-title";
 import { drizzleCredentialDevicePollDatabase } from "./credential-device-poll";
 import {
   type Chat,
@@ -1679,15 +1681,21 @@ export async function updateChatVisibilityById({
 export async function updateChatTitleById({
   chatId,
   title,
+  userId,
 }: {
   chatId: string;
   title: string;
-}) {
-  try {
-    return await db.update(chat).set({ title }).where(eq(chat.id, chatId));
-  } catch {
-    // Best effort title update.
+  userId: string;
+}): Promise<{ title: string } | null> {
+  if (title === DEFAULT_CHAT_TITLE) {
+    return null;
   }
+  const [saved] = await db
+    .update(chat)
+    .set({ title })
+    .where(automaticChatTitleWhere({ chatId, userId }))
+    .returning({ title: chat.title });
+  return saved ?? null;
 }
 
 export async function getMessageCountByUserId({

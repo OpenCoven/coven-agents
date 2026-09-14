@@ -18,11 +18,15 @@ import {
 import useSWR, { useSWRConfig } from "swr";
 import { unstable_serialize } from "swr/infinite";
 import { useDataStream } from "@/components/chat/data-stream-provider";
-import { getChatHistoryPaginationKey } from "@/components/chat/sidebar-history";
+import {
+  type ChatHistory,
+  getChatHistoryPaginationKey,
+} from "@/components/chat/sidebar-history";
 import { toast } from "@/components/chat/toast";
 import type { VisibilityType } from "@/components/chat/visibility-selector";
 import { useAutoResume } from "@/hooks/use-auto-resume";
 import { DEFAULT_CHAT_MODEL } from "@/lib/ai/models";
+import { createChatTitleReconciler } from "@/lib/chat-title-reconciliation";
 import type { Vote } from "@/lib/db/schema";
 import { ChatbotError } from "@/lib/errors";
 import type { ChatMessage } from "@/lib/types";
@@ -73,6 +77,22 @@ export function ActiveChatProvider({ children }: { children: ReactNode }) {
 
   const chatId = chatIdFromUrl ?? newChatIdRef.current;
 
+  const titleReconcilerRef = useRef<ReturnType<
+    typeof createChatTitleReconciler
+  > | null>(null);
+  useEffect(() => {
+    const reconciler = createChatTitleReconciler({
+      chatId,
+      revalidateHistory: () =>
+        mutate<ChatHistory[]>(unstable_serialize(getChatHistoryPaginationKey)),
+    });
+    titleReconcilerRef.current = reconciler;
+    return () => {
+      reconciler.dispose();
+      titleReconcilerRef.current = null;
+    };
+  }, [chatId, mutate]);
+
   const [currentModelId, setCurrentModelId] = useState(DEFAULT_CHAT_MODEL);
   const currentModelIdRef = useRef(currentModelId);
   useEffect(() => {
@@ -111,6 +131,10 @@ export function ActiveChatProvider({ children }: { children: ReactNode }) {
     id: chatId,
     messages: initialMessages,
     onData: (dataPart) => {
+      if (dataPart.type === "data-chat-title-pending") {
+        titleReconcilerRef.current?.markPending(dataPart.data);
+        return;
+      }
       if (dataPart.type === "data-waiting-status") {
         setWaitingStatus(dataPart.data);
         return;
@@ -129,8 +153,11 @@ export function ActiveChatProvider({ children }: { children: ReactNode }) {
         });
       }
     },
-    onFinish: () => {
-      mutate(unstable_serialize(getChatHistoryPaginationKey));
+    onFinish: ({ messages: finishedMessages }) => {
+      mutate(unstable_serialize(getChatHistoryPaginationKey)).catch(() => {
+        console.warn("[chat-title] history refresh failed");
+      });
+      titleReconcilerRef.current?.responseSettled(finishedMessages);
     },
     sendAutomaticallyWhen: ({ messages: currentMessages }) => {
       const lastMessage = currentMessages.at(-1);

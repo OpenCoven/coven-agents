@@ -47,6 +47,7 @@ export type CustomUIDataTypes = {
   clear: null;
   finish: null;
   "chat-title": string;
+  "chat-title-pending": { chatId: string; messageId: string };
   "waiting-status": WaitingStatusData;
 };
 
