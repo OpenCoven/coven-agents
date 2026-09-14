@@ -7,6 +7,7 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { UsageLedger } from "@/components/billing/usage-ledger";
 import { useApplicationLoginPath } from "@/hooks/use-application-login-path";
 import { browserApplicationPath } from "@/lib/application-path";
+import { sessionFetch as fetch } from "@/lib/auth/session-recovery";
 import {
   MONTHLY_MINUTE_CAP,
   RUN_MINUTE_RESERVATION,

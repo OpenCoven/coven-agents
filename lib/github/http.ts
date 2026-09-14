@@ -3,6 +3,7 @@ import "server-only";
 
 import { createHash, randomUUID } from "node:crypto";
 import {
+  GITHUB_NODE_ID_MAX_LENGTH,
   GITHUB_TOOL_LIMITS,
   GITHUB_TOOL_SERVER_DEADLINE_MS,
   type GitHubOperationReceipt,
@@ -12,6 +13,7 @@ import {
   githubToolOperationSchema,
   githubToolRequestSchema,
   githubToolResultSchema,
+  GITHUB_NODE_ID_PATTERN as NODE_ID,
 } from "@opencoven/agent-contracts";
 import type {
   AbuseAdmission,
@@ -37,7 +39,6 @@ import {
 const GITHUB_API_ORIGIN = "https://api.github.com";
 const GITHUB_API_VERSION = "2022-11-28";
 const REQUEST_ID = /^[A-Za-z0-9:-]{1,128}$/u;
-const NODE_ID = /^[A-Za-z0-9_=-]{1,256}$/u;
 const GIT_SHA = /^[a-f0-9]{40}$/u;
 const DEFAULT_TIMEOUT_MS = 5000;
 const DEFAULT_MAX_RESPONSE_BYTES = 256 * 1024;
@@ -310,7 +311,7 @@ function issueResult(
   kind: "issue.create" | "issue.get"
 ): GitHubProviderOperationResult {
   const body = object(value);
-  const nodeId = string(body.node_id, 256, NODE_ID);
+  const nodeId = string(body.node_id, GITHUB_NODE_ID_MAX_LENGTH, NODE_ID);
   const url = string(body.html_url, 2048);
   const state = body.state;
   if (
@@ -357,7 +358,7 @@ function issueSummary(
     throw invalidResponse();
   }
   return {
-    nodeId: string(body.node_id, 256, NODE_ID),
+    nodeId: string(body.node_id, GITHUB_NODE_ID_MAX_LENGTH, NODE_ID),
     number: decimal(body.number),
     state,
     title: boundedText(body.title, GITHUB_TOOL_LIMITS.resultTitleBytes),
@@ -373,7 +374,7 @@ function pullResult(
   const body = object(value);
   const base = object(body.base);
   const head = object(body.head);
-  const nodeId = string(body.node_id, 256, NODE_ID);
+  const nodeId = string(body.node_id, GITHUB_NODE_ID_MAX_LENGTH, NODE_ID);
   const url = string(body.html_url, 2048);
   const state = body.state;
   if (
@@ -416,7 +417,7 @@ function commentResult(
   kind: "issue.comment" | "pull.comment"
 ): GitHubProviderOperationResult {
   const body = object(value);
-  const nodeId = string(body.node_id, 256, NODE_ID);
+  const nodeId = string(body.node_id, GITHUB_NODE_ID_MAX_LENGTH, NODE_ID);
   const url = string(body.html_url, 2048);
   if (
     !url.startsWith(
@@ -442,7 +443,7 @@ function reviewResult(
   value: unknown
 ): GitHubProviderOperationResult {
   const body = object(value);
-  const nodeId = string(body.node_id, 256, NODE_ID);
+  const nodeId = string(body.node_id, GITHUB_NODE_ID_MAX_LENGTH, NODE_ID);
   const url = string(body.html_url, 2048);
   const states = {
     APPROVED: "approved",
@@ -1793,7 +1794,11 @@ export function createGitHubOperationProvider(
             });
             if (found) {
               return {
-                foundId: string(object(found).id, 256, NODE_ID),
+                foundId: string(
+                  object(found).id,
+                  GITHUB_NODE_ID_MAX_LENGTH,
+                  NODE_ID
+                ),
                 requestId,
               };
             }
@@ -1850,7 +1855,7 @@ export function createGitHubOperationProvider(
               );
               return withRequestId(
                 projectResult(context, {
-                  itemId: string(item.id, 256, NODE_ID),
+                  itemId: string(item.id, GITHUB_NODE_ID_MAX_LENGTH, NODE_ID),
                   kind: operation.kind,
                   projectId: operation.projectId,
                 }),

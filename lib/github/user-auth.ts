@@ -1,6 +1,7 @@
 import "server-only";
 
 import type { KeyObject } from "node:crypto";
+import { GITHUB_NODE_ID_PATTERN as NODE_ID } from "@opencoven/agent-contracts";
 import { GitHubProviderError, type GitHubProviderStage } from "./app-auth";
 import type { GitHubUserRepositoryPermission } from "./authority-types";
 
@@ -45,7 +46,6 @@ const MAX_REDIRECT_URI_BYTES = 2048;
 const DECIMAL_ID = /^[1-9][0-9]{0,19}$/u;
 const CLIENT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const NAME = /^[A-Za-z0-9_.-]{1,100}$/u;
-const NODE_ID = /^[A-Za-z0-9_=-]{1,256}$/u;
 const OAUTH_CODE = /^[A-Za-z0-9._~-]+$/u;
 const PKCE_VERIFIER = /^[A-Za-z0-9._~-]{43,128}$/u;
 const OAUTH_USER_PATTERN = /^ghu_[A-Za-z0-9]{20,4092}$/u;

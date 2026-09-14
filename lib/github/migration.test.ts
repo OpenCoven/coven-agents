@@ -1,86 +1,39 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import test from "node:test";
-import { is } from "drizzle-orm";
+import {
+  GITHUB_NODE_ID_MAX_LENGTH,
+  GITHUB_NODE_ID_MIN_LENGTH,
+  GITHUB_NODE_ID_PATTERN,
+} from "@opencoven/agent-contracts";
+import { is, sql } from "drizzle-orm";
 import { getTableConfig, PgDialect, PgTable } from "drizzle-orm/pg-core";
 // biome-ignore lint/performance/noNamespaceImport: the snapshot test must enumerate every exported table
 import * as schema from "../db/schema";
-
-const migrations = new URL("../db/migrations/", import.meta.url);
+import {
+  excessiveRegexBounds,
+  latestSnapshotName,
+  migrations,
+  POSTGRES_REGEX_REPETITION_LIMIT,
+  readJournal,
+  readMigration,
+  readSnapshot,
+  regexRepetitionBounds,
+  snapshotCheckText,
+} from "./migration-test-helpers";
 
 const GATEWAY_MIGRATION = "0032_github_tool_gateway.sql";
 const GATEWAY_SNAPSHOT = "meta/0032_snapshot.json";
 const PROJECT_AUTHORITY_MIGRATION = "0035_spicy_hammerhead.sql";
 const PROJECT_AUTHORITY_TRIGGER_MIGRATION =
   "0036_project_authority_trigger.sql";
-// PostgreSQL rejects regex repetition counts above 255 (DUPMAX in regguts.h).
-const POSTGRES_REGEX_REPETITION_LIMIT = 255;
-// Regex operands only: `~ '…'`, `~* '…'`, `!~ '…'`, `!~* '…'`, and jsonpath `like_regex "…"`.
-const REGEX_OPERAND =
-  /!?~\*?\s*'((?:[^']|'')*)'|like_regex\s+"((?:[^"\\]|\\.)*)"/gu;
-const REGEX_BOUND = /\{(\d+)(?:,(\d*))?\}/gu;
-
-type RegexBoundEntry = Readonly<{ operand: string; bounds: readonly number[] }>;
-
-type Snapshot = Readonly<{
-  tables: Record<
-    string,
-    Readonly<{
-      checkConstraints?: Record<
-        string,
-        Readonly<{ name: string; value: string }>
-      >;
-    }>
-  >;
-}>;
-
-function regexRepetitionBounds(text: string): RegexBoundEntry[] {
-  const entries: RegexBoundEntry[] = [];
-  for (const match of text.matchAll(REGEX_OPERAND)) {
-    const operand = match[1] ?? match[2] ?? "";
-    const bounds = [...operand.matchAll(REGEX_BOUND)]
-      .flatMap((bound) => bound.slice(1))
-      .filter((bound): bound is string => bound !== undefined && bound !== "")
-      .map(Number);
-    if (bounds.length > 0) {
-      entries.push({ bounds, operand });
-    }
-  }
-  return entries;
-}
-
-function excessiveRegexBounds(text: string): RegexBoundEntry[] {
-  return regexRepetitionBounds(text).filter((entry) =>
-    entry.bounds.some((bound) => bound > POSTGRES_REGEX_REPETITION_LIMIT)
-  );
-}
-
-function snapshotCheckText(snapshot: Snapshot): string {
-  return Object.values(snapshot.tables)
-    .flatMap((table) => Object.values(table.checkConstraints ?? {}))
-    .map((check) => check.value)
-    .join("\n");
-}
-
-async function readSnapshot(name: string): Promise<Snapshot> {
-  return JSON.parse(
-    await readFile(new URL(name, migrations), "utf8")
-  ) as Snapshot;
-}
-
-async function latestSnapshotName(): Promise<string> {
-  const journal = JSON.parse(
-    await readFile(new URL("meta/_journal.json", migrations), "utf8")
-  ) as Readonly<{ entries: readonly Readonly<{ idx: number }>[] }>;
-  const last = journal.entries.at(-1);
-  assert.ok(last, "journal must record at least one migration");
-  return `meta/${String(last.idx).padStart(4, "0")}_snapshot.json`;
-}
 
 test("current main and the GitHub gateway form one migration lineage", async () => {
   const names = await readdir(migrations);
-  for (let index = 25; index <= 36; index += 1) {
+  const last = (await readJournal()).entries.at(-1);
+  assert.ok(last);
+  for (let index = 25; index <= last.idx; index += 1) {
     const prefix = `${String(index).padStart(4, "0")}_`;
     assert.equal(
       names.filter((name) => name.startsWith(prefix) && name.endsWith(".sql"))
@@ -91,10 +44,94 @@ test("current main and the GitHub gateway form one migration lineage", async () 
   }
 });
 
+test("0042 preserves every prior immutable field and adds both Project bindings", async () => {
+  const [previous, migration] = await Promise.all([
+    readMigration(GATEWAY_MIGRATION),
+    readMigration("0042_github_operation_project_immutable.sql"),
+  ]);
+  const previousGuard = previous.match(
+    /CREATE OR REPLACE FUNCTION "RunnerGitHubOperation_reject_request_change"[\s\S]*?\$\$ LANGUAGE plpgsql/u
+  )?.[0];
+  assert.ok(previousGuard);
+  for (const [predicate] of previousGuard.matchAll(
+    /NEW\."\w+" IS DISTINCT FROM OLD\."\w+"/gu
+  )) {
+    assert.ok(migration.includes(predicate), predicate);
+  }
+  for (const field of ["projectId", "projectAuthorityBound"]) {
+    assert.ok(
+      migration.includes(`NEW."${field}" IS DISTINCT FROM OLD."${field}"`)
+    );
+  }
+  assert.match(
+    migration,
+    /OLD\."connectionId" IS NOT NULL\s+AND NEW\."connectionId" IS NULL/u
+  );
+});
+
+test("shared node-id limits match both SQL spellings at every boundary", () => {
+  assert.equal(GITHUB_NODE_ID_MIN_LENGTH, 1);
+  assert.equal(GITHUB_NODE_ID_MAX_LENGTH, 256);
+  for (const length of [0, 1, 255, 256, 257]) {
+    assert.equal(
+      GITHUB_NODE_ID_PATTERN.test("A".repeat(length)),
+      length >= GITHUB_NODE_ID_MIN_LENGTH && length <= GITHUB_NODE_ID_MAX_LENGTH
+    );
+  }
+  for (const value of ["P_valid-id=", "invalid!", "A\n"]) {
+    assert.equal(GITHUB_NODE_ID_PATTERN.test(value), value === "P_valid-id=");
+  }
+  const dialect = new PgDialect();
+  const connection = getTableConfig(schema.runnerGitHubConnection);
+  const operation = getTableConfig(schema.runnerGitHubOperation);
+  const authority = connection.checks.find(
+    (check) => check.name === "RGHConn_authority_valid"
+  );
+  const snapshot = operation.checks.find(
+    (check) => check.name === "RGHOp_connectionSnapshot_valid"
+  );
+  assert.ok(authority && snapshot);
+  assert.ok(
+    dialect
+      .sqlToQuery(authority.value)
+      .sql.includes(
+        `{${GITHUB_NODE_ID_MIN_LENGTH},${GITHUB_NODE_ID_MAX_LENGTH - 1}}[A-Za-z0-9_=-]?`
+      )
+  );
+  assert.ok(
+    dialect
+      .sqlToQuery(snapshot.value)
+      .sql.includes(
+        `between ${GITHUB_NODE_ID_MIN_LENGTH} and ${GITHUB_NODE_ID_MAX_LENGTH}`
+      )
+  );
+});
+
+test("0043 applies exactly the new authority snapshots without rewriting 0035 semantics", async () => {
+  const [migration, snapshot, historical] = await Promise.all([
+    readMigration("0043_github_authority_fail_closed.sql"),
+    readSnapshot("meta/0043_snapshot.json"),
+    readMigration(PROJECT_AUTHORITY_MIGRATION),
+  ]);
+  for (const [table, name] of [
+    ["RunnerGitHubConnection", "RGHConn_authority_valid"],
+    ["RunnerGitHubOperation", "RGHOp_connectionSnapshot_valid"],
+  ]) {
+    const { value } = snapshot.tables[`public.${table}`].checkConstraints[name];
+    assert.ok(migration.includes(`ADD CONSTRAINT "${name}" CHECK (${value});`));
+  }
+  assert.match(
+    historical,
+    /^-- Historical in-place regex rewrite: 0035 had never been applied;/u
+  );
+  assert.match(historical, /'\{\}'::jsonb, true/u);
+  assert.doesNotMatch(migration, /'\{\}'::jsonb, true/u);
+});
+
 test("0032 adds durable immutable and current repository user-authority ceilings", async () => {
   const migrationUrl = new URL(GATEWAY_MIGRATION, migrations);
   assert.equal(existsSync(migrationUrl), true);
-  const migration = await readFile(migrationUrl, "utf8");
+  const migration = await readMigration(GATEWAY_MIGRATION);
   for (const column of [
     "githubUserId",
     "githubUserLogin",
@@ -123,19 +160,13 @@ test("0032 adds durable immutable and current repository user-authority ceilings
     /ORDER BY \(\s*lower\("connection"\."repositoryOwner"\) \|\| '\/' \|\|\s*lower\("connection"\."repositoryName"\)\s*\) COLLATE "C"/u
   );
 
-  const [journalText, snapshotText] = await Promise.all([
-    readFile(new URL("meta/_journal.json", migrations), "utf8"),
-    readFile(new URL(GATEWAY_SNAPSHOT, migrations), "utf8"),
+  const [journal, snapshot] = await Promise.all([
+    readJournal(),
+    readSnapshot(GATEWAY_SNAPSHOT),
   ]);
-  const journal = JSON.parse(journalText) as {
-    entries: Array<{ idx: number; tag: string; version: string }>;
-  };
   const gatewayEntry = journal.entries.find((entry) => entry.idx === 32);
   assert.equal(gatewayEntry?.tag, "0032_github_tool_gateway");
   assert.equal(gatewayEntry?.version, "7");
-  const snapshot = JSON.parse(snapshotText) as {
-    tables: Record<string, { columns: Record<string, unknown> }>;
-  };
   assert.ok(
     snapshot.tables["public.RunnerGitHubConnection"]?.columns
       .userPermissionCeiling
@@ -143,10 +174,7 @@ test("0032 adds durable immutable and current repository user-authority ceilings
 });
 
 test("0035 fails closed while preserving existing GitHub connections", async () => {
-  const migration = await readFile(
-    new URL(PROJECT_AUTHORITY_MIGRATION, migrations),
-    "utf8"
-  );
+  const migration = await readMigration(PROJECT_AUTHORITY_MIGRATION);
   assert.match(
     migration,
     /ADD COLUMN "userProjectIds" jsonb DEFAULT '\[\]'::jsonb NOT NULL/u
@@ -169,10 +197,7 @@ test("0035 fails closed while preserving existing GitHub connections", async () 
 });
 
 test("0035 persists bounded Project proof bindings and exact operation Project ids", async () => {
-  const migration = await readFile(
-    new URL(PROJECT_AUTHORITY_MIGRATION, migrations),
-    "utf8"
-  );
+  const migration = await readMigration(PROJECT_AUTHORITY_MIGRATION);
   for (const column of [
     "userProjectAuthorityAuthVersion",
     "userProjectAuthorityConnectionGeneration",
@@ -229,10 +254,7 @@ test("0035 persists bounded Project proof bindings and exact operation Project i
 });
 
 test("0035 bounds Project ids without exceeding the Postgres regex repetition limit", async () => {
-  const migration = await readFile(
-    new URL(PROJECT_AUTHORITY_MIGRATION, migrations),
-    "utf8"
-  );
+  const migration = await readMigration(PROJECT_AUTHORITY_MIGRATION);
 
   assert.match(
     migration,
@@ -280,6 +302,125 @@ test("the regex bound scanner reads only regex operands and every quantifier sha
   );
 });
 
+test("regex scanner recognizes bounded PostgreSQL regex syntax without LIKE or comment false positives", () => {
+  for (const expression of [
+    "regexp_like(value, '^a{256}$')",
+    "regexp_like(coalesce(value, ''), E'^a{256}$', 'i')",
+    "value SIMILAR TO $$a{256}$$",
+    "value NOT SIMILAR TO E'a{256}'",
+    "substring(value from '^a{256}$')",
+    "substring(coalesce(value, '') from $pattern$a{256}$pattern$)",
+    "value ~ E'^a{256}$'",
+    String.raw`value ~ E'^a\x7b256\x7d$'`,
+    String.raw`value ~ E'^a\u007b256\u007d$'`,
+    String.raw`value ~ E'^a\U0000007b256\U0000007d$'`,
+    String.raw`value ~ E'^a\173256\175$'`,
+    String.raw`jsonb_path_exists(value, '$ ? (@ like_regex "^a\u007b256\u007d$")')`,
+    "value !~* $$^a{256}$'$$",
+    "DO $$ BEGIN PERFORM value ~ '^a{256}$'; END $$;",
+  ]) {
+    assert.equal(excessiveRegexBounds(expression).length, 1, expression);
+  }
+  for (const expression of [
+    "value ~~ 'a{256}'",
+    "value !~~* 'a{256}'",
+    "-- value ~ 'a{256}'\n SELECT 1",
+    "/* regexp_like(v, 'a{256}') /* nested */ */ SELECT 1",
+    "SELECT 'a ~ ''b{256}'''",
+    "value ~ '^a{255}$'",
+    "value ~ E'^a\\\\{256}$'",
+    "/* ' */ value ~ '^a{255}$' -- '",
+    "value ~ '[a{256}]'",
+  ]) {
+    assert.deepEqual(excessiveRegexBounds(expression), [], expression);
+  }
+  const rendered = new PgDialect().sqlToQuery(
+    sql`value ~ ${sql.raw("'a{256}'")}`
+  ).sql;
+  assert.equal(excessiveRegexBounds(rendered).length, 1);
+  assert.throws(
+    () => excessiveRegexBounds(" ".repeat(2_000_001)),
+    /scanner input limit/u
+  );
+});
+
+test("current Project authority checks are strict and fail closed as a whole", () => {
+  const dialect = new PgDialect();
+  for (const [table, name] of [
+    [schema.runnerGitHubConnection, "RGHConn_authority_valid"],
+    [schema.runnerGitHubOperation, "RGHOp_connectionSnapshot_valid"],
+  ] as const) {
+    const check = getTableConfig(table).checks.find(
+      (entry) => entry.name === name
+    );
+    assert.ok(check);
+    const text = dialect.sqlToQuery(check.value).sql;
+    assert.match(text, /^\([\s\S]*\) is true$/iu);
+    assert.doesNotMatch(text, /'\{\}'::jsonb,\s*true/u);
+  }
+});
+
+test("regex scanner unwraps nested literal parentheses across operators and functions", () => {
+  for (const expression of [
+    "value ~ ('a{256}')",
+    "value !~* (((E'^a{256}$')))",
+    "value SIMILAR TO (($regex$a{256}$regex$))",
+    "regexp_like(coalesce(value, ''), (('^a{256}$')), 'i')",
+    "regexp_like(\",\", ('^a{256}$'))",
+    "substring(\"from\" from (('^a{256}$')))",
+    `jsonb_path_exists(value, ('$ ? (@ like_regex "^a{256}$")'))`,
+  ]) {
+    assert.equal(excessiveRegexBounds(expression).length, 1, expression);
+    const rendered = new PgDialect().sqlToQuery(
+      sql`${sql.raw(expression)}`
+    ).sql;
+    assert.equal(excessiveRegexBounds(rendered).length, 1, rendered);
+  }
+  for (const expression of [
+    "value ~ ('^' || 'a{256}$')",
+    "regexp_like(value, (prefix || 'a{256}$'))",
+    "value SIMILAR TO ((computed_pattern))",
+  ]) {
+    assert.deepEqual(excessiveRegexBounds(expression), [], expression);
+  }
+});
+
+test("regex scanner joins SQL newline-continuation literals with PostgreSQL quote semantics", () => {
+  for (const expression of [
+    "value ~ '^'\n'a{256}$'",
+    "value ~ '^a{25'\r\n'6}$'",
+    "value ~ '^' -- comment containing 'quotes'\n'a{256}$'",
+    "value ~ '^' -- comment\r'a{256}$'",
+    "regexp_like(value, ('^'\n'a{256}$'))",
+    "value SIMILAR TO (('^'\n'a{256}$'))",
+    "substring(value from ('^'\n'a{256}$'))",
+    String.raw`value ~ E'^'
+'a\x7b256\x7d$'`,
+    "value ~ E'^'\n'a\\'{256}$'",
+    "value ~ '^'\n'a''{256}$'",
+    `jsonb_path_exists(value, ('$ ? (@ like_regex "^a{25'\n'6}$")'))`,
+  ]) {
+    assert.equal(excessiveRegexBounds(expression).length, 1, expression);
+    const rendered = new PgDialect().sqlToQuery(
+      sql`${sql.raw(expression)}`
+    ).sql;
+    assert.equal(excessiveRegexBounds(rendered).length, 1, rendered);
+  }
+  for (const expression of [
+    "value ~ '^' 'a{256}$'",
+    "value ~ '^' /* comment */\n'a{256}$'",
+    "value ~ '^' /*\ncomment */ 'a{256}$'",
+    "value ~ '^'\n/* comment */ 'a{256}$'",
+    "value ~ '^'\nE'a{256}$'",
+    "value ~ $$^$$\n'a{256}$'",
+    "value ~ '^'\n$$a{256}$$",
+    "value ~ E'^a\\\\'\n'{256}$'",
+    "value ~ '^' -- a{256}\n'a{255}$'",
+  ]) {
+    assert.deepEqual(excessiveRegexBounds(expression), [], expression);
+  }
+});
+
 test("no migration, snapshot, or schema regex uses a repetition bound Postgres rejects", async () => {
   const [names, metaNames] = await Promise.all([
     readdir(migrations),
@@ -289,7 +430,7 @@ test("no migration, snapshot, or schema regex uses a repetition bound Postgres r
     ...names
       .filter((name) => name.endsWith(".sql"))
       .map((name) =>
-        readFile(new URL(name, migrations), "utf8").then((text) => ({
+        readMigration(name).then((text) => ({
           name,
           text,
         }))
@@ -302,10 +443,19 @@ test("no migration, snapshot, or schema regex uses a repetition bound Postgres r
           text: snapshotCheckText(snapshot),
         }))
       ),
-    readFile(new URL("../db/schema.ts", import.meta.url), "utf8").then(
-      (text) => ({ name: "schema.ts", text })
-    ),
   ]);
+  const dialect = new PgDialect();
+  for (const table of Object.values(schema)) {
+    if (is(table, PgTable)) {
+      const config = getTableConfig(table);
+      for (const check of config.checks) {
+        sources.push({
+          name: `rendered schema: ${config.name}.${check.name}`,
+          text: dialect.sqlToQuery(check.value).sql,
+        });
+      }
+    }
+  }
   assert.ok(sources.length > 30);
   for (const { name, text } of sources) {
     assert.deepEqual(
@@ -318,7 +468,7 @@ test("no migration, snapshot, or schema regex uses a repetition bound Postgres r
 
 test("0035 snapshots carry the exact CHECK text that 0035 applies", async () => {
   const [migration, ...snapshots] = await Promise.all([
-    readFile(new URL(PROJECT_AUTHORITY_MIGRATION, migrations), "utf8"),
+    readMigration(PROJECT_AUTHORITY_MIGRATION),
     readSnapshot("meta/0035_snapshot.json"),
     readSnapshot("meta/0036_snapshot.json"),
   ]);
@@ -367,10 +517,7 @@ test("schema.ts CHECK constraints render exactly as the latest snapshot records 
 });
 
 test("0036 reconstructs exact runner policy authority from the applied 0035 shape", async () => {
-  const migration = await readFile(
-    new URL(PROJECT_AUTHORITY_TRIGGER_MIGRATION, migrations),
-    "utf8"
-  );
+  const migration = await readMigration(PROJECT_AUTHORITY_TRIGGER_MIGRATION);
 
   assert.match(
     migration,
@@ -427,12 +574,9 @@ test("0036 reconstructs exact runner policy authority from the applied 0035 shap
 
 test("0032 adds exact runner broker authority without rewriting old migrations", async () => {
   const [migration, migration24, migration25] = await Promise.all([
-    readFile(new URL(GATEWAY_MIGRATION, migrations), "utf8"),
-    readFile(
-      new URL("0024_runner_execution_permissions.sql", migrations),
-      "utf8"
-    ),
-    readFile(new URL("0025_cynical_scourge.sql", migrations), "utf8"),
+    readMigration(GATEWAY_MIGRATION),
+    readMigration("0024_runner_execution_permissions.sql"),
+    readMigration("0025_cynical_scourge.sql"),
   ]);
 
   assert.doesNotMatch(migration24, /githubBrokerPolicy|github_only/u);
@@ -507,19 +651,10 @@ test("0032 adds exact runner broker authority without rewriting old migrations",
 });
 
 test("0032 metadata is last and models gateway columns and checks", async () => {
-  const [journalText, snapshotText] = await Promise.all([
-    readFile(new URL("meta/_journal.json", migrations), "utf8"),
-    readFile(new URL(GATEWAY_SNAPSHOT, migrations), "utf8"),
+  const [journal, snapshot] = await Promise.all([
+    readJournal(),
+    readSnapshot(GATEWAY_SNAPSHOT),
   ]);
-  const journal = JSON.parse(journalText) as {
-    entries: Array<{
-      breakpoints: boolean;
-      idx: number;
-      tag: string;
-      version: string;
-      when: number;
-    }>;
-  };
   const entry = journal.entries.find(({ idx }) => idx === 32);
   assert.deepEqual(entry, {
     breakpoints: true,
@@ -529,15 +664,6 @@ test("0032 metadata is last and models gateway columns and checks", async () => 
     when: entry?.when,
   });
 
-  const snapshot = JSON.parse(snapshotText) as {
-    tables: Record<
-      string,
-      {
-        columns: Record<string, unknown>;
-        checkConstraints: Record<string, { value: string }>;
-      }
-    >;
-  };
   const runnerRun = snapshot.tables["public.RunnerRun"];
   const capability = snapshot.tables["public.RunnerGitHubCapability"];
   const operation = snapshot.tables["public.RunnerGitHubOperation"];
@@ -554,10 +680,10 @@ test("0032 metadata is last and models gateway columns and checks", async () => 
 });
 
 test("0032 globally fences tenant operation ids and actor-bound policy metadata", async () => {
-  const [migration, journalText, snapshotText] = await Promise.all([
-    readFile(new URL(GATEWAY_MIGRATION, migrations), "utf8"),
-    readFile(new URL("meta/_journal.json", migrations), "utf8"),
-    readFile(new URL(GATEWAY_SNAPSHOT, migrations), "utf8"),
+  const [migration, journal, snapshot] = await Promise.all([
+    readMigration(GATEWAY_MIGRATION),
+    readJournal(),
+    readSnapshot(GATEWAY_SNAPSHOT),
   ]);
   assert.match(
     migration,
@@ -565,21 +691,9 @@ test("0032 globally fences tenant operation ids and actor-bound policy metadata"
   );
   assert.match(migration, /actorUserId/u);
 
-  const journal = JSON.parse(journalText) as {
-    entries: Array<{ idx: number; tag: string }>;
-  };
   const entry = journal.entries.find(({ idx }) => idx === 32);
   assert.equal(entry?.idx, 32);
   assert.equal(entry?.tag, "0032_github_tool_gateway");
-  const snapshot = JSON.parse(snapshotText) as {
-    tables: Record<
-      string,
-      {
-        checkConstraints: Record<string, { value: string }>;
-        uniqueConstraints: Record<string, { columns: string[] }>;
-      }
-    >;
-  };
   assert.deepEqual(
     snapshot.tables["public.RunnerGitHubOperation"].uniqueConstraints
       .RGHOp_tenant_operation_uq.columns,
@@ -593,10 +707,7 @@ test("0032 globally fences tenant operation ids and actor-bound policy metadata"
 });
 
 test("0032 adds database-level capability, marker, mapping, expiry, and immutability fences", async () => {
-  const migration = await readFile(
-    new URL(GATEWAY_MIGRATION, migrations),
-    "utf8"
-  );
+  const migration = await readMigration(GATEWAY_MIGRATION);
   for (const constraint of [
     "RGHCap_caps_valid",
     "RGHCap_timestamps_valid",
@@ -618,9 +729,9 @@ test("0032 adds database-level capability, marker, mapping, expiry, and immutabi
 });
 
 test("0032 preserves immutable operation receipts while live connections can be deleted", async () => {
-  const [migration, snapshotText] = await Promise.all([
-    readFile(new URL(GATEWAY_MIGRATION, migrations), "utf8"),
-    readFile(new URL(GATEWAY_SNAPSHOT, migrations), "utf8"),
+  const [migration, snapshot] = await Promise.all([
+    readMigration(GATEWAY_MIGRATION),
+    readSnapshot(GATEWAY_SNAPSHOT),
   ]);
   for (const column of [
     "accountId",
@@ -668,16 +779,6 @@ test("0032 preserves immutable operation receipts while live connections can be 
     /CREATE OR REPLACE FUNCTION "RunnerGitHubOperation_enforce_terminal_state"[\s\S]*to_jsonb\(NEW\) - 'connectionId'/u
   );
 
-  const snapshot = JSON.parse(snapshotText) as {
-    tables: Record<
-      string,
-      {
-        columns: Record<string, { notNull: boolean }>;
-        foreignKeys: Record<string, { onDelete: string }>;
-        indexes: Record<string, { isUnique: boolean; where?: string }>;
-      }
-    >;
-  };
   const operation = snapshot.tables["public.RunnerGitHubOperation"];
   const capability = snapshot.tables["public.RunnerGitHubCapability"];
   assert.equal(capability.columns.updatedAt.notNull, true);
@@ -697,10 +798,10 @@ test("0032 preserves immutable operation receipts while live connections can be 
 test("0032 persists pre-send versus sent provider dispatch and releasable write intents", async () => {
   const migrationUrl = new URL(GATEWAY_MIGRATION, migrations);
   assert.equal(existsSync(migrationUrl), true);
-  const [migration, journalText, snapshotText] = await Promise.all([
-    readFile(migrationUrl, "utf8"),
-    readFile(new URL("meta/_journal.json", migrations), "utf8"),
-    readFile(new URL(GATEWAY_SNAPSHOT, migrations), "utf8"),
+  const [migration, journal, snapshot] = await Promise.all([
+    readMigration(GATEWAY_MIGRATION),
+    readJournal(),
+    readSnapshot(GATEWAY_SNAPSHOT),
   ]);
 
   for (const column of [
@@ -730,15 +831,6 @@ test("0032 persists pre-send versus sent provider dispatch and releasable write 
     /OLD\."providerDispatchPhase" = 'pre_send'[\s\S]*NEW\."status" = 'pending'/u
   );
 
-  const journal = JSON.parse(journalText) as {
-    entries: Array<{
-      breakpoints: boolean;
-      idx: number;
-      tag: string;
-      version: string;
-      when: number;
-    }>;
-  };
   assert.deepEqual(
     journal.entries.find(({ idx }) => idx === 32),
     {
@@ -750,15 +842,6 @@ test("0032 persists pre-send versus sent provider dispatch and releasable write 
     }
   );
 
-  const snapshot = JSON.parse(snapshotText) as {
-    tables: Record<
-      string,
-      {
-        columns: Record<string, { notNull: boolean }>;
-        indexes: Record<string, { isUnique: boolean; where?: string }>;
-      }
-    >;
-  };
   const operation = snapshot.tables["public.RunnerGitHubOperation"];
   assert.equal(operation.columns.providerDispatchPhase.notNull, true);
   assert.equal(operation.columns.providerSentAt.notNull, false);
@@ -773,10 +856,10 @@ test("0032 persists pre-send versus sent provider dispatch and releasable write 
 test("0032 makes durable repository ordering use C collation", async () => {
   const migrationUrl = new URL(GATEWAY_MIGRATION, migrations);
   assert.equal(existsSync(migrationUrl), true);
-  const [migration, journalText, snapshotText] = await Promise.all([
-    readFile(migrationUrl, "utf8"),
-    readFile(new URL("meta/_journal.json", migrations), "utf8"),
-    readFile(new URL(GATEWAY_SNAPSHOT, migrations), "utf8"),
+  const [migration, journal, snapshot] = await Promise.all([
+    readMigration(GATEWAY_MIGRATION),
+    readJournal(),
+    readSnapshot(GATEWAY_SNAPSHOT),
   ]);
 
   assert.match(
@@ -788,15 +871,9 @@ test("0032 makes durable repository ordering use C collation", async () => {
     /ALTER TABLE "RunnerGitHubConnection".*COLLATE/u
   );
 
-  const journal = JSON.parse(journalText) as {
-    entries: Array<{ idx: number; tag: string; version: string }>;
-  };
   const entry = journal.entries.find(({ idx }) => idx === 32);
   assert.equal(entry?.tag, "0032_github_tool_gateway");
   assert.equal(entry?.version, "7");
 
-  const snapshot = JSON.parse(snapshotText) as {
-    tables: Record<string, unknown>;
-  };
   assert.ok(snapshot.tables["public.RunnerRun"]);
 });

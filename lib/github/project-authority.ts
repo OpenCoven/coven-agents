@@ -1,4 +1,4 @@
-const PROJECT_NODE_ID = /^[A-Za-z0-9_=-]{1,256}$/u;
+import { GITHUB_NODE_ID_PATTERN as PROJECT_NODE_ID } from "@opencoven/agent-contracts";
 
 export const MAX_GITHUB_PROJECT_AUTHORITY_PROOF_LIFETIME_MS = 15 * 60_000;
 

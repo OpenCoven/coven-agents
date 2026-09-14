@@ -17,6 +17,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
+import { sessionFetch as fetch } from "@/lib/auth/session-recovery";
 
 /**
  * Deletes every chat this account owns.

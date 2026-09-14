@@ -110,5 +110,14 @@ export function GithubSignInWithCallback() {
     process.env.NEXT_PUBLIC_BASE_PATH ?? ""
   );
 
-  return <GithubSignIn callbackUrl={callbackUrl} />;
+  return (
+    <>
+      {searchParams.get("reason") === "session-expired" ? (
+        <p className="mb-4 text-sm" role="status">
+          Your session has expired. Sign in again to continue.
+        </p>
+      ) : null}
+      <GithubSignIn callbackUrl={callbackUrl} />
+    </>
+  );
 }

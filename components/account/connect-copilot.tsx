@@ -11,6 +11,7 @@ import {
 import { toast } from "@/components/chat/toast";
 import { Button } from "@/components/ui/button";
 import { browserApplicationPath } from "@/lib/application-path";
+import { sessionFetch as fetch } from "@/lib/auth/session-recovery";
 import type { StartedDeviceFlow } from "@/lib/credentials/device-flow-attempt";
 import {
   createDeviceFlowController,

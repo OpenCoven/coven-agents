@@ -349,3 +349,42 @@ test("adversarial probes run only after the immutable demo replay fingerprint", 
     /Anonymous adversarial demo probes wrote to the hermetic database\./u
   );
 });
+
+test("session revocation runs after subscriber fixtures are reseeded and before demo fingerprints", async () => {
+  const source = await import("node:fs/promises").then(({ readFile }) =>
+    readFile(new URL("./e2e-hermetic.ts", import.meta.url), "utf8")
+  );
+  const subscriber = source.indexOf('"tests/e2e/subscriber-hermetic.test.ts"');
+  const reseed = source.indexOf("await seedHermeticUsers(url)", subscriber);
+  const revocation = source.indexOf(
+    '"tests/e2e/session-revocation-hermetic.test.ts"'
+  );
+  const demoFingerprint = source.indexOf("const beforeDemo");
+  assert.ok(subscriber >= 0);
+  assert.ok(
+    reseed > subscriber,
+    "subscriber mutations must not leak into auth fixtures"
+  );
+  assert.ok(revocation > reseed);
+  assert.ok(demoFingerprint > revocation);
+});
+
+test("base-path recovery runs outside both anonymous inventory assertions", async () => {
+  const source = await import("node:fs/promises").then(({ readFile }) =>
+    readFile(new URL("./e2e-hermetic.ts", import.meta.url), "utf8")
+  );
+  const replayInvariant = source.indexOf(
+    "JSON.stringify(beforeDemo) !== JSON.stringify(afterDemo)"
+  );
+  const recovery = source.indexOf(
+    '"tests/e2e/session-revocation-hermetic.test.ts"',
+    replayInvariant
+  );
+  const adversarialFingerprint = source.indexOf("const beforeAdversarial");
+  assert.ok(recovery > replayInvariant);
+  assert.ok(recovery < adversarialFingerprint);
+  assert.match(
+    source.slice(recovery, adversarialFingerprint),
+    /IS_DEMO:\s*"1"/u
+  );
+});

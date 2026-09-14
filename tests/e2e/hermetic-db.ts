@@ -60,6 +60,7 @@ export async function seedHermeticUsers(url: string): Promise<void> {
     await sql`DELETE FROM "RunUsage" WHERE "tenant" = ANY(${tenants})`;
     await sql`DELETE FROM "RunnerAgent" WHERE "tenant" = ANY(${tenants})`;
     await sql`DELETE FROM "TenantCredential" WHERE "tenant" = ANY(${tenants})`;
+    await sql`DELETE FROM "SubscriptionOverrideAudit" WHERE "userId" = ANY(${users.map(({ id }) => id)})`;
     await sql`DELETE FROM "User" WHERE "id" = ANY(${users.map(({ id }) => id)})`;
     await Promise.all(
       users.map(async (account) => {

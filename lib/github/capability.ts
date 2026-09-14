@@ -10,6 +10,7 @@ import {
   githubToolOperationSchema,
   githubToolResultSchema,
   isCanonicalUuid,
+  GITHUB_NODE_ID_PATTERN as NODE_ID,
   type RunError,
   runErrorSchema,
   type TeamCapability,
@@ -45,7 +46,6 @@ import {
 
 const TENANT = /^[A-Za-z0-9_]{1,64}$/u;
 const DECIMAL_ID = /^[1-9][0-9]{0,19}$/u;
-const NODE_ID = /^[A-Za-z0-9_=-]{1,256}$/u;
 const REPOSITORY_PART = /^[A-Za-z0-9_.-]{1,100}$/u;
 const TOKEN_HASH = /^[a-f0-9]{64}$/u;
 const REQUEST_ID = /^[A-Za-z0-9:-]{1,128}$/u;

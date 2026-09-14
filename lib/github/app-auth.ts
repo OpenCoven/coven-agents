@@ -1,6 +1,7 @@
 import "server-only";
 
 import { type KeyObject, sign } from "node:crypto";
+import { GITHUB_NODE_ID_PATTERN as NODE_ID } from "@opencoven/agent-contracts";
 import { compareAscii } from "@/lib/ascii";
 import type {
   GitHubAppRepositoryPermission,
@@ -11,7 +12,6 @@ const GITHUB_API_ORIGIN = "https://api.github.com";
 const GITHUB_API_VERSION = "2022-11-28";
 const DECIMAL_ID = /^[1-9][0-9]{0,19}$/u;
 const NAME = /^[A-Za-z0-9_.-]{1,100}$/u;
-const NODE_ID = /^[A-Za-z0-9_=-]{1,256}$/u;
 const PERMISSION_NAME = /^[a-z][a-z0-9_]{0,63}$/u;
 const REQUEST_ID = /^[A-Za-z0-9:-]{1,128}$/u;
 const DEFAULT_TIMEOUT_MS = 5000;

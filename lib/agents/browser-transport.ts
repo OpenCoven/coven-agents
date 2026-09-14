@@ -22,6 +22,7 @@ import {
 } from "@opencoven/harness";
 import { z } from "zod";
 import { browserApplicationPath } from "@/lib/application-path";
+import { sessionFetch } from "@/lib/auth/session-recovery";
 
 const DEFAULT_RECONNECT_DELAY_MS = 1000;
 const DEFAULT_START_RETRY_DELAY_MS = 250;
@@ -219,7 +220,7 @@ export class BrowserRunnerTransport implements RunnerTransport {
   private readonly startRetryDelayMs: number;
 
   constructor(
-    request: Fetch = globalThis.fetch,
+    request: Fetch = sessionFetch,
     options: BrowserRunnerTransportOptions = {}
   ) {
     this.request = request;
