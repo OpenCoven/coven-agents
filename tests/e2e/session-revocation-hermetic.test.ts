@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Page, type Request, test } from "@playwright/test";
 import postgres from "postgres";
 import {
   HERMETIC_USERS,
@@ -22,6 +22,10 @@ function database() {
   return postgres(url, { max: 1 });
 }
 
+function isAuthJsSessionRead(request: Request): boolean {
+  return request.headers()["content-type"] === "application/json";
+}
+
 async function controlSessionReads(page: Page) {
   const network = {
     authJsFailures: 0,
@@ -29,8 +33,7 @@ async function controlSessionReads(page: Page) {
     successfulReadsRemaining: Number.POSITIVE_INFINITY,
   };
   await page.route("**/api/auth/session", async (route) => {
-    const authJsRead =
-      route.request().headers()["content-type"] === "application/json";
+    const authJsRead = isAuthJsSessionRead(route.request());
     const unavailable = () =>
       network.successfulReadsRemaining <= 0 ||
       (network.blockAuthJsReads && authJsRead);
@@ -262,7 +265,12 @@ test.describe("hermetic session recovery", () => {
       if (request.isNavigationRequest()) {
         navigating = true;
       }
-      if (!navigating && request.url().endsWith("/api/auth/session")) {
+      // Auth.js also reads this endpoint independently of the recovery flow.
+      if (
+        !navigating &&
+        request.url().endsWith("/api/auth/session") &&
+        !isAuthJsSessionRead(request)
+      ) {
         recoveryReads += 1;
       }
     });
