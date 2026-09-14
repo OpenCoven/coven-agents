@@ -8,10 +8,12 @@ import {
   canonicalUuidSchema,
   okEnvelopeSchema,
   type RunEvent,
+  type RunLiveView,
   type RunSnapshot,
   runErrorEnvelopeSchema,
   runEventSchema,
   runListEnvelopeSchema,
+  runLiveViewEnvelopeSchema,
   runSnapshotEnvelopeSchema,
   type StartRunInput,
   warmStateSchema,
@@ -79,6 +81,7 @@ export interface RunnerTransport {
   deleteAgent: (agentId: string, signal?: AbortSignal) => Promise<void>;
   getAgent: (agentId: string, signal?: AbortSignal) => Promise<AgentDefinition>;
   getRun: (runId: string, signal?: AbortSignal) => Promise<RunSnapshot>;
+  getRunLiveView: (runId: string, signal?: AbortSignal) => Promise<RunLiveView>;
   health: (signal?: AbortSignal) => Promise<AgentRunnerHealth>;
   listAgents: (signal?: AbortSignal) => Promise<AgentDefinition[]>;
   listHarnesses: (signal?: AbortSignal) => Promise<HarnessStatus[]>;
@@ -414,6 +417,21 @@ export class BrowserRunnerTransport implements RunnerTransport {
         { signal }
       )
     ).run;
+  }
+
+  async getRunLiveView(
+    runId: string,
+    signal?: AbortSignal
+  ): Promise<RunLiveView> {
+    return (
+      await this.readJson(
+        await this.fetch(`/api/runs/${encodeURIComponent(runId)}/live-view`, {
+          signal,
+        }),
+        runLiveViewEnvelopeSchema,
+        { signal }
+      )
+    ).view;
   }
 
   streamRunEvents(

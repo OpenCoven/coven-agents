@@ -43,6 +43,35 @@ const DEFAULT_BATCH_SIZE = 20;
 const DEFAULT_DISPATCH_LIMIT = 1;
 const DEFAULT_PROVIDER_CONCURRENCY = 4;
 const DISPATCH_LEASE_MS = 60_000;
+const MIN_ATTEMPT_LEASE_MS = 5000;
+const MAX_ATTEMPT_LEASE_MS = 5 * 60_000;
+
+/**
+ * How long an attached attempt goes unobserved before the next reconciliation
+ * pass snapshots its logs and renews the lease. This is the cadence at which
+ * a watching console sees new steps, so it is tunable from the environment
+ * (`RUNNER_ATTEMPT_LEASE_MS`) while staying bounded: too short and every pass
+ * re-reads every live sandbox; too long and a run looks frozen for a minute.
+ */
+export function attemptLeaseMsFromEnvironment(
+  environment: NodeJS.ProcessEnv = process.env
+): number {
+  const raw = environment.RUNNER_ATTEMPT_LEASE_MS?.trim();
+  if (!raw) {
+    return DISPATCH_LEASE_MS;
+  }
+  const parsed = Number(raw);
+  if (
+    !Number.isSafeInteger(parsed) ||
+    parsed < MIN_ATTEMPT_LEASE_MS ||
+    parsed > MAX_ATTEMPT_LEASE_MS
+  ) {
+    throw new Error(
+      `RUNNER_ATTEMPT_LEASE_MS must be an integer between ${MIN_ATTEMPT_LEASE_MS} and ${MAX_ATTEMPT_LEASE_MS} milliseconds.`
+    );
+  }
+  return parsed;
+}
 
 declare const runnerReconciliationContextBrand: unique symbol;
 
@@ -153,6 +182,8 @@ export type RunnerReconciliationExecutionResult =
       Readonly<{ execution: "skipped"; reason: "overlap" }>);
 
 export type ReconcileAndDispatchDependencies = Readonly<{
+  /** Lease granted to an attached attempt after each observation. */
+  attemptLeaseMs?: number;
   batchSize?: number;
   claimTeamRuns?: () => Promise<
     Readonly<{
@@ -249,7 +280,8 @@ function boundedInteger(
 
 function nextLease(
   clock: () => Date,
-  randomToken: () => string
+  randomToken: () => string,
+  leaseMs: number = DISPATCH_LEASE_MS
 ): Readonly<{ leaseExpiresAt: Date; leaseToken: string }> {
   const now = clock();
   const leaseToken = randomToken();
@@ -262,7 +294,7 @@ function nextLease(
     throw new Error("Reconciliation lease dependencies are invalid.");
   }
   return {
-    leaseExpiresAt: new Date(now.getTime() + DISPATCH_LEASE_MS),
+    leaseExpiresAt: new Date(now.getTime() + leaseMs),
     leaseToken,
   };
 }
@@ -1381,6 +1413,16 @@ export async function reconcileAndDispatch(
   );
   const clock = dependencies.clock ?? (() => new Date());
   const randomToken = dependencies.randomToken ?? secureToken;
+  const attemptLeaseMs = dependencies.attemptLeaseMs ?? DISPATCH_LEASE_MS;
+  if (
+    !Number.isSafeInteger(attemptLeaseMs) ||
+    attemptLeaseMs < MIN_ATTEMPT_LEASE_MS ||
+    attemptLeaseMs > MAX_ATTEMPT_LEASE_MS
+  ) {
+    throw new Error(
+      `Attempt lease must be an integer between ${MIN_ATTEMPT_LEASE_MS} and ${MAX_ATTEMPT_LEASE_MS} milliseconds.`
+    );
+  }
   const maxRunDurationMs = boundedInteger(
     dependencies.maxRunDurationMs,
     RUNNER_MID_RUN_ENTITLEMENT_POLICY.maxDurationMs,
@@ -1420,7 +1462,7 @@ export async function reconcileAndDispatch(
         return await recoverExpiredDispatch(
           run,
           dependencies,
-          nextLease(clock, randomToken),
+          nextLease(clock, randomToken, attemptLeaseMs),
           maxRunDurationMs
         );
       } catch {

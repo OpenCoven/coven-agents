@@ -1260,6 +1260,37 @@ export const runSnapshotEnvelopeSchema = z
     run: runSnapshotSchema,
   })
   .strict();
+/**
+ * A short-lived, signed view of a running sandbox's desktop, or the reason
+ * one is not available. The URL is unredacted by nature and expires; clients
+ * refresh it rather than persist it.
+ */
+export const runLiveViewEnvelopeSchema = z
+  .object({
+    apiVersion: agentRunnerApiVersionSchema,
+    view: z.discriminatedUnion("kind", [
+      z
+        .object({
+          expiresAt: datetimeSchema,
+          kind: z.literal("ready"),
+          url: z.string().url().max(4096),
+        })
+        .strict(),
+      z
+        .object({
+          kind: z.literal("unavailable"),
+          reason: z.enum([
+            "desktop_unavailable",
+            "not_configured",
+            "not_running",
+            "provider_unavailable",
+            "sandbox_missing",
+          ]),
+        })
+        .strict(),
+    ]),
+  })
+  .strict();
 export const startRunEnvelopeSchema = runSnapshotEnvelopeSchema;
 export const getRunEnvelopeSchema = runSnapshotEnvelopeSchema;
 export const stopRunEnvelopeSchema = runSnapshotEnvelopeSchema;
@@ -1599,6 +1630,8 @@ export type RunErrorEnvelope = z.infer<typeof runErrorEnvelopeSchema>;
 export type RunEventType = z.infer<typeof runEventTypeSchema>;
 export type RunEventsEnvelope = z.infer<typeof runEventsEnvelopeSchema>;
 export type RunSnapshotEnvelope = z.infer<typeof runSnapshotEnvelopeSchema>;
+export type RunLiveViewEnvelope = z.infer<typeof runLiveViewEnvelopeSchema>;
+export type RunLiveView = RunLiveViewEnvelope["view"];
 export type CreateSkillInput = z.input<typeof createSkillInputSchema>;
 export type CreateTeamInput = z.input<typeof createTeamInputSchema>;
 export type CreateTeamRunInput = z.input<typeof createTeamRunInputSchema>;

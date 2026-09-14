@@ -205,27 +205,517 @@
   border-color: color-mix(in oklch, var(--accent-presence) 70%, transparent);
 }
 
-/* Pseudo-element spine — the one thing an inline style cannot express.
-   Depth carries meaning here: the run hangs off a timeline, the premise and
-   the conclusion sit above the plane, and raw output is cut into it. */
+/* The run record as tape.
+
+   A clock runs down the left gutter and a spine runs beside it; each entry
+   hangs off the spine by a node whose shape says who acted (`data-kind`) and
+   whose colour says how it went (`data-tone`). Depth still carries meaning:
+   the premise, a failure, and the receipt sit above the plane as cards, and
+   everything else is a row on it. */
 .oc-thread {
+  --oc-gutter: 64px;
+  --oc-node: 12px;
+
   position: relative;
+  gap: 4px;
 }
 
 .oc-thread::before {
   position: absolute;
-  top: 12px;
-  bottom: 20px;
-  left: 0;
+  top: 16px;
+  bottom: 24px;
+  left: calc(var(--oc-gutter) - var(--oc-node) / 2 - 0.5px);
   width: 1px;
   content: "";
   background: linear-gradient(
     to bottom,
     transparent,
-    var(--border-hairline) 6%,
-    var(--border-hairline) 94%,
+    var(--border-hairline) 4%,
+    var(--border-hairline) 96%,
     transparent
   );
+}
+
+.oc-block {
+  display: grid;
+  grid-template-columns: var(--oc-gutter) minmax(0, 1fr);
+  column-gap: 16px;
+  animation: oc-in var(--duration-slow) var(--ease-decelerate) both;
+}
+
+/* Cards breathe; rows sit close so a run of commands reads as one ledger. */
+.oc-block[data-kind="mission"],
+.oc-block[data-kind="error"],
+.oc-block[data-kind="evidence"],
+.oc-block[data-kind="text"] {
+  padding-block: 8px;
+}
+
+.oc-block[data-kind="lifecycle"] {
+  padding-block: 6px;
+}
+
+.oc-block__gutter {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: flex-end;
+  height: 32px;
+}
+
+.oc-block[data-kind="mission"] .oc-block__gutter,
+.oc-block[data-kind="text"] .oc-block__gutter {
+  height: 30px;
+}
+
+.oc-block[data-kind="lifecycle"] .oc-block__gutter {
+  height: 22px;
+}
+
+.oc-block__stamp {
+  min-width: 38px;
+  font: 500 10px / 1 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-faint);
+  text-align: right;
+  letter-spacing: 0.02em;
+}
+
+.oc-block__body {
+  min-width: 0;
+}
+
+/* The node vocabulary. Colour is state, never identity — the one exception is
+   the brand glyph on the agent's own passages, which is identity by design. */
+.oc-block__node {
+  --node-ink: var(--text-faint);
+
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: var(--oc-node);
+  height: var(--oc-node);
+  color: var(--node-ink);
+  background: var(--bg-panel);
+}
+
+.oc-block[data-tone="running"] .oc-block__node {
+  --node-ink: var(--color-warning);
+}
+
+.oc-block[data-tone="success"] .oc-block__node {
+  --node-ink: var(--color-success);
+}
+
+.oc-block[data-tone="danger"] .oc-block__node {
+  --node-ink: var(--color-danger);
+}
+
+.oc-block[data-kind="mission"] .oc-block__node {
+  --node-ink: var(--text-primary);
+
+  width: 9px;
+  height: 9px;
+  margin-inline: 1.5px;
+  background: var(--node-ink);
+  border-radius: 1px;
+  transform: rotate(45deg);
+}
+
+.oc-block[data-kind="lifecycle"] .oc-block__node {
+  width: 9px;
+  height: 9px;
+  margin-inline: 1.5px;
+  border: 1.5px solid var(--node-ink);
+  border-radius: var(--radius-pill);
+}
+
+.oc-block[data-kind="command"] .oc-block__node {
+  --node-ink: var(--text-muted);
+
+  width: 7px;
+  height: 7px;
+  margin-inline: 2.5px;
+  background: var(--node-ink);
+  border-radius: var(--radius-pill);
+}
+
+.oc-block[data-kind="command"][data-tone="running"] .oc-block__node {
+  --node-ink: var(--color-warning);
+
+  animation: oc-node-pulse 1.6s var(--ease-standard) infinite;
+}
+
+.oc-block[data-kind="command"][data-tone="danger"] .oc-block__node {
+  --node-ink: var(--color-danger);
+}
+
+.oc-block[data-kind="files"] .oc-block__node {
+  --node-ink: var(--text-muted);
+
+  width: 7px;
+  height: 7px;
+  margin-inline: 2.5px;
+  background: var(--node-ink);
+  border-radius: 1px;
+}
+
+.oc-block[data-kind="text"] .oc-block__node {
+  --node-ink: var(--accent-presence);
+
+  width: 16px;
+  height: 16px;
+  margin-inline: -2px;
+}
+
+.oc-block[data-kind="error"] .oc-block__node,
+.oc-block[data-kind="evidence"] .oc-block__node {
+  width: 14px;
+  height: 14px;
+  margin-inline: -1px;
+}
+
+@keyframes oc-node-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.oc-thread__tail {
+  padding-top: 10px;
+  padding-left: calc(var(--oc-gutter) + 16px);
+}
+
+/* Live view: a window onto the sandbox desktop, pinned above the record.
+   The record is redacted before it is stored; this frame is not. The header
+   carries that warning in words, and the warning tone in colour. */
+.oc-live-view {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  margin: 10px 14px 0;
+  overflow: hidden;
+  background: var(--bg-raised);
+  border: 1px solid
+    color-mix(in oklab, var(--color-warning) 35%, var(--border-hairline));
+  border-radius: var(--radius-panel);
+  animation: oc-in 0.36s var(--ease-standard) both;
+}
+
+.oc-live-view__head {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  min-height: 36px;
+  padding: 0 8px 0 12px;
+  background: color-mix(in oklab, var(--color-warning) 6%, var(--bg-raised));
+  border-bottom: 1px solid var(--border-hairline);
+}
+
+.oc-live-view__note {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font: 400 11.5px / 1.3 var(--font-ui);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.oc-live-view__ttl {
+  font: 500 11px / 1 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-faint);
+}
+
+.oc-live-view__open {
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+  height: 24px;
+  padding: 0 8px;
+  font: 500 11px / 1 var(--font-ui);
+  color: var(--text-secondary);
+  text-decoration: none;
+  border-radius: var(--radius-control);
+}
+
+.oc-live-view__open:hover,
+.oc-live-view__open:focus-visible {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.oc-live-view__close {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  color: var(--text-muted);
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-control);
+}
+
+.oc-live-view__stage {
+  position: relative;
+  max-height: min(56vh, 620px);
+  aspect-ratio: 16 / 9;
+  background: #0b0b0e;
+}
+
+.oc-live-view__frame {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: #0b0b0e;
+  border: 0;
+}
+
+.oc-live-view__message {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  text-align: center;
+}
+
+.oc-live-view__message > span {
+  display: block;
+}
+
+/* Header toggle: a breathing warning dot says "this shows a live thing". */
+.oc-live-view__toggle {
+  display: inline-flex;
+  gap: 7px;
+  align-items: center;
+}
+
+.oc-live-view__dot {
+  width: 6px;
+  height: 6px;
+  background: var(--color-warning);
+  border-radius: 50%;
+  animation: oc-node-pulse 1.6s var(--ease-standard) infinite;
+}
+
+.oc-live-view__toggle[data-open] .oc-live-view__dot {
+  animation: none;
+}
+
+/* Lifecycle: a rule across the plane, not a card. */
+.oc-lifecycle-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  height: 22px;
+  padding-right: 4px;
+}
+
+.oc-lifecycle-row__label {
+  font: 500 11px / 1 var(--font-ui);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.oc-lifecycle-row__detail {
+  font: 400 10px / 1 var(--font-mono);
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.oc-lifecycle-row__rule {
+  flex: 1;
+  height: 1px;
+  background: var(--border-hairline);
+}
+
+/* Ledger rows: a command or a set of file changes, on the plane. Only when it
+   opens does it pick up a frame, and a failure is framed in red from the
+   start. */
+.oc-ledger {
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  transition:
+    background var(--duration-fast) var(--ease-standard),
+    border-color var(--duration-fast) var(--ease-standard);
+}
+
+.oc-ledger[data-open="true"] {
+  padding-bottom: 8px;
+  background: color-mix(in oklch, var(--bg-raised) 70%, transparent);
+  border-color: var(--border-hairline);
+}
+
+.oc-ledger[data-tone="danger"] {
+  background: color-mix(in oklch, var(--danger-bg) 55%, transparent);
+  border-color: var(--danger-border);
+}
+
+.oc-ledger-row {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+  width: 100%;
+  min-height: 32px;
+  padding: 6px 10px 6px 8px;
+  text-align: left;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-md);
+}
+
+.oc-ledger-row:hover {
+  background: color-mix(in oklch, var(--bg-raised) 60%, transparent);
+}
+
+.oc-ledger-row:focus-visible {
+  outline: 2px solid var(--accent-presence);
+  outline-offset: -2px;
+}
+
+.oc-ledger-row__title {
+  display: flex;
+  flex: 1;
+  gap: 0;
+  min-width: 0;
+  overflow: hidden;
+  font: 400 11.5px / 1.3 var(--font-mono);
+  white-space: nowrap;
+}
+
+.oc-ledger-row__head {
+  flex: none;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.oc-ledger-row__rest {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-secondary);
+}
+
+.oc-ledger-row__exit {
+  font: 500 10px / 1 var(--font-mono);
+  color: var(--text-faint);
+  letter-spacing: 0.04em;
+}
+
+.oc-ledger-row__summary {
+  display: flex;
+  gap: 7px;
+  align-items: baseline;
+  min-width: 0;
+  padding: 0 10px 7px 30px;
+  margin-top: -3px;
+  font: 400 10.5px / 1.4 var(--font-mono);
+  opacity: 0.85;
+}
+
+.oc-ledger-row__summary > :first-child {
+  flex: none;
+  color: var(--text-faint);
+}
+
+.oc-ledger__empty,
+.oc-ledger__note {
+  padding: 0 12px 4px 30px;
+  font: 400 11px / 1.55 var(--font-ui);
+  color: var(--text-muted);
+}
+
+.oc-ledger__note {
+  padding-top: 4px;
+}
+
+.oc-ledger__files {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 12px 2px 30px;
+}
+
+.oc-ledger__live {
+  display: flex;
+  gap: 7px;
+  align-items: center;
+  padding: 6px 12px 0 30px;
+}
+
+/* A passage: the agent speaking, set on the plane as prose rather than boxed
+   like a machine result. The glyph on the spine is what identifies it. */
+.oc-passage {
+  max-width: 68ch;
+  padding: 0 4px;
+}
+
+.oc-passage__head {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+  height: 30px;
+  margin-bottom: 2px;
+}
+
+.oc-passage__voice {
+  font: 600 10px / 1 var(--font-mono);
+  color: var(--accent-presence);
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+}
+
+/* The rail's tally strip. */
+.oc-steps-tally {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  padding: 8px 13px;
+  font: 500 10px / 1.4 var(--font-mono);
+  color: var(--text-muted);
+  letter-spacing: 0.03em;
+  border-bottom: var(--border-hairline);
+}
+
+.oc-steps-tally span {
+  position: relative;
+}
+
+.oc-steps-tally span[data-tone="danger"] {
+  color: var(--color-danger);
+}
+
+.oc-steps-tally span:not(:first-child)::before {
+  position: absolute;
+  top: 50%;
+  left: -8px;
+  width: 2px;
+  height: 2px;
+  content: "";
+  background: var(--text-faint);
+  border-radius: var(--radius-pill);
+  transform: translateY(-50%);
+}
+
+.oc-evidence-stat__value {
+  font: 500 22px / 1 var(--font-ui);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
 }
 
 .oc-live-activity {
@@ -2480,10 +2970,6 @@
   }
 }
 
-.oc-block {
-  animation: oc-in var(--duration-slow) var(--ease-decelerate) both;
-}
-
 /* Staged reveal — the console's one choreographed moment.
 
    A new surface (composer, run record, creation paths) does not appear all
@@ -4228,6 +4714,33 @@
    squeezing it out of the viewport. Settings navigation becomes a horizontal
    strip; profile creation is already a single-canvas flow. */
 @media (max-width: 720px) {
+  /* Narrow screens keep the spine and lose the clock; the stamp column would
+     otherwise take a third of the line. */
+  .oc-thread {
+    --oc-gutter: 18px;
+  }
+
+  .oc-live-view {
+    margin: 8px 8px 0;
+  }
+
+  .oc-live-view__note,
+  .oc-live-view__open {
+    display: none;
+  }
+
+  .oc-block {
+    column-gap: 10px;
+  }
+
+  .oc-block__stamp {
+    display: none;
+  }
+
+  .oc-thread__tail {
+    padding-left: 0;
+  }
+
   .oc-profile-selector__dialog {
     right: 8px;
     left: 8px;

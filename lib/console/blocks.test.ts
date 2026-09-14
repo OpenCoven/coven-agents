@@ -611,3 +611,53 @@ test("with no run there is nothing to project", () => {
   assert.deepEqual(blocks, []);
   assert.deepEqual(steps, []);
 });
+
+test("every block is stamped with its offset from the run's creation", () => {
+  // The origin is creation, not start, so the gutter shows queue time as
+  // honestly as execution time.
+  const { blocks } = project(
+    [
+      {
+        at: "2026-08-25T12:00:41.000Z",
+        id: 1,
+        status: "running",
+        type: "status",
+      },
+      {
+        at: "2026-08-25T12:00:50.000Z",
+        evidence: {
+          command: "pnpm test --filter session",
+          completedAt: "2026-08-25T12:00:49.000Z",
+          exitCode: 0,
+          startedAt: "2026-08-25T12:00:45.000Z",
+          stderr: "",
+          stdout: "12 passed\nDone in 3.9s\n",
+        },
+        id: 2,
+        type: "command",
+      },
+      {
+        at: "2026-08-25T12:00:52.000Z",
+        id: 3,
+        output: "All green.",
+        type: "output",
+      },
+    ],
+    snapshot({
+      createdAt: "2026-08-25T12:00:00.000Z",
+      startedAt: "2026-08-25T12:00:41.000Z",
+    })
+  );
+
+  const [mission, lifecycle, command, text] = blocks;
+  assert.equal(mission?.atMs, 0);
+  assert.equal(lifecycle?.atMs, 41_000);
+  // A command is stamped where it started, not where its result arrived.
+  assert.equal(command?.atMs, 45_000);
+  assert.equal(text?.atMs, 52_000);
+  assert.equal(command?.kind, "command");
+  if (command?.kind === "command") {
+    assert.equal(command.head, "pnpm");
+    assert.equal(command.summary, "Done in 3.9s");
+  }
+});

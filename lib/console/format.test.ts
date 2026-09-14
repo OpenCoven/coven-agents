@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   formatAge,
   formatDuration,
+  formatOffset,
   glyphFor,
   spanBetween,
   splitPath,
@@ -90,4 +91,12 @@ test("a path splits into a dimmable directory and a leaf", () => {
     leaf: "session-claims.test.ts",
   });
   assert.deepEqual(splitPath("README.md"), { dir: "", leaf: "README.md" });
+});
+
+test("an offset stamps the tape as +m:ss and zero-pads its seconds", () => {
+  assert.equal(formatOffset(0), "+0:00");
+  assert.equal(formatOffset(4900), "+0:04");
+  assert.equal(formatOffset(68_000), "+1:08");
+  assert.equal(formatOffset(3_725_000), "+1:02:05");
+  assert.equal(formatOffset(-1), "—");
 });

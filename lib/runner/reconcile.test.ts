@@ -4,6 +4,7 @@ import test from "node:test";
 import { DaytonaNotFoundError } from "@daytona/sdk";
 import { sanitizeEvidenceText } from "@opencoven/agent-contracts";
 import {
+  attemptLeaseMsFromEnvironment,
   cancelRunnerRun,
   type ReconcileAndDispatchDependencies,
   reconcileAndDispatch,
@@ -1768,6 +1769,107 @@ test("a terminal command with an unsettled log tail remains retryable", async ()
   ]);
   assert.equal(result.deferred, 1);
   assert.equal(result.terminalized, 0);
+});
+
+test("the attempt lease granted on adoption follows the configured cadence", async () => {
+  const attached = run({
+    daytonaCommandId: "command",
+    daytonaSessionId: "session",
+    dispatchState: "running",
+    startedAt: new Date("2026-08-28T14:58:00.000Z"),
+    status: "running",
+  });
+  const authority = {
+    attemptId,
+    expectedVersion: attached.version + 1,
+    leaseToken: "adopted-lease",
+    runId: attached.id,
+  } as RunnerDispatchAuthority;
+  const leases: Date[] = [];
+  const dependencies = (attemptLeaseMs?: number) =>
+    ({
+      ...(attemptLeaseMs === undefined ? {} : { attemptLeaseMs }),
+      clock: () => new Date("2026-08-28T15:00:00.000Z"),
+      openAttemptRedaction: async () => "redaction-secret",
+      operator,
+      provider: {
+        resolveExecutionContext: async () => ({}) as never,
+        snapshot: async () => ({
+          cursor: 0,
+          events: [],
+          exitCode: null,
+          logsSettled: false,
+          status: "running" as const,
+          summary: {
+            fileOperations: [],
+            output: "",
+            premiumRequests: null,
+            sessionId: null,
+            status: "completed" as const,
+            toolCalls: [],
+          },
+        }),
+        stop: async () => ({ kind: "stopped" as const }),
+      },
+      randomToken: () => "adopted-lease",
+      store: {
+        adoptExpiredDaytonaProcess: async (
+          _operator: unknown,
+          input: { leaseExpiresAt: Date }
+        ) => {
+          leases.push(input.leaseExpiresAt);
+          return {
+            authority,
+            kind: "adopted" as const,
+            run: {
+              ...attached,
+              dispatchLeaseToken: authority.leaseToken,
+              version: authority.expectedVersion,
+            },
+          };
+        },
+        appendDispatchEventBatch: async () => ({
+          authority,
+          events: [],
+          kind: "appended" as const,
+          run: {} as never,
+        }),
+        readAttemptRedaction: async () => ({
+          kind: "found" as const,
+          value: {
+            aadVersion: 1,
+            attemptId,
+            ciphertext: "ciphertext",
+            createdAt: new Date(),
+            iv: "iv",
+            kekVersion: "v1",
+            runId: attached.id,
+            wrappedKey: "wrapped",
+          },
+        }),
+        requeueExpiredDispatch: async () => ({ kind: "not_live" as const }),
+        scanExpiredDispatchLeases: async () => [attached],
+      } as never,
+    }) as ReconcileAndDispatchDependencies;
+
+  await reconcileAndDispatch(dependencies());
+  await reconcileAndDispatch(dependencies(15_000));
+
+  assert.deepEqual(
+    leases.map((lease) => lease.toISOString()),
+    ["2026-08-28T15:01:00.000Z", "2026-08-28T15:00:15.000Z"]
+  );
+  await assert.rejects(reconcileAndDispatch(dependencies(1000)));
+  await assert.rejects(reconcileAndDispatch(dependencies(10 * 60_000)));
+});
+
+test("the attempt lease cadence is read from the environment within bounds", () => {
+  const env = (value?: string) =>
+    ({ RUNNER_ATTEMPT_LEASE_MS: value }) as unknown as NodeJS.ProcessEnv;
+  assert.equal(attemptLeaseMsFromEnvironment(env()), 60_000);
+  assert.equal(attemptLeaseMsFromEnvironment(env("15000")), 15_000);
+  assert.throws(() => attemptLeaseMsFromEnvironment(env("100")));
+  assert.throws(() => attemptLeaseMsFromEnvironment(env("soon")));
 });
 
 test("a terminal command with a persistently unsettled tail releases capacity after the run limit", async () => {

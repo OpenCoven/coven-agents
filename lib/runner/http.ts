@@ -11,6 +11,7 @@ import {
   okEnvelopeSchema,
   runErrorEnvelopeSchema,
   runListEnvelopeSchema,
+  runLiveViewEnvelopeSchema,
   runSnapshotEnvelopeSchema,
   startRunInputSchema,
   updateAgentInputSchema,
@@ -175,6 +176,14 @@ type After = (task: AfterTask) => void;
 
 export type RunnerHttpDependencies = Readonly<{
   after?: After;
+  /**
+   * How often an open event stream nudges reconciliation while its run is
+   * still live, so a watching console sees steps at that cadence rather than
+   * the cron's. Zero disables the nudge. Defaults from
+   * `RUNNER_LIVE_TAIL_MS`, then to ten seconds.
+   */
+  liveTailMs?: number;
+  now?: () => number;
   appOrigin?: string | (() => string | null);
   auth: RunnerAuth;
   createDiagnosticName?: () => string;
@@ -199,6 +208,7 @@ export type RunnerHttpHandlers = Readonly<{
   getHarnesses: (request: Request) => Promise<Response>;
   getRun: (request: Request, runId: string) => Promise<Response>;
   getRunEvents: (request: Request, runId: string) => Promise<Response>;
+  getRunLiveView: (request: Request, runId: string) => Promise<Response>;
   health: (request: Request) => Promise<Response>;
   listAgentRuns: (request: Request, agentId: string) => Promise<Response>;
   listAgents: (request: Request) => Promise<Response>;
@@ -435,6 +445,71 @@ function scheduleLiveRunReconciliation(
   schedule(dependencies, async () => {
     await service.reconcileAndDispatch();
   });
+}
+
+export const DEFAULT_LIVE_TAIL_MS = 10_000;
+const MIN_LIVE_TAIL_MS = 2000;
+const MAX_LIVE_TAIL_MS = 5 * 60_000;
+
+export function liveTailMsFromEnvironment(
+  environment: NodeJS.ProcessEnv = process.env
+): number {
+  const raw = environment.RUNNER_LIVE_TAIL_MS?.trim();
+  if (!raw) {
+    return DEFAULT_LIVE_TAIL_MS;
+  }
+  const parsed = Number(raw);
+  if (parsed === 0) {
+    return 0;
+  }
+  if (
+    !Number.isSafeInteger(parsed) ||
+    parsed < MIN_LIVE_TAIL_MS ||
+    parsed > MAX_LIVE_TAIL_MS
+  ) {
+    throw new Error(
+      `RUNNER_LIVE_TAIL_MS must be 0 or an integer between ${MIN_LIVE_TAIL_MS} and ${MAX_LIVE_TAIL_MS} milliseconds.`
+    );
+  }
+  return parsed;
+}
+
+/**
+ * Turns an open event stream into a heartbeat for its run.
+ *
+ * The harness writes to a sandbox log that only reconciliation reads, so
+ * without this a watcher sees a new burst of steps once a minute, when cron
+ * fires. Each nudge is a full leased `reconcileAndDispatch`; the lease makes
+ * concurrent watchers and cron collapse into one pass, and the attempt lease
+ * (`RUNNER_ATTEMPT_LEASE_MS`) decides whether a pass re-reads the sandbox.
+ * The nudge is fire-and-forget: a failure here never disturbs the stream.
+ */
+function liveTail(
+  dependencies: RunnerHttpDependencies,
+  service: RunnerService
+): (terminal: boolean) => void {
+  const interval = dependencies.liveTailMs ?? liveTailMsFromEnvironment();
+  if (interval <= 0) {
+    return () => undefined;
+  }
+  const now = dependencies.now ?? Date.now;
+  let last = now();
+  let inFlight = false;
+  return (terminal) => {
+    if (terminal || inFlight || now() - last < interval) {
+      return;
+    }
+    last = now();
+    inFlight = true;
+    service
+      .reconcileAndDispatch()
+      .catch(() => {
+        // The durable queue and authenticated cron are the correctness path.
+      })
+      .finally(() => {
+        inFlight = false;
+      });
+  };
 }
 
 function startLiveRunReconciliation(
@@ -833,6 +908,7 @@ export function createRunnerHttpHandlers(
           return runNotFound(dependencies);
         }
         startLiveRunReconciliation(dependencies, service, !initial.terminal);
+        const nudge = liveTail(dependencies, service);
         const stream = eventStream({
           lastEventId,
           read: async (cursor) => {
@@ -841,9 +917,11 @@ export function createRunnerHttpHandlers(
               runId,
               cursor
             );
-            return page.kind === "found"
-              ? { events: page.events, terminal: page.terminal }
-              : null;
+            if (page.kind !== "found") {
+              return null;
+            }
+            nudge(page.terminal);
+            return { events: page.events, terminal: page.terminal };
           },
           signal: request.signal,
         });
@@ -855,6 +933,32 @@ export function createRunnerHttpHandlers(
             "x-accel-buffering": "no",
           },
         });
+      }),
+
+    getRunLiveView: (request, runId) =>
+      safely(dependencies, async () => {
+        const context = await authorizeSubscriber(
+          request,
+          "runner_read",
+          dependencies
+        );
+        if (isResponse(context)) {
+          return context;
+        }
+        const invalid = invalidId(dependencies, runId);
+        if (invalid) {
+          return invalid;
+        }
+        const service = await dependencies.createService(context);
+        const result = await service.getRunLiveView(context.principal, runId);
+        if (result.kind === "not_found") {
+          return runNotFound(dependencies);
+        }
+        return runnerJsonResponse(
+          runLiveViewEnvelopeSchema,
+          { apiVersion: AGENT_RUNNER_API_VERSION, view: result },
+          { headers: { "cache-control": "no-store" } }
+        );
       }),
 
     health: (request) =>
