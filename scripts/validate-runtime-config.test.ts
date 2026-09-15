@@ -103,6 +103,9 @@ const RUNTIME_CONFIGURATION_KEYS = [
   "AUTH_GITHUB_ID",
   "AUTH_GITHUB_SECRET",
   "AUTH_SECRET",
+  "WORKOS_AUTH_ENABLED",
+  "WORKOS_CLIENT_ID",
+  "WORKOS_API_KEY",
   "AUTH_URL",
   "BETA_ALLOWLIST",
   "BETA_MODE",
@@ -306,6 +309,7 @@ test("GitHub state signing authority cannot alias another server secret", () => 
   for (const name of [
     "AI_GATEWAY_API_KEY",
     "AUTH_SECRET",
+    "WORKOS_API_KEY",
     "AUTH_GITHUB_SECRET",
     "ABUSE_KEY_SECRET",
     "BLOB_READ_WRITE_TOKEN",

@@ -50,7 +50,7 @@ bounded and redacted before persistence or display.
 Signed-out visitors may view a committed, sanitized replay only when `IS_DEMO`
 is explicitly set to `1`; an unset value or any other value keeps the normal
 application routes. Replay captures may be published only from the exact
-`OpenCoven/demo-workspace` repository. GitHub sign-in creates or adopts an
+`OpenCoven/demo-workspace` repository. Verified account sign-in creates or adopts an
 account but does not grant execution. Subscriber authority is recomputed from
 server-owned state, and protected routes revalidate the current account version
 before database, credential, or Daytona work.
@@ -126,6 +126,41 @@ pnpm daytona:snapshot
 
 GitHub Copilot CLI is the runnable harness today. Other detected harnesses are
 reported but refused until their event translation is implemented.
+
+## WorkOS login and waitlist
+
+Use WorkOS AuthKit to collect signup requests before allowing registration.
+The integration uses the existing Auth.js application session and local account
+records. WorkOS approval permits registration; execution still requires the
+app's current subscription or explicit complimentary access.
+
+1. In your intended WorkOS environment, enable AuthKit and its
+   [hosted waitlist](https://workos.com/docs/authkit/waitlist) under
+   **Authentication → Features**. Entries are stored and reviewed in WorkOS.
+2. Register `https://agents.opencoven.ai/api/auth/callback/workos` as the
+   redirect URI. Add each preview or local callback URI separately when testing.
+3. Configure `WORKOS_CLIENT_ID` and `WORKOS_API_KEY` as server-only Vercel
+   variables, then set `WORKOS_AUTH_ENABLED=1` and deploy the verified candidate.
+   Missing enabled configuration fails validation. Never put the API key in a
+   public variable, issue, command argument, or tracked file.
+4. Check **Join the waitlist**, then verify the pending entry in WorkOS. Approve
+   a dedicated test account and verify sign-in returns to the requested page.
+   Verify an unapproved signup cannot register and cannot reach execution.
+5. Before switching existing customers, verify their WorkOS-verified email
+   matches the existing local account. Existing accounts retain their local ID,
+   stored access, and session-revocation version. WorkOS sign-in does not enroll
+   new accounts in the GitHub-age-based beta campaign.
+
+With WorkOS enabled, direct GitHub account login is removed from the provider
+list so it cannot bypass the hosted waitlist. GitHub repository connections and
+Copilot credentials remain separate. With the flag unset or `0`, existing
+GitHub login remains active. Changing the flag requires a new deployment.
+
+The callback uses Auth.js state and PKCE checks and accepts only a verified
+WorkOS email. Provider access and refresh tokens are not stored in the app
+session. Local tests do not prove WorkOS environment settings, waitlist capture,
+email delivery, or production login; retain those live receipts before claiming
+this flow is enabled.
 
 ## Administration
 

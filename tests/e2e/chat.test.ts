@@ -36,9 +36,10 @@ test.describe("Legacy chat surface", () => {
     await expect(
       page.getByRole("heading", { name: "Sign in to use chat" })
     ).toBeVisible();
-    await expect(
-      page.getByRole("link", { name: "Sign in with GitHub" })
-    ).toHaveAttribute("href", "/login");
+    await expect(page.getByRole("link", { name: "Sign in" })).toHaveAttribute(
+      "href",
+      "/login"
+    );
     await expect(page.getByTestId("multimodal-input")).toHaveCount(0);
     expect(protectedRequests).toEqual([]);
   });

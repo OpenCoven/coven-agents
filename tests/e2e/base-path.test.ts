@@ -184,9 +184,10 @@ test.describe("Demo base path", () => {
     await page.goto("/demo/agents");
     await page.getByRole("button", { name: "Account and settings" }).click();
 
-    await expect(
-      page.getByRole("link", { name: "Sign in with GitHub" })
-    ).toHaveAttribute("href", "/demo/login?callbackUrl=%2Fdemo%2Fagents");
+    await expect(page.getByRole("link", { name: "Sign in" })).toHaveAttribute(
+      "href",
+      "/demo/login?callbackUrl=%2Fdemo%2Fagents"
+    );
   });
 
   test("signed-out profile creation preserves the full demo return path", async ({
@@ -325,7 +326,7 @@ test.describe("Demo base path", () => {
     await mockDemoGitHubAuth(page, callbackUrl);
 
     await page.goto("/demo/account?source=ledger&checkout=success#allowance");
-    const signIn = page.getByRole("link", { name: "Sign in with GitHub" });
+    const signIn = page.getByRole("link", { name: "Sign in" });
     await expect(signIn).toHaveAttribute(
       "href",
       `/demo/login?callbackUrl=${encodeURIComponent(callbackUrl)}`
