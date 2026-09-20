@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
@@ -521,6 +522,17 @@ test("Daytona diagnostics prove detached-child observation and credential cleanu
               }>
             ) => {
               calls.push(`session-command:${sessionId}:${request.command}`);
+              // A failed probe must return control to Daytona's session shell.
+              // Missing utilities trigger set -e before any files are created.
+              const session = spawnSync(
+                "/bin/sh",
+                ["-c", `${request.command}\nprintf SESSION_ALIVE`],
+                {
+                  encoding: "utf8",
+                  env: { NODE_ENV: "test", PATH: "/nonexistent" },
+                }
+              );
+              assert.equal(session.stdout, "SESSION_ALIVE");
               return Promise.resolve({
                 cmdId: "containment-command",
                 exitCode: 0,

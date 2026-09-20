@@ -16,6 +16,7 @@ import {
   daytonaSandboxConfiguration,
 } from "./daytona/sandbox";
 import { RunnerServiceError } from "./errors";
+import { shellQuote } from "./harness";
 import type { RunnerDiagnosticResult } from "./service";
 
 const DIAGNOSTIC_DEADLINE_MILLISECONDS = 240_000;
@@ -352,24 +353,27 @@ async function runDaytonaContainmentProbe(
   const launch = await process.executeSessionCommand(
     paths.sessionId,
     {
-      command: [
-        "set -eu",
-        "umask 077",
-        `mkdir -p '${directory}'`,
-        `printf '%s' 'attempt-a' > '${paths.credentialA}'`,
-        `chmod 600 '${paths.credentialA}'`,
-        `test -f '${paths.credentialA}'`,
-        `test ! -L '${paths.credentialA}'`,
-        `test "$(cat '${paths.credentialA}')" = 'attempt-a'`,
-        `test "$(stat -c '%a' '${paths.credentialA}')" = '600'`,
-        "command -v setsid >/dev/null",
-        `setsid sh -c 'printf ready > "${paths.ready}"; for attempt in $(seq 1 ${CONTAINMENT_CHILD_WAIT_SECONDS}); do if [ -f "${paths.credentialB}" ]; then cat "${paths.credentialB}" > "${paths.leak}"; exit 0; fi; sleep 1; done; exit 40' </dev/null >/dev/null 2>&1 &`,
-        "for attempt in 1 2 3 4 5; do",
-        `  if [ -f '${paths.ready}' ]; then exit 0; fi`,
-        "  sleep 1",
-        "done",
-        "exit 41",
-      ].join("\n"),
+      // Keep exit/set -e inside a child shell so Daytona can report completion.
+      command: `/bin/sh -c ${shellQuote(
+        [
+          "set -eu",
+          "umask 077",
+          `mkdir -p '${directory}'`,
+          `printf '%s' 'attempt-a' > '${paths.credentialA}'`,
+          `chmod 600 '${paths.credentialA}'`,
+          `test -f '${paths.credentialA}'`,
+          `test ! -L '${paths.credentialA}'`,
+          `test "$(cat '${paths.credentialA}')" = 'attempt-a'`,
+          `test "$(stat -c '%a' '${paths.credentialA}')" = '600'`,
+          "command -v setsid >/dev/null",
+          `setsid sh -c 'printf ready > "${paths.ready}"; for attempt in $(seq 1 ${CONTAINMENT_CHILD_WAIT_SECONDS}); do if [ -f "${paths.credentialB}" ]; then cat "${paths.credentialB}" > "${paths.leak}"; exit 0; fi; sleep 1; done; exit 40' </dev/null >/dev/null 2>&1 &`,
+          "for attempt in 1 2 3 4 5; do",
+          `  if [ -f '${paths.ready}' ]; then exit 0; fi`,
+          "  sleep 1",
+          "done",
+          "exit 41",
+        ].join("\n")
+      )}`,
       runAsync: false,
       suppressInputEcho: true,
     },
