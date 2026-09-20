@@ -187,6 +187,11 @@ function service(overrides: Partial<RunnerService> = {}): RunnerService {
     createAgent: async () => ({ agent: definition(), kind: "created" }),
     deleteAgent: async () => ({ kind: "deleted" }),
     diagnoseSandbox: async () => ({
+      containment: {
+        credentialRemoved: true,
+        detachedDescendantObserved: true,
+        reusePolicy: "sandbox_reset_required",
+      },
       exitCode: 0,
       ok: true,
       output: "coven-agents",
@@ -472,6 +477,11 @@ function orderedOperatorHandlers(
     diagnoseSandbox: () => {
       events.push("provider");
       return Promise.resolve({
+        containment: {
+          credentialRemoved: true,
+          detachedDescendantObserved: true,
+          reusePolicy: "sandbox_reset_required",
+        },
         exitCode: 0,
         ok: true,
         output: "coven-agents",
@@ -2437,6 +2447,11 @@ test("diagnostics and reconciliation use only their operator service and safe ou
 
   assert.equal(diagnostic.status, 200);
   assert.deepEqual(await diagnostic.json(), {
+    containment: {
+      credentialRemoved: true,
+      detachedDescendantObserved: true,
+      reusePolicy: "sandbox_reset_required",
+    },
     exitCode: 0,
     ok: true,
     output: "coven-agents",

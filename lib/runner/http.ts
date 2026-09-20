@@ -65,6 +65,13 @@ import {
 
 const diagnosticResponseSchema = z
   .object({
+    containment: z
+      .object({
+        credentialRemoved: z.literal(true),
+        detachedDescendantObserved: z.boolean(),
+        reusePolicy: z.literal("sandbox_reset_required"),
+      })
+      .strict(),
     exitCode: z.number().int().min(0).max(255),
     ok: z.boolean(),
     output: z.string().max(1024),

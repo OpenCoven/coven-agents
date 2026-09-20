@@ -147,8 +147,16 @@ const diagnosticSnapshotSchema = z
     target: z.enum(["eu", "us"]),
   })
   .strict();
+const diagnosticContainmentSchema = z
+  .object({
+    credentialRemoved: z.literal(true),
+    detachedDescendantObserved: z.boolean(),
+    reusePolicy: z.literal("sandbox_reset_required"),
+  })
+  .strict();
 const diagnosticCheckSchema = checkResponseSchema
   .extend({
+    containment: diagnosticContainmentSchema.optional(),
     exitCode: z.literal(0).optional(),
     ok: z.literal(true).optional(),
     output: z.literal("coven-agents").optional(),
@@ -159,6 +167,7 @@ const diagnosticCheckSchema = checkResponseSchema
     if (
       value.outcome === "passed" &&
       (value.status !== 200 ||
+        value.containment === undefined ||
         value.exitCode !== 0 ||
         value.ok !== true ||
         value.output !== "coven-agents" ||
@@ -600,6 +609,7 @@ const healthResponseSchema = z
   .strict();
 const diagnosticResponseSchema = z
   .object({
+    containment: diagnosticContainmentSchema,
     exitCode: z.literal(0),
     ok: z.literal(true),
     output: z.literal("coven-agents"),
@@ -824,6 +834,7 @@ export async function collectStagingCertification(
       const value = body as z.infer<typeof diagnosticResponseSchema>;
       return {
         ...check,
+        containment: value.containment,
         exitCode: value.exitCode,
         ok: value.ok,
         output: value.output,
@@ -934,6 +945,7 @@ export async function collectStagingCertification(
       approvalsCompleted: false,
       diagnosticLifecycleCertified:
         diagnosticCheck.outcome === "passed" &&
+        diagnosticCheck.containment !== undefined &&
         diagnosticCheck.snapshot !== undefined,
       observationWindowCompleted: false,
       persistentSandboxLifecycleCertified: false,

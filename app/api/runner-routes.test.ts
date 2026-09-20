@@ -105,6 +105,11 @@ function service(overrides: Partial<RunnerService> = {}): RunnerService {
     createAgent: async () => ({ agent: definition(), kind: "created" }),
     deleteAgent: async () => ({ kind: "deleted" }),
     diagnoseSandbox: async () => ({
+      containment: {
+        credentialRemoved: true,
+        detachedDescendantObserved: true,
+        reusePolicy: "sandbox_reset_required",
+      },
       exitCode: 0,
       ok: true,
       output: "coven-agents",
@@ -629,6 +634,11 @@ async function executeFixture(): Promise<void> {
   );
   assert.equal(diagnosticResponse.status, 200);
   assert.deepEqual(await diagnosticResponse.json(), {
+    containment: {
+      credentialRemoved: true,
+      detachedDescendantObserved: true,
+      reusePolicy: "sandbox_reset_required",
+    },
     exitCode: 0,
     ok: true,
     output: "coven-agents",

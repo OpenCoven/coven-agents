@@ -1,12 +1,13 @@
-# Release Readiness
+# Release readiness
 
 This runbook is a production approval gate. Repository tests do not prove a
 deployment, migration, provider action, or resource deletion occurred.
 
 ## Current release disposition
 
-**Infrastructure cutover is complete; full product release approval is
-pending.** The Daytona control-plane and retired-provider evidence is retained
+**Infrastructure cutover and the exact production snapshot diagnostic are
+complete; full product release approval is pending.** The Daytona control-plane
+and retired-provider evidence is retained
 in the [cutover attestation](../operations/daytona-cutover-attestation.md).
 Promotion remains pending until every remaining product item has a dated
 sanitized artifact and named operator.
@@ -32,8 +33,10 @@ Do not promote when:
 - a team child can exceed its immutable workspace/tool authority or a
   GitHub-capable step can run without the approved capability broker;
 - Daytona credentials, snapshot, target, or domain policy are missing;
-- the pinned snapshot lacks exact active CPU/memory/disk verification, or
-  repeated execution requires an unresolved containment/reset decision;
+- the deployed snapshot identity or resources do not match the retained exact
+  production receipt;
+- the deployed containment receipt is absent, inconclusive, or disagrees with
+  the enforced `sandbox_reset_required` reuse policy;
 - an active run lacks durable PostgreSQL ownership;
 - lifecycle, SSE, rollback, or reconciliation evidence is absent;
 - a high-severity security finding remains unresolved.
@@ -124,9 +127,12 @@ size-bounded, JSON-only, redacted by omission, and never retain authorization
 headers, credentials, or raw provider output. Retain the receipt only in the
 approved evidence system, not in the repository.
 
-The receipt deliberately leaves subscriber lifecycle, persistent sandbox
-lifecycle, resource disposition, Stripe checkout/webhook failure-retry,
-observation window, approvals, and final release approval uncertified.
+The diagnostic check must retain the exact snapshot name, CPU, memory, disk,
+target, synthetic credential-removal result, detached-descendant observation,
+and `sandbox_reset_required` policy. The receipt deliberately leaves subscriber
+lifecycle, persistent sandbox lifecycle, resource disposition, Stripe
+checkout/webhook failure-retry, observation window, approvals, and final
+release approval uncertified.
 
 ## Required smoke paths
 
@@ -149,7 +155,8 @@ observation window, approvals, and final release approval uncertified.
   verify the former has no credential/provider effect and the latter converges
   only the exact running attempt within its time bound;
 - scheduled and manual reconciliation;
-- diagnostics with its distinct operator credential.
+- diagnostics with its distinct operator credential, exact snapshot receipt,
+  and containment receipt.
 
 ## Machine-readable readiness receipt
 
@@ -318,7 +325,7 @@ Before enabling:
    `BETA_CAMPAIGN_RUN_MINUTES`, and its usage reads against the campaign
    allowance rather than the subscriber monthly cap.
 7. Prove the cap. Enrollment stops at `BETA_CAMPAIGN_MAX_ACCOUNTS`, but sign-in
-   still succeeds past that point and the account simply holds no grant.
+   still succeeds past that point and the account holds no grant.
    Confirm that state is acceptable to present before opening.
 
 To close the campaign, return `BETA_CAMPAIGN_ENABLED` to `off` and redeploy.
@@ -329,11 +336,23 @@ longer reach. Drain or accept that population before closing.
 
 ## Stripe webhook delivery
 
+Current production state is a no-go for new sales:
+
+- `SUBSCRIPTION_CHECKOUT_ENABLED=off`;
+- the active live recurring Price is `$30/month`, not the approved
+  `$25/month`;
+- no active Customer Portal configuration exists;
+- the enabled webhook covers `invoice.paid`, `invoice.payment_failed`, and
+  `customer.subscription.deleted`, but not both Checkout completion events; and
+- the current restricted key can read Prices but cannot create a Price or
+  Portal configuration.
+
 Before enabling new subscription Checkout:
 
 1. Keep `SUBSCRIPTION_CHECKOUT_ENABLED=off` during deployment and migration.
-2. Confirm `STRIPE_PRICE_ID` identifies the intended live recurring Price,
-   interval, currency, amount, and Product.
+2. Have an authorized Stripe operator create the `$25/month` live recurring
+   Price, then confirm `STRIPE_PRICE_ID` identifies that exact Price, interval,
+   currency, amount, and Product.
 3. Use a test-mode restricted key to complete the documented Customer,
    subscription, Checkout Session, invoice-line, and recovery paths. Then
    create a separate live-mode restricted key with the same reviewed
@@ -352,8 +371,9 @@ Before enabling new subscription Checkout:
    retry, renewal failure grace, expiry, and cancel-then-resubscribe.
 8. Inspect every pending `StripeReconciliation` row and resolve or explicitly
    accept it before launch.
-9. Confirm Customer Portal, self-service cancellation, plan changes, and Stripe
-   Tax are not represented as available features.
+9. Create and activate the Customer Portal configuration. Prove a current
+   authenticated billed owner can open it and complete self-service
+   cancellation. Keep unsupported plan changes and Stripe Tax unavailable.
 10. Enable `SUBSCRIPTION_CHECKOUT_ENABLED=on`, rerun runtime validation, and
     prove both account surfaces can open one current Checkout Session without
     exposing Stripe secrets or hardcoding the provider amount.
