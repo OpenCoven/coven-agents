@@ -102,6 +102,7 @@ export type RunnerServiceDependencies = Readonly<{
     claimed: RunnerClaimedDispatch
   ) => Promise<RunnerDispatchResult>;
   listHarnesses?: () => Promise<readonly HarnessStatus[]>;
+  liveView?: RunnerLiveViewProvider;
   reconcileAndDispatch?: () => Promise<RunnerReconciliationExecutionResult>;
   resourceLifecycle?: Pick<
     RunnerPersistentResourceLifecycle,
@@ -170,6 +171,32 @@ export type RunnerScheduledStartResult =
 export type RunnerReadRunResult =
   | Readonly<{ kind: "found"; run: RunSnapshot }>
   | Readonly<{ kind: "not_found" }>;
+
+/**
+ * Why a live view is not available right now. Each reason is a distinct
+ * thing the console can say honestly: the feature is off, the run is not
+ * executing, the sandbox is gone, or the sandbox image has no desktop.
+ */
+export type RunnerLiveViewUnavailableReason =
+  | "desktop_unavailable"
+  | "not_configured"
+  | "not_running"
+  | "provider_unavailable"
+  | "sandbox_missing";
+
+export type RunnerLiveViewResult =
+  | Readonly<{ kind: "not_found" }>
+  | Readonly<{ expiresAt: string; kind: "ready"; url: string }>
+  | Readonly<{ kind: "unavailable"; reason: RunnerLiveViewUnavailableReason }>;
+
+/**
+ * Provider hook that turns a running record into a short-lived, signed view
+ * of its sandbox desktop. Absent in compositions without a provider that can
+ * offer one, which the service reports as `not_configured`.
+ */
+export type RunnerLiveViewProvider = (
+  input: Readonly<{ run: RunSnapshot; tenant: string }>
+) => Promise<Exclude<RunnerLiveViewResult, { kind: "not_found" }>>;
 
 export type RunnerEventPageResult =
   | Readonly<{
@@ -255,6 +282,10 @@ export type RunnerService = Readonly<{
     principal: RunnerPrincipal,
     runId: string
   ) => Promise<RunnerReadRunResult>;
+  getRunLiveView: (
+    principal: RunnerPrincipal,
+    runId: string
+  ) => Promise<RunnerLiveViewResult>;
   inventoryResources: () => Promise<RunnerInventoryResourcesResult>;
   listAgentRuns: (
     principal: RunnerPrincipal,
@@ -604,6 +635,23 @@ export function createRunnerService(
       return run
         ? { kind: "found", run: requireSnapshot(run) }
         : { kind: "not_found" };
+    },
+
+    getRunLiveView: async (principal, runId) => {
+      if (!validId(runId)) {
+        return { kind: "not_found" };
+      }
+      const run = await dependencies.store.getRun(principal, runId);
+      if (!run) {
+        return { kind: "not_found" };
+      }
+      if (run.status !== "running") {
+        return { kind: "unavailable", reason: "not_running" };
+      }
+      if (!dependencies.liveView) {
+        return { kind: "unavailable", reason: "not_configured" };
+      }
+      return dependencies.liveView({ run, tenant: principal.tenant });
     },
 
     inventoryResources: () => {

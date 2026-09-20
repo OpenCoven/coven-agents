@@ -396,6 +396,7 @@ function daytonaProductionReconcile(
           stage = "reconcile";
           return reconciliation.reconcileAndDispatch({
             ...composition,
+            attemptLeaseMs: reconciliation.attemptLeaseMsFromEnvironment(),
             claimTeamRuns: teams.claimReadySteps,
             dispatch: configuredDispatcher(
               database,
@@ -454,6 +455,7 @@ export async function createDaytonaRunnerServiceForPrincipal(
     daytonaReconciliation,
     sandbox,
     storeModule,
+    liveViewModule,
   ] = await Promise.all([
     import("./client"),
     import("@/lib/credentials/runner-credential"),
@@ -463,6 +465,7 @@ export async function createDaytonaRunnerServiceForPrincipal(
     import("./reconcile"),
     import("./sandbox"),
     import("../store"),
+    import("./live-view"),
   ]);
   const store = storeModule.createRunnerStore(
     storeModule.drizzleRunnerStoreDatabase(database)
@@ -515,6 +518,11 @@ export async function createDaytonaRunnerServiceForPrincipal(
         dependencies.reportResourceOperation
       )(claimed),
     listHarnesses: async () => registryHarnesses(),
+    liveView: liveViewModule.daytonaLiveViewProvider({
+      enabled: liveViewModule.liveViewEnabledFromEnvironment(),
+      get: (name) =>
+        client.daytonaClientForDeadline(Date.now() + 15_000).get(name),
+    }),
     reconcileAndDispatch: daytonaProductionReconcile(
       database,
       store,

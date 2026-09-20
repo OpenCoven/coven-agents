@@ -30,6 +30,37 @@ export const STEPS_TIMELINE_WIDTHS = {
 
 const KEY_STEP = 16;
 
+/**
+ * The rail's one-line tally: "4 commands · 2 file changes · 1 failure". A
+ * reader glancing at a run learns its shape before reading a single step.
+ * Counts only what the steps say; the receipt owns the authoritative figures.
+ */
+export function stepsTally(steps: readonly Step[]): string[] {
+  const count = (kind: Step["kind"]) =>
+    steps.filter((step) => step.kind === kind).length;
+  const plural = (n: number, one: string, many: string) =>
+    `${n} ${n === 1 ? one : many}`;
+  const commands = count("command");
+  const files = count("file");
+  const failed =
+    steps.filter((step) => step.kind === "command" && step.tone === "danger")
+      .length + count("error");
+  const parts: string[] = [];
+  if (commands > 0) {
+    parts.push(plural(commands, "command", "commands"));
+  }
+  if (files > 0) {
+    parts.push(plural(files, "file change", "file changes"));
+  }
+  if (failed > 0) {
+    parts.push(plural(failed, "failure", "failures"));
+  }
+  if (count("report") + count("receipt") > 0) {
+    parts.push("report");
+  }
+  return parts;
+}
+
 const TONE_GUTTER: Record<Step["tone"], string> = {
   danger: toneInk("danger"),
   muted: "var(--border-strong)",
@@ -77,6 +108,7 @@ export function StepsTimeline({
     startX: number;
   } | null>(null);
   const minWidth = Math.min(STEPS_TIMELINE_WIDTHS.min, widthLimit);
+  const tally = stepsTally(steps);
 
   if (collapsed) {
     return (
@@ -271,6 +303,23 @@ export function StepsTimeline({
           />
         </button>
       </div>
+
+      {tally.length > 0 ? (
+        <div className="oc-steps-tally">
+          {tally.map((part) => (
+            <span
+              data-tone={
+                part.endsWith("failure") || part.endsWith("failures")
+                  ? "danger"
+                  : undefined
+              }
+              key={part}
+            >
+              {part}
+            </span>
+          ))}
+        </div>
+      ) : null}
 
       <div
         className="oc-scroll"

@@ -42,6 +42,30 @@ export function formatDuration(milliseconds: number): string {
   return `${hours}h ${String(minutes).padStart(2, "0")}m`;
 }
 
+/**
+ * Formats a position on the run's clock as `+m:ss`, the way a flight recorder
+ * stamps a tape.
+ *
+ * Whole seconds only, and the seconds always zero-padded, because this reads
+ * as a column down the left of the record and a shifting column stops being
+ * a column. Past an hour it becomes `+h:mm:ss`.
+ */
+export function formatOffset(milliseconds: number): string {
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) {
+    return "—";
+  }
+  const whole = Math.floor(milliseconds / MS_PER_SECOND);
+  const seconds = String(whole % SECONDS_PER_MINUTE).padStart(2, "0");
+  if (whole < SECONDS_PER_HOUR) {
+    return `+${Math.floor(whole / SECONDS_PER_MINUTE)}:${seconds}`;
+  }
+  const hours = Math.floor(whole / SECONDS_PER_HOUR);
+  const minutes = String(
+    Math.floor((whole % SECONDS_PER_HOUR) / SECONDS_PER_MINUTE)
+  ).padStart(2, "0");
+  return `+${hours}:${minutes}:${seconds}`;
+}
+
 /** The span between two ISO timestamps, or null when either is missing. */
 export function spanBetween(
   from: string | null | undefined,

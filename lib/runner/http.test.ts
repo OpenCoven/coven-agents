@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { AsyncLocalStorage } from "node:async_hooks";
 import test from "node:test";
 import {
   AGENT_RUNNER_API_VERSION,
@@ -22,8 +23,14 @@ import type {
   RunnerAuthenticatedSubscriber,
   RunnerSecretAuthorization,
 } from "./auth";
-import { createRunnerHttpHandlers, type RunnerHttpHandlers } from "./http";
+import {
+  createRunnerHttpHandlers,
+  DEFAULT_LIVE_TAIL_MS,
+  liveTailMsFromEnvironment,
+  type RunnerHttpHandlers,
+} from "./http";
 import { type RunnerService, RunnerServiceError } from "./service";
+import { createRunEventStream, DEFAULT_SSE_IDLE_TIMEOUT_MS } from "./sse";
 import type { RunnerClaimedDispatch, RunnerDispatchAuthority } from "./types";
 
 const USER_ID = "9c858901-8a57-4791-81fe-4c455b099bc9";
@@ -195,6 +202,10 @@ function service(overrides: Partial<RunnerService> = {}): RunnerService {
     }),
     getAgent: async () => ({ agent: definition(), kind: "found" }),
     getRun: async () => ({ kind: "found", run: run() }),
+    getRunLiveView: async () => ({
+      kind: "unavailable",
+      reason: "not_configured",
+    }),
     inventoryResources: async () => ({
       ambiguityReasons: {
         configurationDrift: 0,
@@ -305,7 +316,10 @@ function handlers(
       | null;
     appOrigin?: string | (() => string | null);
     auth?: RunnerAuth;
+    createEventStream?: typeof createRunEventStream;
     idempotencyStore?: IdempotencyStore;
+    liveTailMs?: number;
+    now?: () => number;
     onAbuse?: (input: AbuseEnforcementInput) => void;
     service?: RunnerService;
   } = {}
@@ -339,6 +353,13 @@ function handlers(
       : {}),
     auth: options.auth ?? authorizedAuth(),
     createDiagnosticName: () => DIAGNOSTIC_NAME,
+    ...(options.createEventStream
+      ? { createEventStream: options.createEventStream }
+      : {}),
+    ...(options.liveTailMs === undefined
+      ? {}
+      : { liveTailMs: options.liveTailMs }),
+    ...(options.now ? { now: options.now } : {}),
     createOperatorService: () => {
       operatorRequests += 1;
       return runner;
@@ -1304,6 +1325,307 @@ test("live event reads start reconciliation before the stream closes", async () 
 
   assert.equal(terminal.after.length, 0);
   await terminalEventResponse.body?.cancel();
+});
+
+test("an open live stream nudges reconciliation at the tail cadence, never overlapping", async () => {
+  let reconciled = 0;
+  let release: (() => void) | undefined;
+  let clock = 0;
+  const reads: ((cursor: number) => Promise<unknown>)[] = [];
+  const fixture = handlers({
+    after: null,
+    createEventStream: ((streamOptions) => {
+      reads.push(streamOptions.read);
+      return new ReadableStream<Uint8Array>();
+    }) as typeof createRunEventStream,
+    liveTailMs: 5000,
+    now: () => clock,
+    service: service({
+      readRunEvents: async () => ({
+        events: [],
+        kind: "found",
+        terminal: false,
+      }),
+      reconcileAndDispatch: () => {
+        reconciled += 1;
+        return new Promise((resolve) => {
+          release = () => resolve(counts());
+        });
+      },
+    }),
+  });
+
+  await fixture.handlers.getRunEvents(
+    new Request(`https://app.test/api/runs/${RUN_ID}/events`),
+    RUN_ID
+  );
+  const [read] = reads;
+  assert.ok(read);
+
+  // Inside the cadence: polling alone never touches the reconciler.
+  clock = 4999;
+  await read(0);
+  assert.equal(reconciled, 0);
+
+  // Past it: exactly one nudge, and further polls while it is in flight do
+  // not stack a second pass on top of it.
+  clock = 5000;
+  await read(0);
+  await read(0);
+  clock = 12_000;
+  await read(0);
+  assert.equal(reconciled, 1);
+
+  release?.();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  clock = 17_000;
+  await read(0);
+  assert.equal(reconciled, 2);
+  release?.();
+});
+
+for (const end of ["idle", "abort", "cancel"] as const) {
+  test(`a live-tail pass remains retained after SSE ${end}`, {
+    timeout: 2000,
+  }, async (context) => {
+    const pending = Promise.withResolvers<ReturnType<typeof counts>>();
+    const started = Promise.withResolvers<void>();
+    const sleeping = Promise.withResolvers<void>();
+    const abort = new AbortController();
+    let clock = 0;
+    let reconciled = 0;
+    let leaseHeld = false;
+    context.after(() => {
+      pending.resolve(counts());
+      sleeping.resolve();
+      abort.abort();
+    });
+    const fixture = handlers({
+      createEventStream: (options) =>
+        createRunEventStream({
+          ...options,
+          now: () => clock,
+          sleep: (milliseconds) => {
+            clock += milliseconds;
+            return end !== "idle" && reconciled > 1
+              ? sleeping.promise
+              : Promise.resolve();
+          },
+        }),
+      liveTailMs: 5000,
+      now: () => clock,
+      service: service({
+        readRunEvents: async () => ({
+          events: [],
+          kind: "found",
+          terminal: false,
+        }),
+        reconcileAndDispatch: () => {
+          reconciled += 1;
+          if (reconciled === 1) {
+            return Promise.resolve(counts());
+          }
+          leaseHeld = true;
+          started.resolve();
+          return pending.promise.finally(() => {
+            leaseHeld = false;
+          });
+        },
+      }),
+    });
+    const response = await fixture.handlers.getRunEvents(
+      new Request(`https://app.test/api/runs/${RUN_ID}/events`, {
+        signal: abort.signal,
+      }),
+      RUN_ID
+    );
+    assert.equal(response.status, 200);
+    assert.ok(response.body);
+    const reader = response.body.getReader();
+    const next = reader.read();
+    await started.promise;
+    if (end === "abort") {
+      abort.abort();
+    } else if (end === "cancel") {
+      await reader.cancel();
+    }
+    assert.equal((await next).done, true);
+    if (end === "idle") {
+      assert.equal(clock, DEFAULT_SSE_IDLE_TIMEOUT_MS);
+    }
+    assert.equal(reconciled, 2);
+    assert.equal(leaseHeld, true);
+    assert.equal(fixture.after.length, 2);
+    let drained = false;
+    const retained = Promise.all(
+      fixture.after.map((callback) => callback())
+    ).then(() => {
+      drained = true;
+    });
+    await Promise.resolve();
+    assert.equal(drained, false);
+    pending.resolve(counts());
+    await retained;
+    assert.equal(leaseHeld, false);
+  });
+}
+
+test("backpressured SSE retains later work in its original request context", async () => {
+  const context = new AsyncLocalStorage<string>();
+  const retained: Promise<unknown>[] = [];
+  const first: RunEvent = {
+    at: "2026-08-28T15:00:00.000Z",
+    id: 1,
+    operationId: OPERATION_ID,
+    runId: RUN_ID,
+    type: "accepted",
+  };
+  let clock = 0;
+  let reconciled = 0;
+  const fixture = handlers({
+    after: (task) => {
+      assert.equal(context.getStore(), "original-request");
+      assert.ok(task instanceof Promise);
+      retained.push(task);
+    },
+    createEventStream: (options) =>
+      createRunEventStream({
+        ...options,
+        now: () => clock,
+        sleep: (milliseconds) => {
+          clock += milliseconds;
+          return Promise.resolve();
+        },
+      }),
+    liveTailMs: 5000,
+    now: () => clock,
+    service: service({
+      readRunEvents: async (_principal, _runId, cursor) => ({
+        events: cursor === 0 ? [first] : [],
+        kind: "found",
+        terminal: reconciled >= 2,
+      }),
+      reconcileAndDispatch: () => {
+        assert.equal(context.getStore(), "original-request");
+        reconciled += 1;
+        return Promise.resolve(counts());
+      },
+    }),
+  });
+  const response = await context.run("original-request", () =>
+    fixture.handlers.getRunEvents(
+      new Request(`https://app.test/api/runs/${RUN_ID}/events`),
+      RUN_ID
+    )
+  );
+  // Let the first event fill the stream's queue before a different context
+  // drains it and triggers the next pull, as an HTTP response writer does.
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(context.getStore(), undefined);
+  clock = 5000;
+  assert.match(await response.text(), /id: 1/u);
+  assert.equal(reconciled, 2);
+  assert.equal(retained.length, 2);
+  assert.equal(fixture.logs.length, 0);
+  await Promise.all(retained);
+});
+
+test("a rejected live-tail registration does not start unretained work or break polling", async () => {
+  let clock = 0;
+  let reconciled = 0;
+  let registrations = 0;
+  let poll: Parameters<typeof createRunEventStream>[0]["read"] | undefined;
+  const fixture = handlers({
+    after: () => {
+      registrations += 1;
+      if (registrations > 1) {
+        throw new Error("do-not-log-provider-detail");
+      }
+    },
+    createEventStream: (options) => {
+      poll = options.read;
+      return new ReadableStream<Uint8Array>();
+    },
+    liveTailMs: 5000,
+    now: () => clock,
+    service: service({
+      readRunEvents: async () => ({
+        events: [],
+        kind: "found",
+        terminal: false,
+      }),
+      reconcileAndDispatch: () => {
+        reconciled += 1;
+        return Promise.resolve(counts());
+      },
+    }),
+  });
+  const response = await fixture.handlers.getRunEvents(
+    new Request(`https://app.test/api/runs/${RUN_ID}/events`),
+    RUN_ID
+  );
+  assert.equal(response.status, 200);
+  assert.ok(poll);
+  clock = 5000;
+  assert.deepEqual(await poll(0), { events: [], terminal: false });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(registrations, 2);
+  assert.equal(reconciled, 1);
+  assert.equal(fixture.logs.length, 1);
+  assert.equal(
+    JSON.stringify(fixture.logs).includes("do-not-log-provider-detail"),
+    false
+  );
+  clock = 10_000;
+  await poll(0);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(registrations, 3);
+  assert.equal(reconciled, 1);
+  await response.body?.cancel();
+});
+
+test("a stream with the live tail disabled never nudges reconciliation", async () => {
+  let reconciled = 0;
+  let clock = 0;
+  const reads: ((cursor: number) => Promise<unknown>)[] = [];
+  const fixture = handlers({
+    after: null,
+    createEventStream: ((streamOptions) => {
+      reads.push(streamOptions.read);
+      return new ReadableStream<Uint8Array>();
+    }) as typeof createRunEventStream,
+    liveTailMs: 0,
+    now: () => clock,
+    service: service({
+      readRunEvents: async () => ({
+        events: [],
+        kind: "found",
+        terminal: false,
+      }),
+      reconcileAndDispatch: () => {
+        reconciled += 1;
+        return Promise.resolve(counts());
+      },
+    }),
+  });
+
+  await fixture.handlers.getRunEvents(
+    new Request(`https://app.test/api/runs/${RUN_ID}/events`),
+    RUN_ID
+  );
+  clock = 600_000;
+  await reads[0]?.(0);
+  assert.equal(reconciled, 0);
+});
+
+test("the live tail cadence is read from the environment within bounds", () => {
+  const env = (value?: string) =>
+    ({ RUNNER_LIVE_TAIL_MS: value }) as unknown as NodeJS.ProcessEnv;
+  assert.equal(liveTailMsFromEnvironment(env()), DEFAULT_LIVE_TAIL_MS);
+  assert.equal(liveTailMsFromEnvironment(env("0")), 0);
+  assert.equal(liveTailMsFromEnvironment(env(" 15000 ")), 15_000);
+  assert.throws(() => liveTailMsFromEnvironment(env("500")));
+  assert.throws(() => liveTailMsFromEnvironment(env("abc")));
 });
 
 test("agent and run IDs reject malformed values without reaching service methods", async () => {

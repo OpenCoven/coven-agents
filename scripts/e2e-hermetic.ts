@@ -308,6 +308,9 @@ export function hermeticEnvironment(
     RUN_ADMISSION_MODE: "queue",
     RUN_ADMISSION_TENANT_ACTIVE_MAX: "2",
     RUN_ADMISSION_TENANT_QUEUE_MAX: "10",
+    RUNNER_ATTEMPT_LEASE_MS: "",
+    RUNNER_LIVE_TAIL_MS: "",
+    RUNNER_LIVE_VIEW: "",
     RUNNER_MANUAL_RECONCILE_SECRET: "test-hermetic-manual",
   };
 }

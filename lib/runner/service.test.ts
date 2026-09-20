@@ -1270,3 +1270,54 @@ test("prewarm exposes concurrency and typed provider/database failures", async (
     source: "database",
   });
 });
+
+test("a live view is offered only for a running run with a configured provider", async () => {
+  const seen: unknown[] = [];
+  const liveView = (input: unknown) => {
+    seen.push(input);
+    return Promise.resolve({
+      expiresAt: "2026-08-28T15:05:00.000Z",
+      kind: "ready" as const,
+      url: "https://6080-sandbox.proxy.daytona.works/?tkn=abc",
+    });
+  };
+
+  const unconfigured = createRunnerService({
+    store: baseStore({ getRun: async () => run({ status: "running" }) }),
+  });
+  assert.deepEqual(await unconfigured.getRunLiveView(PRINCIPAL, RUN_ID), {
+    kind: "unavailable",
+    reason: "not_configured",
+  });
+
+  const queued = createRunnerService({
+    liveView,
+    store: baseStore({ getRun: async () => run({ status: "queued" }) }),
+  });
+  assert.deepEqual(await queued.getRunLiveView(PRINCIPAL, RUN_ID), {
+    kind: "unavailable",
+    reason: "not_running",
+  });
+  assert.equal(seen.length, 0);
+
+  const missing = createRunnerService({
+    liveView,
+    store: baseStore({ getRun: async () => null }),
+  });
+  assert.deepEqual(await missing.getRunLiveView(PRINCIPAL, RUN_ID), {
+    kind: "not_found",
+  });
+  assert.deepEqual(await missing.getRunLiveView(PRINCIPAL, "nope"), {
+    kind: "not_found",
+  });
+
+  const running = createRunnerService({
+    liveView,
+    store: baseStore({ getRun: async () => run({ status: "running" }) }),
+  });
+  const view = await running.getRunLiveView(PRINCIPAL, RUN_ID);
+  assert.equal(view.kind, "ready");
+  assert.deepEqual(seen, [
+    { run: run({ status: "running" }), tenant: PRINCIPAL.tenant },
+  ]);
+});

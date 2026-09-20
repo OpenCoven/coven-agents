@@ -3,19 +3,12 @@
 "use client";
 
 import type { FileEvidence } from "@opencoven/agent-contracts";
-import {
-  Activity,
-  CheckCircle2,
-  CircleX,
-  FileCode2,
-  Terminal,
-} from "lucide-react";
-import { type CSSProperties, useState } from "react";
+import { CheckCircle2, CircleX } from "lucide-react";
+import { useState } from "react";
 import { BrandMark } from "@/components/brand/brand-mark";
 import { MarkdownPreview } from "@/components/console/markdown-preview";
 import { Btn, Caret, Eyebrow, Spinner } from "@/components/console/primitives";
 import {
-  card,
   hairline,
   pill,
   type Tone,
@@ -25,7 +18,7 @@ import {
   type as type_,
 } from "@/components/console/styles";
 import type { LiveActivity, ThreadBlock } from "@/lib/console/blocks";
-import { formatDuration, splitPath } from "@/lib/console/format";
+import { formatDuration, formatOffset, splitPath } from "@/lib/console/format";
 
 /**
  * The run record.
@@ -34,25 +27,17 @@ import { formatDuration, splitPath } from "@/lib/console/format";
  * on an elevated surface, ordinary steps sit on it, and raw machine output is
  * cut into it. A reader can tell a claim from a transcript without reading
  * either.
+ *
+ * The record reads like a flight recorder's tape. Down the left runs a clock —
+ * every entry stamped with its offset from the moment the run was created —
+ * and on the spine each entry carries a node coded by who acted: a hollow ring
+ * when the runner changed state, a dot when the agent ran a command, a square
+ * when it touched files, the brand glyph when it spoke. Only the premise, a
+ * failure, and the receipt earn a card; everything else is a ledger row on
+ * the plane, so the eye stops where it should.
  */
 
 const MONO = "var(--font-mono)";
-const RUN_EVENT_CARD: CSSProperties = {
-  ...card,
-  background:
-    "color-mix(in oklch, var(--bg-raised) 96%, var(--accent-presence))",
-  boxShadow: "0 12px 30px color-mix(in oklch, var(--bg-desk) 68%, transparent)",
-};
-const RUN_EVENT_HEADER: CSSProperties = {
-  alignItems: "center",
-  borderBottom: hairline,
-  display: "flex",
-  flexWrap: "wrap",
-  gap: 9,
-  minHeight: 44,
-  padding: "9px 13px",
-};
-
 function EventGlyph({
   children,
   tone,
@@ -97,39 +82,6 @@ function PathNode({ path }: { path: string }) {
       <span style={{ color: "var(--text-muted)" }}>{dir}</span>
       <span style={{ color: "var(--text-primary)" }}>{leaf}</span>
     </span>
-  );
-}
-
-function DisclosureRow({
-  children,
-  onToggle,
-  open,
-}: {
-  children: React.ReactNode;
-  onToggle: () => void;
-  open: boolean;
-}) {
-  return (
-    <button
-      aria-expanded={open}
-      onClick={onToggle}
-      style={{
-        alignItems: "center",
-        background: "transparent",
-        border: 0,
-        cursor: "pointer",
-        display: "flex",
-        flexWrap: "wrap",
-        gap: 9,
-        padding: "9px 13px",
-        textAlign: "left",
-        width: "100%",
-      }}
-      type="button"
-    >
-      <Caret open={open} />
-      {children}
-    </button>
   );
 }
 
@@ -211,39 +163,12 @@ function LifecycleBlock({
   block: Extract<ThreadBlock, { kind: "lifecycle" }>;
 }) {
   return (
-    <div
-      className="oc-run-event-card"
-      style={{
-        ...RUN_EVENT_CARD,
-        ...RUN_EVENT_HEADER,
-      }}
-    >
-      <EventGlyph
-        tone={
-          block.status === "running"
-            ? "warning"
-            : block.status === "completed"
-              ? "success"
-              : block.status === "failed"
-                ? "danger"
-                : "muted"
-        }
-      >
-        <Activity aria-hidden="true" size={14} />
-      </EventGlyph>
-      <h3 style={type_.label}>Status update</h3>
-      <span
-        style={{
-          color: "var(--text-secondary)",
-          flex: 1,
-          font: "400 11px/1 var(--font-mono)",
-          ...truncate,
-          whiteSpace: "nowrap",
-        }}
-      >
-        {block.label}
-      </span>
-      {block.detail ? <span style={type_.meta}>{block.detail}</span> : null}
+    <div className="oc-lifecycle-row">
+      <span className="oc-lifecycle-row__label">{block.label}</span>
+      {block.detail ? (
+        <span className="oc-lifecycle-row__detail">{block.detail}</span>
+      ) : null}
+      <span aria-hidden="true" className="oc-lifecycle-row__rule" />
       <Duration ms={block.durationMs} />
     </div>
   );
@@ -314,8 +239,8 @@ function OutputWell({ text }: { text: string }) {
         background: "var(--code-surface)",
         border: hairline,
         borderRadius: "var(--radius-md)",
-        margin: "0 9px 9px",
-        maxHeight: 220,
+        margin: "0 8px 2px",
+        maxHeight: 260,
         overflow: "auto",
         padding: "10px 12px",
       }}
@@ -338,6 +263,20 @@ function OutputWell({ text }: { text: string }) {
   );
 }
 
+function CommandTitle({
+  block,
+}: {
+  block: Extract<ThreadBlock, { kind: "command" }>;
+}) {
+  const rest = block.command.trim().slice(block.head.length);
+  return (
+    <span className="oc-ledger-row__title">
+      <span className="oc-ledger-row__head">{block.head}</span>
+      <span className="oc-ledger-row__rest">{rest}</span>
+    </span>
+  );
+}
+
 function CommandBlock({
   block,
 }: {
@@ -346,61 +285,48 @@ function CommandBlock({
   // Failures open by default. A non-zero exit is the one thing a reader always
   // wants the detail of, and making them click for it hides the reason a run
   // stopped behind a chevron.
-  const [open, setOpen] = useState(
-    block.exitCode !== null && block.exitCode !== 0
-  );
-  const output = [block.stdout, block.stderr].filter(Boolean).join("\n");
   const failed = block.exitCode !== null && block.exitCode !== 0;
+  const [open, setOpen] = useState(failed);
+  const output = [block.stdout, block.stderr].filter(Boolean).join("\n");
+  const tone: Tone = failed ? "danger" : block.live ? "warning" : "muted";
 
   return (
     <div
-      className="oc-run-event-card"
-      style={{
-        ...RUN_EVENT_CARD,
-        border: failed
-          ? "1px solid var(--danger-border)"
-          : "1px solid var(--border-hairline)",
-      }}
+      className="oc-ledger"
+      data-open={open}
+      data-tone={failed ? "danger" : block.live ? "running" : "success"}
     >
-      <DisclosureRow onToggle={() => setOpen((value) => !value)} open={open}>
-        <EventGlyph
-          tone={failed ? "danger" : block.live ? "warning" : "accent"}
-        >
-          <Terminal aria-hidden="true" size={14} />
-        </EventGlyph>
-        <h3 style={{ ...type_.label, whiteSpace: "nowrap" }}>
-          {block.live ? "Command running" : "Command finished"}
-        </h3>
-        <span
-          style={{
-            color: "var(--text-secondary)",
-            flex: 1,
-            font: `400 11px/1 ${MONO}`,
-            ...truncate,
-          }}
-        >
-          {block.command}
-        </span>
-        <span
-          style={pill(
-            block.exitCode === null ? "warning" : failed ? "danger" : "success"
-          )}
-        >
-          {block.exitCode === null ? "running" : `exit ${block.exitCode}`}
-        </span>
+      <button
+        aria-expanded={open}
+        className="oc-ledger-row"
+        onClick={() => setOpen((value) => !value)}
+        type="button"
+      >
+        <Caret open={open} />
+        <CommandTitle block={block} />
+        {block.exitCode === null ? (
+          <span style={pill("warning")}>running</span>
+        ) : failed ? (
+          <span style={pill("danger")}>exit {block.exitCode}</span>
+        ) : (
+          <span className="oc-ledger-row__exit">exit 0</span>
+        )}
         <Duration ms={block.durationMs} />
-      </DisclosureRow>
+      </button>
+      {open || !block.summary ? null : (
+        <div
+          className="oc-ledger-row__summary"
+          style={{ color: toneInk(tone) }}
+        >
+          <span aria-hidden="true">↳</span>
+          <span style={truncate}>{block.summary}</span>
+        </div>
+      )}
       {open ? (
         output ? (
           <OutputWell text={output} />
         ) : (
-          <p
-            style={{
-              ...type_.body,
-              font: "400 12px/1.5 var(--font-ui)",
-              padding: "0 13px 11px 36px",
-            }}
-          >
+          <p className="oc-ledger__empty">
             {block.live
               ? "No output yet."
               : "The command produced no output on either stream."}
@@ -408,14 +334,7 @@ function CommandBlock({
         )
       ) : null}
       {block.live ? (
-        <div
-          style={{
-            alignItems: "center",
-            display: "flex",
-            gap: 7,
-            padding: "0 13px 9px 36px",
-          }}
-        >
+        <div className="oc-ledger__live">
           <span
             className="oc-caret"
             style={{
@@ -466,46 +385,34 @@ function FilesBlock({
   block: Extract<ThreadBlock, { kind: "files" }>;
 }) {
   const [open, setOpen] = useState(false);
-  const heading = block.files.length === 1 ? "File changed" : "Files changed";
   return (
-    <div className="oc-run-event-card" style={RUN_EVENT_CARD}>
-      <DisclosureRow onToggle={() => setOpen((value) => !value)} open={open}>
-        <EventGlyph tone="accent">
-          <FileCode2 aria-hidden="true" size={14} />
-        </EventGlyph>
-        <h3 style={type_.label}>{heading}</h3>
-        <span
-          style={{
-            color: "var(--text-muted)",
-            flex: 1,
-            font: `400 11px/1 ${MONO}`,
-            ...truncate,
-          }}
-        >
-          {block.files.map((file) => splitPath(file.path).leaf).join(", ")}
+    <div className="oc-ledger" data-open={open} data-tone="muted">
+      <button
+        aria-expanded={open}
+        className="oc-ledger-row"
+        onClick={() => setOpen((value) => !value)}
+        type="button"
+      >
+        <Caret open={open} />
+        <span className="oc-ledger-row__title">
+          <span
+            className="oc-ledger-row__head"
+            style={{ fontFamily: "var(--font-ui)" }}
+          >
+            {block.label}
+          </span>
+          <span className="oc-ledger-row__rest">
+            {block.files.map((file) => splitPath(file.path).leaf).join(", ")}
+          </span>
         </span>
         <Duration ms={block.durationMs} />
-      </DisclosureRow>
+      </button>
       {open ? (
-        <div
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            gap: 6,
-            padding: "2px 13px 12px 36px",
-          }}
-        >
+        <div className="oc-ledger__files">
           {block.files.map((file) => (
             <FileRow file={file} key={`${file.operation}:${file.path}`} />
           ))}
-          <p
-            style={{
-              ...type_.body,
-              color: "var(--text-muted)",
-              font: "400 11px/1.55 var(--font-ui)",
-              paddingTop: 2,
-            }}
-          >
+          <p className="oc-ledger__note">
             The runner reports which files changed and by how much, not their
             contents. Open the workspace to read the diff.
           </p>
@@ -521,20 +428,15 @@ function TextBlock({
   block: Extract<ThreadBlock, { kind: "text" }>;
 }) {
   return (
-    <div className="oc-run-event-card" style={RUN_EVENT_CARD}>
-      <div style={RUN_EVENT_HEADER}>
-        <EventGlyph tone="accent">
-          <BrandMark aria-hidden="true" style={{ height: 12, width: 13 }} />
-        </EventGlyph>
-        <h3 style={type_.label}>Agent output</h3>
+    <article className="oc-passage">
+      <div className="oc-passage__head">
+        <span className="oc-passage__voice">Agent</span>
         <div style={{ flex: 1 }} />
         {block.live ? <span style={pill("warning")}>streaming</span> : null}
         <Duration ms={block.durationMs} />
       </div>
-      <div style={{ padding: "12px 14px 14px" }}>
-        <MarkdownPreview live={block.live}>{block.text}</MarkdownPreview>
-      </div>
-    </div>
+      <MarkdownPreview live={block.live}>{block.text}</MarkdownPreview>
+    </article>
   );
 }
 
@@ -747,18 +649,10 @@ function EvidenceBlock({
         <div className="oc-evidence-stats">
           {block.stats.map((stat) => (
             <div className="oc-evidence-stat" key={stat.label}>
+              <span className="oc-evidence-stat__value">{stat.value}</span>
               <Eyebrow style={{ color: "var(--text-muted)" }}>
                 {stat.label}
               </Eyebrow>
-              <span
-                style={{
-                  color: "var(--text-primary)",
-                  font: "500 14px/1.2 var(--font-ui)",
-                  ...tabular,
-                }}
-              >
-                {stat.value}
-              </span>
             </div>
           ))}
         </div>
@@ -814,6 +708,93 @@ export type ThreadHandlers = {
   onFollowUp: () => void;
   onRetry: () => void;
 };
+
+/** The tone a block's spine node carries; state, never identity. */
+function blockTone(block: ThreadBlock): string {
+  switch (block.kind) {
+    case "lifecycle":
+      return block.status === "running"
+        ? "running"
+        : block.status === "completed"
+          ? "success"
+          : block.status === "failed"
+            ? "danger"
+            : "muted";
+    case "command":
+      return block.exitCode === null
+        ? "running"
+        : block.exitCode === 0
+          ? "muted"
+          : "danger";
+    case "error":
+      return "danger";
+    case "evidence":
+      return "success";
+    case "text":
+      return block.live ? "running" : "muted";
+    default:
+      return "muted";
+  }
+}
+
+function SpineNode({ block }: { block: ThreadBlock }) {
+  switch (block.kind) {
+    case "text":
+      return (
+        <span className="oc-block__node">
+          <BrandMark aria-hidden="true" style={{ height: 10, width: 11 }} />
+        </span>
+      );
+    case "error":
+      return (
+        <span className="oc-block__node">
+          <CircleX aria-hidden="true" size={13} />
+        </span>
+      );
+    case "evidence":
+      return (
+        <span className="oc-block__node">
+          <CheckCircle2 aria-hidden="true" size={13} />
+        </span>
+      );
+    default:
+      return <span aria-hidden="true" className="oc-block__node" />;
+  }
+}
+
+/**
+ * One entry on the tape: the clock stamp and spine node in the gutter, the
+ * block itself beside them. `data-kind` and `data-tone` drive the node's
+ * shape and colour from CSS so the vocabulary lives in one place.
+ */
+export function ThreadEntry({
+  block,
+  handlers,
+}: {
+  block: ThreadBlock;
+  handlers: ThreadHandlers;
+}) {
+  return (
+    <div
+      className="oc-block"
+      data-kind={block.kind}
+      data-tone={blockTone(block)}
+      id={`block-${block.id}`}
+    >
+      <div className="oc-block__gutter">
+        {block.atMs === null ? (
+          <span className="oc-block__stamp" />
+        ) : (
+          <span className="oc-block__stamp">{formatOffset(block.atMs)}</span>
+        )}
+        <SpineNode block={block} />
+      </div>
+      <div className="oc-block__body">
+        <ThreadBlockView block={block} handlers={handlers} />
+      </div>
+    </div>
+  );
+}
 
 export function ThreadBlockView({
   block,
