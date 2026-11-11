@@ -16,6 +16,21 @@ export {
   base64UrlEncode,
   TENANT_ID_PATTERN,
 } from "./identity";
+export type {
+  SandboxInspectionObserved,
+  SandboxInspectionPolicy,
+  SandboxInspectionRecord,
+  SandboxInspectionRequest,
+  SandboxInspectionResult,
+} from "./sandbox-inspection";
+export {
+  SANDBOX_INSPECTION_CONTRACT_VERSION,
+  sandboxInspectionFenceSchema,
+  sandboxInspectionLifecycleSchema,
+  sandboxInspectionRequestSchema,
+  sandboxInspectionResultSchema,
+  sandboxInspectionStateSchema,
+} from "./sandbox-inspection";
 
 if (contractDescriptor.apiVersions.length !== 1) {
   throw new Error("Agent Runner must publish exactly one API version.");

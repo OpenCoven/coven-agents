@@ -3630,6 +3630,71 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         return agent ? asAgent(agent) : null;
       }),
 
+    /**
+     * Read-only view for sandbox inspection: the caller's own agent row and
+     * whether any of its attempts still fences the sandbox. The fence
+     * predicate mirrors the scheduler's "agent is active" rule, so an attempt
+     * that blocks the next dispatch is reported here too. Takes no lock and
+     * writes nothing.
+     */
+    getAgentSandboxFence: (
+      principal: RunnerPrincipal,
+      agentId: string
+    ): Promise<{
+      agent: RunnerAgentRecord;
+      fence: "attempt_outstanding" | "cleanup_required" | "none";
+    } | null> =>
+      database.transaction(async (transaction) => {
+        const [agent] = await transaction.execute(
+          statement(
+            "get-agent-for-sandbox-inspection",
+            { agentId, tenant: principal.tenant },
+            sql`SELECT * FROM "RunnerAgent" WHERE "id" = ${agentId} AND "tenant" = ${principal.tenant} LIMIT 1`
+          )
+        );
+        if (!agent) {
+          return null;
+        }
+        const [fence] = await transaction.execute(
+          statement(
+            "get-agent-sandbox-fence",
+            { agentId, tenant: principal.tenant },
+            sql`SELECT
+                COALESCE(bool_or(
+                  "dispatchState" IN ('dispatching', 'running')
+                  AND "authorityRevalidation" = false
+                ), false) AS "attemptOutstanding",
+                COALESCE(bool_or(
+                  "dispatchState" = 'terminal'
+                  AND (
+                    "daytonaAttemptId" IS NOT NULL
+                    OR "daytonaCommandId" IS NOT NULL
+                    OR "daytonaSessionId" IS NOT NULL
+                  )
+                ), false) AS "cleanupRequired"
+              FROM "RunnerRun"
+              WHERE "agentId" = ${agentId}
+                AND "tenant" = ${principal.tenant}`
+          )
+        );
+        // A missing or malformed fence row must not read as "no fence".
+        if (
+          !fence ||
+          typeof fence.attemptOutstanding !== "boolean" ||
+          typeof fence.cleanupRequired !== "boolean"
+        ) {
+          throw new Error("Sandbox fence state could not be read.");
+        }
+        return {
+          agent: asAgent(agent),
+          fence: fence.cleanupRequired
+            ? ("cleanup_required" as const)
+            : fence.attemptOutstanding
+              ? ("attempt_outstanding" as const)
+              : ("none" as const),
+        };
+      }),
+
     getDispatchAgent: (
       _operator: RunnerOperator,
       authority: RunnerDispatchAuthority

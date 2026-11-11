@@ -211,6 +211,7 @@ function service(overrides: Partial<RunnerService> = {}): RunnerService {
       kind: "unavailable",
       reason: "not_configured",
     }),
+    inspectSandbox: async () => ({ outcome: "unauthorized", version: 1 }),
     inventoryResources: async () => ({
       ambiguityReasons: {
         configurationDrift: 0,

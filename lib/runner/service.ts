@@ -10,6 +10,8 @@ import {
   type RunSnapshot,
   runEventSchema,
   runSnapshotSchema,
+  type SandboxInspectionRequest,
+  type SandboxInspectionResult,
   startRunInputSchema,
   type WarmState,
   warmStateSchema,
@@ -113,7 +115,12 @@ export type RunnerServiceDependencies = Readonly<{
     RunnerPersistentResourceLifecycle,
     "decommission" | "prewarm"
   > &
-    Partial<Pick<RunnerPersistentResourceLifecycle, "inventory" | "repair">>;
+    Partial<
+      Pick<
+        RunnerPersistentResourceLifecycle,
+        "inspect" | "inventory" | "repair"
+      >
+    >;
   reportAdmissionFailure?: (failure: RunnerAdmissionFailure) => void;
   store: RunnerServiceStore;
 }>;
@@ -291,6 +298,12 @@ export type RunnerService = Readonly<{
     principal: RunnerPrincipal,
     runId: string
   ) => Promise<RunnerLiveViewResult>;
+  /** Read-only: observes the caller's recorded sandbox, mutates nothing. */
+  inspectSandbox: (
+    principal: RunnerPrincipal,
+    agentId: string,
+    expected: SandboxInspectionRequest
+  ) => Promise<SandboxInspectionResult>;
   inventoryResources: () => Promise<RunnerInventoryResourcesResult>;
   listAgentRuns: (
     principal: RunnerPrincipal,
@@ -657,6 +670,20 @@ export function createRunnerService(
         return { kind: "unavailable", reason: "not_configured" };
       }
       return dependencies.liveView({ run, tenant: principal.tenant });
+    },
+
+    inspectSandbox: (principal, agentId, expected) => {
+      if (!validId(agentId)) {
+        return Promise.resolve({ outcome: "unauthorized", version: 1 });
+      }
+      if (!dependencies.resourceLifecycle?.inspect) {
+        throw configuredError("sandbox inspection");
+      }
+      return dependencies.resourceLifecycle.inspect(
+        principal,
+        agentId,
+        expected
+      );
     },
 
     inventoryResources: () => {

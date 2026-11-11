@@ -31,7 +31,23 @@ export type RunnerSecretAuthorization =
   | Readonly<{ kind: "allowed" }>
   | Readonly<{ kind: "unauthorized" | "unavailable" }>;
 
+export type RunnerBearerOwnerAuthentication =
+  | Readonly<{ kind: "authenticated"; session: SessionLike }>
+  | Readonly<{ kind: "unauthorized" | "unavailable" }>;
+
+export type RunnerBearerOwnerAuthorization =
+  | RunnerSubscriberAuthorization
+  | Readonly<{ kind: "unavailable" }>;
+
 export type RunnerAuth = Readonly<{
+  /**
+   * Authorizes a non-browser owner from a bearer identity token. Absent on a
+   * deployment that has not configured one; callers must treat that as
+   * unavailable and never fall back to a cookie or an operator secret.
+   */
+  authorizeBearerOwner?: (
+    request: Request
+  ) => Promise<RunnerBearerOwnerAuthorization>;
   authorizeDiagnostic: (request: Request) => RunnerSecretAuthorization;
   authorizeReconcile: (request: Request) => RunnerSecretAuthorization;
   authorizeSubscriber: () => Promise<RunnerSubscriberAuthorization>;
@@ -39,6 +55,9 @@ export type RunnerAuth = Readonly<{
 
 export type RunnerAuthDependencies = Readonly<{
   authenticate: () => Promise<SessionLike>;
+  authenticateBearerOwner?: (
+    request: Request
+  ) => Promise<RunnerBearerOwnerAuthentication>;
   authorizeSubscriberAccess: (
     session: SessionLike
   ) => Promise<SubscriberAccessDecision>;
@@ -159,7 +178,57 @@ export function createRunnerAuth(
 ): RunnerAuth {
   const environment = dependencies.environment ?? process.env;
 
+  /**
+   * The same application-owned decision for both credentials: a subscriber
+   * session type, a current account version, and a live entitlement.
+   */
+  const authorizeSession = async (
+    session: SessionLike
+  ): Promise<RunnerSubscriberAuthorization> => {
+    if (!session?.user?.id) {
+      return { kind: "unauthorized" };
+    }
+
+    let access: SubscriberAccessDecision;
+    try {
+      access = await dependencies.authorizeSubscriberAccess(session);
+    } catch {
+      // A failed authority revalidation is never authorization to use a
+      // tenant. Model it as the existing fail-closed subscription denial.
+      return { kind: "subscription_required" };
+    }
+    if (access.kind !== "allowed") {
+      return access;
+    }
+
+    return {
+      authVersion: access.authVersion,
+      kind: "allowed",
+      principal: {
+        kind: "subscriber",
+        tenant: access.session.tenant,
+        userId: access.userId,
+      },
+      session: access.session,
+      userId: access.userId,
+    };
+  };
+
   return {
+    authorizeBearerOwner: async (request) => {
+      if (!dependencies.authenticateBearerOwner) {
+        return { kind: "unavailable" };
+      }
+      let owner: RunnerBearerOwnerAuthentication;
+      try {
+        owner = await dependencies.authenticateBearerOwner(request);
+      } catch {
+        return { kind: "unavailable" };
+      }
+      return owner.kind === "authenticated"
+        ? authorizeSession(owner.session)
+        : owner;
+    },
     authorizeDiagnostic: (request) =>
       authorizeSecret(request, diagnosticSecretFromEnvironment(environment)),
     authorizeReconcile: (request) => {
@@ -178,33 +247,7 @@ export function createRunnerAuth(
       } catch {
         return { kind: "unauthorized" };
       }
-      if (!session?.user?.id) {
-        return { kind: "unauthorized" };
-      }
-
-      let access: SubscriberAccessDecision;
-      try {
-        access = await dependencies.authorizeSubscriberAccess(session);
-      } catch {
-        // A failed authority revalidation is never authorization to use a
-        // tenant. Model it as the existing fail-closed subscription denial.
-        return { kind: "subscription_required" };
-      }
-      if (access.kind !== "allowed") {
-        return access;
-      }
-
-      return {
-        authVersion: access.authVersion,
-        kind: "allowed",
-        principal: {
-          kind: "subscriber",
-          tenant: access.session.tenant,
-          userId: access.userId,
-        },
-        session: access.session,
-        userId: access.userId,
-      };
+      return authorizeSession(session);
     },
   };
 }

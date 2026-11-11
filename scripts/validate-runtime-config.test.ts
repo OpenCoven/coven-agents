@@ -150,6 +150,8 @@ const RUNTIME_CONFIGURATION_KEYS = [
   "VERCEL_ENV",
   "VERCEL_PROJECT_PRODUCTION_URL",
   "VERCEL_URL",
+  "WORKOS_CLIENT_ID",
+  "WORKOS_API_KEY",
 ] as const;
 
 function assertRejectedWithMessage(

@@ -5223,3 +5223,67 @@ test("the production statement shape remains Drizzle-safe", () => {
   };
   assert.equal(queryText(statement), "SELECT 1");
 });
+
+test("the sandbox fence read is tenant-scoped, read-only, and fails closed", async () => {
+  const principal = {
+    kind: "subscriber",
+    tenant: "tenant-a",
+    userId: "u",
+  } as const;
+  const current = agent({ sandboxGeneration: 4 });
+
+  const missing = scripted([]);
+  assert.equal(
+    await missing.store.getAgentSandboxFence(principal, current.id),
+    null
+  );
+  assert.deepEqual(
+    missing.statements.map((entry) => entry.name),
+    ["get-agent-for-sandbox-inspection"]
+  );
+  assert.deepEqual(missing.statements[0].args, {
+    agentId: current.id,
+    tenant: "tenant-a",
+  });
+
+  const cases = [
+    [{ attemptOutstanding: false, cleanupRequired: false }, "none"],
+    [
+      { attemptOutstanding: true, cleanupRequired: false },
+      "attempt_outstanding",
+    ],
+    [{ attemptOutstanding: true, cleanupRequired: true }, "cleanup_required"],
+  ] as const;
+  for (const [row, fence] of cases) {
+    const read = scripted(
+      [current as unknown as Record<string, unknown>],
+      [row]
+    );
+    // biome-ignore lint/performance/noAwaitInLoops: Cases run in order so a failure names its own input.
+    const result = await read.store.getAgentSandboxFence(principal, current.id);
+    assert.equal(result?.fence, fence);
+    assert.equal(result?.agent.sandboxGeneration, 4);
+    assert.deepEqual(
+      read.statements.map((entry) => entry.name),
+      ["get-agent-for-sandbox-inspection", "get-agent-sandbox-fence"]
+    );
+    for (const entry of read.statements) {
+      assert.equal(entry.args.tenant, "tenant-a");
+    }
+  }
+
+  // An unreadable fence must not be reported as "no fence".
+  for (const rows of [
+    [],
+    [{ attemptOutstanding: null, cleanupRequired: false }],
+  ]) {
+    const unreadable = scripted(
+      [current as unknown as Record<string, unknown>],
+      rows
+    );
+    // biome-ignore lint/performance/noAwaitInLoops: Cases run in order so a failure names its own input.
+    await assert.rejects(
+      unreadable.store.getAgentSandboxFence(principal, current.id)
+    );
+  }
+});
