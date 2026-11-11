@@ -27,7 +27,11 @@ export const DAYTONA_SDK_VERSION = "0.220.0";
 export const DAYTONA_INSPECTION_ADAPTER_VERSION = "daytona-adapter-v1";
 
 export type DaytonaSandboxInspectionItem = DaytonaSandboxInventoryItem &
-  Readonly<{ networkBlockAll?: boolean }>;
+  Readonly<{
+    gpu?: number;
+    networkAllowList?: string;
+    networkBlockAll?: boolean;
+  }>;
 
 /**
  * The whole provider surface inspection may touch: one read by exact ID. The
@@ -88,10 +92,33 @@ function observedState(
   }
 }
 
-/** Absent optional provider metadata is reported as unknown, never guessed. */
-function optionalNumber(value: unknown): number | null {
-  return typeof value === "number" ? value : null;
+/** Optional provider metadata that is present with the wrong type. */
+class MalformedProviderMetadata extends Error {}
+
+/**
+ * Reads one optional provider value. Absent is `null`; a value of the wrong
+ * type throws, so it can never be reported as "not set". A function is a
+ * method of the provider handle, not data, and is likewise absent.
+ */
+function optional<T>(
+  value: unknown,
+  accepts: (candidate: unknown) => candidate is T
+): T | null {
+  if (value === undefined || value === null || typeof value === "function") {
+    return null;
+  }
+  if (!accepts(value)) {
+    throw new MalformedProviderMetadata();
+  }
+  return value;
 }
+
+const isNumber = (value: unknown): value is number => typeof value === "number";
+const isString = (value: unknown): value is string => typeof value === "string";
+const isBoolean = (value: unknown): value is boolean =>
+  typeof value === "boolean";
+const isList = (value: unknown): value is readonly unknown[] =>
+  Array.isArray(value);
 
 function policy(
   configuration: DaytonaSandboxConfiguration
@@ -125,15 +152,22 @@ function observed(
     typeof sandbox.labels === "object" && sandbox.labels !== null
       ? sandbox.labels
       : {};
+  const domainAllowList = optional(sandbox.domainAllowList, isString);
+  const snapshot = optional(sandbox.snapshot, isString);
   return {
-    autoArchiveInterval: optionalNumber(sandbox.autoArchiveInterval),
-    autoDeleteInterval: optionalNumber(sandbox.autoDeleteInterval),
-    autoStopInterval: optionalNumber(sandbox.autoStopInterval),
+    autoArchiveInterval: optional(sandbox.autoArchiveInterval, isNumber),
+    autoDeleteInterval: optional(sandbox.autoDeleteInterval, isNumber),
+    autoDestroyAtConfigured: optional(sandbox.autoDestroyAt, isString) !== null,
+    autoPauseInterval: optional(sandbox.autoPauseInterval, isNumber),
+    autoStopInterval: optional(sandbox.autoStopInterval, isNumber),
     cpu: sandbox.cpu,
     diskGib: sandbox.disk,
     domainAllowListConfigured:
-      typeof sandbox.domainAllowList === "string" &&
-      sandbox.domainAllowList.trim().length > 0,
+      domainAllowList !== null && domainAllowList.trim().length > 0,
+    // The drift inventory's rule: exact equality with the configured policy.
+    domainAllowListMatchesPolicy:
+      domainAllowList === (configuration.domainAllowList ?? null),
+    gpu: optional(sandbox.gpu, isNumber),
     identity: {
       configuration: daytonaSandboxConfigurationIdentity(
         { labels: { ...labels } },
@@ -148,19 +182,17 @@ function observed(
         daytonaSandboxLabels(agent.tenant, agent.id)
       ).every(([name, value]) => labels[name] === value),
     },
+    linkedSandbox: optional(sandbox.linkedSandboxId, isString) !== null,
     memoryGib: sandbox.memory,
-    networkBlockAll:
-      typeof sandbox.networkBlockAll === "boolean"
-        ? sandbox.networkBlockAll
-        : null,
+    networkAllowListConfigured:
+      (optional(sandbox.networkAllowList, isString)?.trim().length ?? 0) > 0,
+    networkBlockAll: optional(sandbox.networkBlockAll, isBoolean),
     public: sandbox.public,
-    snapshot:
-      typeof sandbox.snapshot === "string" && sandbox.snapshot.length > 0
-        ? sandbox.snapshot
-        : null,
+    snapshot: snapshot !== null && snapshot.length > 0 ? snapshot : null,
     state: observedState(sandbox.state),
     target: sandbox.target,
-    volumes: Array.isArray(sandbox.volumes) ? sandbox.volumes.length : 0,
+    volumes: optional(sandbox.volumes, isList)?.length ?? 0,
+    warmPool: optional(sandbox.warmPoolId, isString) !== null,
   };
 }
 
@@ -194,13 +226,20 @@ export async function inspectDaytonaSandbox(
     return UNAUTHORIZED;
   }
   const { agent } = read;
-  const record: SandboxInspectionRecord = {
+  // Until the whole binding has matched, the recorded sandbox ID is withheld.
+  const refused: SandboxInspectionRecord = {
+    agentId: agent.id,
     fence: read.fence,
     generation: agent.sandboxGeneration,
     lifecycle: agent.sandboxLifecycle,
+    sandboxId: null,
   };
   const ambiguous = (
-    reason: Extract<SandboxInspectionResult, { outcome: "ambiguous" }>["reason"]
+    reason: Extract<
+      SandboxInspectionResult,
+      { outcome: "ambiguous" }
+    >["reason"],
+    record: SandboxInspectionRecord = refused
   ): SandboxInspectionResult => ({
     outcome: "ambiguous",
     reason,
@@ -222,6 +261,12 @@ export async function inspectDaytonaSandbox(
     return ambiguous("pending_lifecycle");
   }
 
+  // The binding matched, so this is the ID the caller already supplied.
+  const matched: SandboxInspectionRecord = {
+    ...refused,
+    sandboxId: recordedSandboxId,
+  };
+
   let configuration: DaytonaSandboxConfiguration;
   let provider: DaytonaSandboxInspectionService;
   try {
@@ -236,18 +281,32 @@ export async function inspectDaytonaSandbox(
     sandbox = await provider.get(recordedSandboxId);
   } catch (error) {
     return classifyDaytonaProviderError(error) === "not_found"
-      ? { outcome: "not_found", policy: policy(configuration), record, version }
+      ? {
+          outcome: "not_found",
+          policy: policy(configuration),
+          record: matched,
+          version,
+        }
       : unavailable("provider");
   }
   if (sandbox.id !== recordedSandboxId) {
-    return ambiguous("returned_id_mismatch");
+    return ambiguous("returned_id_mismatch", matched);
   }
 
+  let observation: SandboxInspectionObserved;
+  try {
+    observation = observed(sandbox, agent, configuration);
+  } catch (error) {
+    if (error instanceof MalformedProviderMetadata) {
+      return unavailable("provider");
+    }
+    throw error;
+  }
   const result = sandboxInspectionResultSchema.safeParse({
-    observed: observed(sandbox, agent, configuration),
+    observed: observation,
     outcome: "observed",
     policy: policy(configuration),
-    record,
+    record: matched,
     version,
   });
   // Missing or malformed provider metadata is never reported as observed.

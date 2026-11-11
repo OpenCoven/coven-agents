@@ -209,27 +209,40 @@ test("a matching binding is observed with exactly one provider get", async () =>
     observed: {
       autoArchiveInterval: 10_080,
       autoDeleteInterval: -1,
+      autoDestroyAtConfigured: false,
+      autoPauseInterval: null,
       autoStopInterval: 15,
       cpu: 2,
       diskGib: 10,
       domainAllowListConfigured: false,
+      domainAllowListMatchesPolicy: true,
+      gpu: null,
       identity: {
         configuration: "current",
         credentialBoundary: true,
         generationLabel: true,
         ownershipLabels: true,
       },
+      linkedSandbox: false,
       memoryGib: 4,
+      networkAllowListConfigured: false,
       networkBlockAll: false,
       public: false,
       snapshot: "coven-agents-copilot-2",
       state: "started",
       target: "us",
       volumes: 0,
+      warmPool: false,
     },
     outcome: "observed",
     policy: result.outcome === "observed" ? result.policy : null,
-    record: { fence: "none", generation: 3, lifecycle: "ready" },
+    record: {
+      agentId: AGENT_ID,
+      fence: "none",
+      generation: 3,
+      lifecycle: "ready",
+      sandboxId: "sandbox-a",
+    },
     version: 1,
   });
 });
@@ -408,6 +421,12 @@ test("a binding mismatch refuses before any provider call and does not disclose 
       item.reason
     );
     assert.equal(JSON.stringify(result).includes("sandbox-a"), false);
+    assert.deepEqual(
+      result.outcome === "ambiguous"
+        ? [result.record.agentId, result.record.sandboxId]
+        : null,
+      [AGENT_ID, null]
+    );
   }
 });
 
@@ -441,6 +460,12 @@ test("a provider not-found is reported and never triggers create or a name looku
   onlyOneGet(calls);
   assert.equal(result.outcome, "not_found");
   assert.equal(JSON.stringify(result).includes("gone"), false);
+  assert.deepEqual(
+    result.outcome === "not_found"
+      ? [result.record.agentId, result.record.sandboxId]
+      : null,
+    [AGENT_ID, "sandbox-a"]
+  );
 });
 
 test("a provider failure is unavailable and carries no provider detail", async () => {
@@ -474,6 +499,101 @@ test("a returned ID that differs from the recorded ID is ambiguous, not adopted"
     "returned_id_mismatch"
   );
   assert.equal(JSON.stringify(result).includes("sandbox-substituted"), false);
+  // The echoed ID is the recorded one the caller already supplied.
+  assert.equal(
+    result.outcome === "ambiguous" ? result.record.sandboxId : null,
+    "sandbox-a"
+  );
+});
+
+test("egress is compared with the owner policy using the drift inventory's rule", async () => {
+  const owner = agent();
+  const policyList = "api.example.test,registry.example.test";
+  const cases = [
+    { configured: false, list: undefined, matches: true, policy: undefined },
+    { configured: true, list: policyList, matches: true, policy: policyList },
+    { configured: true, list: "*", matches: false, policy: policyList },
+    { configured: false, list: undefined, matches: false, policy: policyList },
+    { configured: true, list: policyList, matches: false, policy: undefined },
+  ] as const;
+  for (const item of cases) {
+    // biome-ignore lint/performance/noAwaitInLoops: Cases run in order so a failure names its own input.
+    const { calls, result } = await inspect({
+      answer: () =>
+        Promise.resolve(providerSandbox(owner, { domainAllowList: item.list })),
+      configure: () => ({ ...configuration, domainAllowList: item.policy }),
+    });
+    onlyOneGet(calls);
+    assert.equal(result.outcome, "observed");
+    if (result.outcome !== "observed") {
+      return;
+    }
+    assert.equal(result.observed.domainAllowListConfigured, item.configured);
+    assert.equal(result.observed.domainAllowListMatchesPolicy, item.matches);
+    // The comparison is reported; the raw list never is.
+    assert.equal(JSON.stringify(result).includes("example.test"), false);
+  }
+});
+
+test("a network allow list, TTL, auto-pause, GPU, and attachments are reported", async () => {
+  const owner = agent();
+  const { calls, result } = await inspect({
+    answer: () =>
+      Promise.resolve(
+        providerSandbox(owner, {
+          autoDestroyAt: "2026-12-01T00:00:00.000Z",
+          autoPauseInterval: 30,
+          gpu: 1,
+          linkedSandboxId: "sandbox-linked",
+          networkAllowList: "0.0.0.0/0",
+          warmPoolId: "pool-1",
+        })
+      ),
+  });
+  onlyOneGet(calls);
+  assert.equal(result.outcome, "observed");
+  if (result.outcome !== "observed") {
+    return;
+  }
+  assert.equal(result.observed.autoDestroyAtConfigured, true);
+  assert.equal(result.observed.autoPauseInterval, 30);
+  assert.equal(result.observed.gpu, 1);
+  assert.equal(result.observed.linkedSandbox, true);
+  assert.equal(result.observed.networkAllowListConfigured, true);
+  assert.equal(result.observed.warmPool, true);
+  for (const withheld of ["sandbox-linked", "pool-1", "0.0.0.0", "2026-12"]) {
+    assert.equal(JSON.stringify(result).includes(withheld), false, withheld);
+  }
+});
+
+test("optional provider metadata of the wrong type is unavailable, never read as not set", async () => {
+  const owner = agent();
+  const malformed = [
+    { volumes: "none" },
+    { volumes: 2 },
+    { domainAllowList: ["example.test"] },
+    { networkAllowList: 0 },
+    { autoDestroyAt: 1_800_000_000 },
+    { autoPauseInterval: "0" },
+    { autoStopInterval: "15" },
+    { gpu: "1" },
+    { linkedSandboxId: true },
+    { warmPoolId: {} },
+    { networkBlockAll: "false" },
+    { snapshot: 7 },
+  ];
+  for (const overrides of malformed) {
+    // biome-ignore lint/performance/noAwaitInLoops: Cases run in order so a failure names its own input.
+    const { calls, result } = await inspect({
+      answer: () => Promise.resolve(providerSandbox(owner, overrides as never)),
+    });
+    onlyOneGet(calls);
+    assert.deepEqual(
+      result,
+      { outcome: "unavailable", source: "provider", version: 1 },
+      JSON.stringify(overrides)
+    );
+  }
 });
 
 test("malformed provider metadata fails closed as unavailable", async () => {

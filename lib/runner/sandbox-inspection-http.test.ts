@@ -22,7 +22,13 @@ const subscriber: RunnerAuthenticatedSubscriber = {
 const observed: SandboxInspectionResult = {
   outcome: "ambiguous",
   reason: "generation_mismatch",
-  record: { fence: "none", generation: 3, lifecycle: "ready" },
+  record: {
+    agentId: "00000000-0000-4000-8000-000000000001",
+    fence: "none",
+    generation: 3,
+    lifecycle: "ready",
+    sandboxId: null,
+  },
   version: 1,
 };
 

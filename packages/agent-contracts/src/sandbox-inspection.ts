@@ -46,11 +46,26 @@ export const sandboxInspectionFenceSchema = z.enum([
   "cleanup_required",
 ]);
 
+const identifier = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]*$/u);
+
+/**
+ * `agentId` echoes the agent record that was read, so a consumer can refuse
+ * an answer about a different record. `sandboxId` is the recorded sandbox ID,
+ * and is non-null only when the whole binding matched and the provider was
+ * asked about that ID: it then equals the ID the caller supplied. A refusal
+ * decided from the database never discloses the recorded ID.
+ */
 const recordSchema = z
   .object({
+    agentId: identifier,
     fence: sandboxInspectionFenceSchema,
     generation: z.number().int().min(0),
     lifecycle: sandboxInspectionLifecycleSchema,
+    sandboxId: identifier.nullable(),
   })
   .strict();
 
@@ -67,15 +82,28 @@ export const sandboxInspectionStateSchema = z.enum([
 const interval = z.number().int().min(-1).max(10_000_000).nullable();
 const resource = z.number().int().min(0).max(4096);
 
-/** Provider-reported values. Identifiers, names, and raw labels are withheld. */
+/**
+ * Provider-reported values. Identifiers, names, raw labels, and raw allow
+ * lists are withheld: egress is reported as a comparison with the owner's
+ * configured policy, and attachments and a TTL only as present or absent.
+ */
 const observedSchema = z
   .object({
     autoArchiveInterval: interval,
     autoDeleteInterval: interval,
+    /** A destructive TTL deadline is set on the sandbox. */
+    autoDestroyAtConfigured: z.boolean(),
+    autoPauseInterval: interval,
     autoStopInterval: interval,
     cpu: resource,
     diskGib: resource,
     domainAllowListConfigured: z.boolean(),
+    /**
+     * The sandbox's domain allow list equals the owner's configured policy,
+     * by the same rule as the drift inventory. Both absent is a match.
+     */
+    domainAllowListMatchesPolicy: z.boolean(),
+    gpu: resource.nullable(),
     identity: z
       .object({
         configuration: z.enum(["current", "prior", "mismatch"]),
@@ -84,13 +112,17 @@ const observedSchema = z
         ownershipLabels: z.boolean(),
       })
       .strict(),
+    linkedSandbox: z.boolean(),
     memoryGib: resource,
+    /** The owner policy sets no network allow list, so any value is drift. */
+    networkAllowListConfigured: z.boolean(),
     networkBlockAll: z.boolean().nullable(),
     public: z.boolean(),
     snapshot: z.string().min(1).max(256).nullable(),
     state: sandboxInspectionStateSchema,
     target: z.string().min(1).max(64),
     volumes: z.number().int().min(0).max(1024),
+    warmPool: z.boolean(),
   })
   .strict();
 

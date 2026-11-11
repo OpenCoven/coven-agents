@@ -6,7 +6,13 @@ import {
   sandboxInspectionResultSchema,
 } from "./index";
 
-const record = { fence: "none", generation: 3, lifecycle: "ready" } as const;
+const record = {
+  agentId: "00000000-0000-4000-8000-000000000001",
+  fence: "none",
+  generation: 3,
+  lifecycle: "ready",
+  sandboxId: "sandbox-a",
+} as const;
 const policy = {
   adapterVersion: "daytona-adapter-v1",
   capabilityContractVersion: "hosted-v1",
@@ -20,23 +26,30 @@ const policy = {
 const observed = {
   autoArchiveInterval: 10_080,
   autoDeleteInterval: -1,
+  autoDestroyAtConfigured: false,
+  autoPauseInterval: 0,
   autoStopInterval: 15,
   cpu: 2,
   diskGib: 10,
   domainAllowListConfigured: false,
+  domainAllowListMatchesPolicy: true,
+  gpu: null,
   identity: {
     configuration: "current",
     credentialBoundary: true,
     generationLabel: true,
     ownershipLabels: true,
   },
+  linkedSandbox: false,
   memoryGib: 4,
+  networkAllowListConfigured: false,
   networkBlockAll: null,
   public: false,
   snapshot: "snapshot-1",
   state: "stopped",
   target: "us",
   volumes: 0,
+  warmPool: false,
 } as const;
 
 test("the inspection contract is version 1", () => {
@@ -67,7 +80,12 @@ test("every outcome parses and carries only its own fields", () => {
   const results = [
     { observed, outcome: "observed", policy, record, version: 1 },
     { outcome: "not_found", policy, record, version: 1 },
-    { outcome: "ambiguous", reason: "sandbox_id_mismatch", record, version: 1 },
+    {
+      outcome: "ambiguous",
+      reason: "sandbox_id_mismatch",
+      record: { ...record, sandboxId: null },
+      version: 1,
+    },
     { outcome: "unauthorized", version: 1 },
     { outcome: "unavailable", source: "provider", version: 1 },
   ];
@@ -87,6 +105,16 @@ test("results cannot carry identifiers, labels, or another version", () => {
     { ...base, observed: { ...observed, cpu: Number.NaN } },
     { ...base, observed: { ...observed, state: "paused" } },
     { ...base, record: { ...record, fence: "released" } },
+    { ...base, record: { ...record, agentId: "" } },
+    { ...base, record: { ...record, agentId: undefined } },
+    { ...base, record: { ...record, sandboxId: "../sandbox" } },
+    { ...base, record: { ...record, sandboxId: undefined } },
+    { ...base, observed: { ...observed, domainAllowList: "example.test" } },
+    { ...base, observed: { ...observed, networkAllowList: "0.0.0.0/0" } },
+    { ...base, observed: { ...observed, autoDestroyAt: "2026-12-01" } },
+    { ...base, observed: { ...observed, linkedSandbox: "sandbox-b" } },
+    { ...base, observed: { ...observed, warmPool: "pool-1" } },
+    { ...base, observed: { ...observed, domainAllowListMatchesPolicy: null } },
     { outcome: "unauthorized", reason: "wrong_tenant", version: 1 },
     { outcome: "unavailable", source: "https://provider.example", version: 1 },
     { outcome: "ready", version: 1 },
