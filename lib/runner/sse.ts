@@ -93,77 +93,83 @@ export function createRunEventStream(
     }
   };
 
-  return new ReadableStream<Uint8Array>({
-    cancel() {
-      cancel();
-    },
-    async pull(streamController) {
-      controllerRef = streamController;
-      try {
-        while (!cancelled && !abortController.signal.aborted) {
-          const queuedEvent = pending;
-          if (queuedEvent) {
-            pending = undefined;
-            streamController.enqueue(
-              encoder.encode(serializeEvent(queuedEvent))
-            );
-            cursor = queuedEvent.id;
-            lastActivityAt = now();
-            return;
-          }
-
-          // biome-ignore lint/performance/noAwaitInLoops: Each poll advances one SSE cursor.
-          const snapshot = await options.read(cursor);
-          if (!snapshot || cancelled || abortController.signal.aborted) {
-            close();
-            return;
-          }
-          let nextEvent: RunEvent | undefined;
-          for (const snapshotEvent of snapshot.events) {
-            if (
-              snapshotEvent.id > cursor &&
-              (!nextEvent || snapshotEvent.id < nextEvent.id)
-            ) {
-              nextEvent = snapshotEvent;
+  return new ReadableStream<Uint8Array>(
+    {
+      cancel() {
+        cancel();
+      },
+      async pull(streamController) {
+        controllerRef = streamController;
+        try {
+          while (!cancelled && !abortController.signal.aborted) {
+            const queuedEvent = pending;
+            if (queuedEvent) {
+              pending = undefined;
+              streamController.enqueue(
+                encoder.encode(serializeEvent(queuedEvent))
+              );
+              cursor = queuedEvent.id;
+              lastActivityAt = now();
+              return;
             }
-          }
-          if (nextEvent) {
-            pending = nextEvent;
-            continue;
-          }
-          if (snapshot.terminal) {
-            close();
-            return;
-          }
 
-          const remainingIdleMs = idleTimeoutMs - (now() - lastActivityAt);
-          if (remainingIdleMs <= 0) {
-            close();
-            return;
+            // biome-ignore lint/performance/noAwaitInLoops: Each poll advances one SSE cursor.
+            const snapshot = await options.read(cursor);
+            if (!snapshot || cancelled || abortController.signal.aborted) {
+              close();
+              return;
+            }
+            let nextEvent: RunEvent | undefined;
+            for (const snapshotEvent of snapshot.events) {
+              if (
+                snapshotEvent.id > cursor &&
+                (!nextEvent || snapshotEvent.id < nextEvent.id)
+              ) {
+                nextEvent = snapshotEvent;
+              }
+            }
+            if (nextEvent) {
+              pending = nextEvent;
+              continue;
+            }
+            if (snapshot.terminal) {
+              close();
+              return;
+            }
+
+            const remainingIdleMs = idleTimeoutMs - (now() - lastActivityAt);
+            if (remainingIdleMs <= 0) {
+              close();
+              return;
+            }
+            await sleep(
+              Math.min(pollIntervalMs, remainingIdleMs),
+              abortController.signal
+            );
           }
-          await sleep(
-            Math.min(pollIntervalMs, remainingIdleMs),
-            abortController.signal
-          );
-        }
-        close();
-      } catch (error) {
-        if (cancelled || abortController.signal.aborted) {
           close();
-        } else {
-          fail(error);
+        } catch (error) {
+          if (cancelled || abortController.signal.aborted) {
+            close();
+          } else {
+            fail(error);
+          }
         }
-      }
+      },
+      start(streamController) {
+        controllerRef = streamController;
+        const onAbort = (): void => abort();
+        options.signal?.addEventListener("abort", onAbort, { once: true });
+        removeAbortListener = () =>
+          options.signal?.removeEventListener("abort", onAbort);
+        if (options.signal?.aborted) {
+          abort();
+        }
+      },
     },
-    start(streamController) {
-      controllerRef = streamController;
-      const onAbort = (): void => abort();
-      options.signal?.addEventListener("abort", onAbort, { once: true });
-      removeAbortListener = () =>
-        options.signal?.removeEventListener("abort", onAbort);
-      if (options.signal?.aborted) {
-        abort();
-      }
-    },
-  });
+    // Demand-driven: the default strategy reads one event ahead of the
+    // consumer, so a slow consumer would hold a serialized event it has not
+    // asked for. With no read-ahead, each pull serves exactly one read.
+    { highWaterMark: 0 }
+  );
 }
