@@ -1450,13 +1450,16 @@ test("successful probe work with unconfirmed cleanup remains durably provisionin
       create: () => Promise.reject(new Error("must not create")),
       get: () => Promise.resolve(providerSandbox),
     },
+    // The probe must finish inside the deadline so that only its cleanup is
+    // left unconfirmed. Five milliseconds lost that race on a loaded machine
+    // and reported a retryable failure instead.
     lifecycle: {
-      deadline: Date.now() + 5,
+      deadline: Date.now() + 250,
       signal: new AbortController().signal,
     },
     probe: (value, signal, timeoutSeconds, sessionId) =>
       probeDaytonaHarnesses(value, {
-        deadline: Date.now() + 5,
+        deadline: Date.now() + 250,
         sessionId,
         signal,
         timeoutSeconds,
