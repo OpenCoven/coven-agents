@@ -98,11 +98,39 @@ function providerSandbox(
 
 type ProviderCall = Readonly<{ args: readonly unknown[]; method: string }>;
 
+/** Every data field inspection reads; the fake reports these as plain data. */
+const DATA_FIELDS: ReadonlySet<string> = new Set([
+  "autoArchiveInterval",
+  "autoDeleteInterval",
+  "autoDestroyAt",
+  "autoPauseInterval",
+  "autoStopInterval",
+  "cpu",
+  "disk",
+  "domainAllowList",
+  "gpu",
+  "id",
+  "labels",
+  "linkedSandboxId",
+  "memory",
+  "name",
+  "networkAllowList",
+  "networkBlockAll",
+  "public",
+  "snapshot",
+  "state",
+  "target",
+  "volumes",
+  "warmPoolId",
+]);
+
 /**
  * Stands in for the whole provider client and for every handle it returns.
- * Any property that is read as a function is recorded, so a create, start,
- * stop, delete, label, or interval call cannot happen unobserved. Only `get`
- * is answered; everything else throws after being recorded.
+ * A data field that was not supplied reads as `undefined`, as it does on the
+ * real handle. Any other property is read as a function and recorded, so a
+ * create, start, stop, delete, label, or interval call cannot happen
+ * unobserved. Only `get` is answered; everything else throws after being
+ * recorded.
  */
 function recordingProvider(
   answer: (sandboxId: string) => Promise<DaytonaSandboxInspectionItem>
@@ -114,7 +142,7 @@ function recordingProvider(
         if (typeof property === "symbol" || property === "then") {
           return Reflect.get(inner, property, receiver);
         }
-        if (Object.hasOwn(inner, property)) {
+        if (Object.hasOwn(inner, property) || DATA_FIELDS.has(property)) {
           return Reflect.get(inner, property, receiver);
         }
         return (...args: unknown[]) => {
@@ -581,6 +609,9 @@ test("optional provider metadata of the wrong type is unavailable, never read as
     { warmPoolId: {} },
     { networkBlockAll: "false" },
     { snapshot: 7 },
+    { gpu: () => 1 },
+    { volumes: () => [] },
+    { domainAllowList: () => "example.test" },
   ];
   for (const overrides of malformed) {
     // biome-ignore lint/performance/noAwaitInLoops: Cases run in order so a failure names its own input.
@@ -591,7 +622,9 @@ test("optional provider metadata of the wrong type is unavailable, never read as
     assert.deepEqual(
       result,
       { outcome: "unavailable", source: "provider", version: 1 },
-      JSON.stringify(overrides)
+      Object.entries(overrides)
+        .map(([key, value]) => `${key}: ${typeof value}`)
+        .join(", ")
     );
   }
 });

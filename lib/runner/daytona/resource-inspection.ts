@@ -96,15 +96,15 @@ function observedState(
 class MalformedProviderMetadata extends Error {}
 
 /**
- * Reads one optional provider value. Absent is `null`; a value of the wrong
- * type throws, so it can never be reported as "not set". A function is a
- * method of the provider handle, not data, and is likewise absent.
+ * Reads one optional provider value. Only `undefined` and `null` are absent;
+ * a value of any other wrong type, a function included, throws, so it can
+ * never be reported as "not set".
  */
 function optional<T>(
   value: unknown,
   accepts: (candidate: unknown) => candidate is T
 ): T | null {
-  if (value === undefined || value === null || typeof value === "function") {
+  if (value === undefined || value === null) {
     return null;
   }
   if (!accepts(value)) {
