@@ -23,6 +23,7 @@ import {
 import {
   assertDaytonaCredentialBoundary,
   assertReplacementSnapshotReady,
+  DaytonaSandboxBindingRefusedError,
   type DaytonaSandboxConfiguration,
   type DaytonaSandboxDependencies,
   DaytonaSandboxLifecycleError,
@@ -93,6 +94,8 @@ export function daytonaRunnerExecutor(
           error.code === "sandbox_reset_required")) ||
       (error instanceof DaytonaSandboxLifecycleError &&
         error.kind === "cleanup_needed"),
+    sandboxBindingRefusal: (error) =>
+      error instanceof DaytonaSandboxBindingRefusedError ? error.reason : null,
     start: async (input) => {
       const started = await operations.startProcess({
         ...input.authorizers,

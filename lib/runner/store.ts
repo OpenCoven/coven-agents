@@ -62,6 +62,7 @@ import type {
   RunnerReconciliationLease,
   RunnerRunEventRecord,
   RunnerRunRecord,
+  RunnerSandboxBinding,
   StartRunnerRunInput,
   TerminalDaytonaAttemptCleanupClaim,
   UpdateRunnerAgentInput,
@@ -151,6 +152,50 @@ function optionalColumn<T>(
   return value === undefined || value === null ? null : (value as T);
 }
 
+/**
+ * Both columns or neither. A half-written binding must not read as unbound,
+ * because an unbound run is allowed to create a sandbox.
+ */
+function sandboxBindingColumns(
+  row: Record<string, unknown>
+): RunnerSandboxBinding | null {
+  const expectedSandboxId = optionalColumn<string>(row, "boundSandboxId");
+  const expectedGeneration = optionalColumn<number>(
+    row,
+    "boundSandboxGeneration"
+  );
+  if (expectedSandboxId === null && expectedGeneration === null) {
+    return null;
+  }
+  if (
+    typeof expectedSandboxId !== "string" ||
+    !expectedSandboxId ||
+    typeof expectedGeneration !== "number" ||
+    !Number.isSafeInteger(expectedGeneration) ||
+    expectedGeneration < 0
+  ) {
+    throw new Error("Run sandbox binding could not be read.");
+  }
+  return { expectedGeneration, expectedSandboxId };
+}
+
+function sandboxBindingField(row: Record<string, unknown>): {
+  sandboxBinding?: RunnerSandboxBinding;
+} {
+  const sandboxBinding = sandboxBindingColumns(row);
+  return sandboxBinding ? { sandboxBinding } : {};
+}
+
+function sameSandboxBinding(
+  left: RunnerSandboxBinding | null,
+  right: RunnerSandboxBinding | null
+): boolean {
+  return left === null || right === null
+    ? left === right
+    : left.expectedGeneration === right.expectedGeneration &&
+        left.expectedSandboxId === right.expectedSandboxId;
+}
+
 function asAgent(row: Record<string, unknown>): RunnerAgentRecord {
   return {
     createdAt: timestampColumn(row, "createdAt"),
@@ -219,6 +264,8 @@ function asRun(row: Record<string, unknown>): RunnerRunRecord {
     output: column(row, "output"),
     queueSequence: column(row, "queueSequence"),
     requestHash: column(row, "requestHash"),
+    // Absent, not null, on an unbound run: its record is unchanged.
+    ...sandboxBindingField(row),
     startedAt: nullableTimestampColumn(row, "startedAt"),
     status: column(row, "status"),
     task: column(row, "task"),
@@ -736,6 +783,14 @@ function matchesRunRequest(
   executionPermission: RunnerRunRecord["executionPermission"]
 ): boolean {
   if (run.executionPermission !== executionPermission) {
+    return false;
+  }
+  if (
+    !sameSandboxBinding(
+      run.sandboxBinding ?? null,
+      input.sandboxBinding ?? null
+    )
+  ) {
     return false;
   }
   if (
@@ -4979,6 +5034,15 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
       | { kind: "conflict"; run: RunSnapshot }
       | { kind: "sandbox_trust_conflict" }
       | {
+          kind: "sandbox_binding_refused";
+          reason:
+            | "fence_outstanding"
+            | "generation_mismatch"
+            | "lifecycle_not_ready"
+            | "no_recorded_sandbox"
+            | "sandbox_id_mismatch";
+        }
+      | {
           kind: "refused";
           reason: "global_busy" | "tenant_queue_full";
         }
@@ -4994,6 +5058,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
       const executionPermission = input.executionPermission ?? "unrestricted";
       const githubBrokerPolicy = input.githubBrokerPolicy ?? null;
       const teamStepId = input.teamStepId ?? null;
+      const sandboxBinding = input.sandboxBinding ?? null;
       return database.transaction(async (transaction) => {
         const [agent] = await transaction.execute(
           statement(
@@ -5021,6 +5086,73 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           )
             ? { kind: "duplicate", run: runSnapshot(existingOperation) }
             : { kind: "conflict", run: runSnapshot(existingOperation) };
+        }
+        if (sandboxBinding) {
+          // The request's two values are compared with the locked agent row
+          // and can only refuse. Nothing here records, adopts, or selects a
+          // sandbox, and a refusal inserts no run, so no lease, reservation,
+          // or provider call can follow from it.
+          const recordedSandboxId = optionalColumn<string>(
+            agent,
+            "daytonaSandboxId"
+          );
+          if (!recordedSandboxId) {
+            return {
+              kind: "sandbox_binding_refused",
+              reason: "no_recorded_sandbox",
+            };
+          }
+          if (recordedSandboxId !== sandboxBinding.expectedSandboxId) {
+            return {
+              kind: "sandbox_binding_refused",
+              reason: "sandbox_id_mismatch",
+            };
+          }
+          if (
+            column<number>(agent, "sandboxGeneration") !==
+            sandboxBinding.expectedGeneration
+          ) {
+            return {
+              kind: "sandbox_binding_refused",
+              reason: "generation_mismatch",
+            };
+          }
+          if (agent.sandboxLifecycle !== "ready") {
+            return {
+              kind: "sandbox_binding_refused",
+              reason: "lifecycle_not_ready",
+            };
+          }
+          const [fence] = await transaction.execute(
+            statement(
+              "get-run-sandbox-binding-fence",
+              { agentId: input.agentId, tenant: principal.tenant },
+              sql`SELECT COALESCE(bool_or(
+                  (
+                    "dispatchState" IN ('dispatching', 'running')
+                    AND "authorityRevalidation" = false
+                  )
+                  OR (
+                    "dispatchState" = 'terminal'
+                    AND (
+                      "daytonaAttemptId" IS NOT NULL
+                      OR "daytonaCommandId" IS NOT NULL
+                      OR "daytonaSessionId" IS NOT NULL
+                    )
+                  )
+                ), false) AS "outstanding"
+                FROM "RunnerRun"
+                WHERE "agentId" = ${input.agentId}
+                  AND "tenant" = ${principal.tenant}`
+            )
+          );
+          // A missing or malformed fence row must not read as "no fence".
+          if (fence?.outstanding !== false) {
+            return {
+              kind: "sandbox_binding_refused",
+              reason: "fence_outstanding",
+            };
+          }
         }
         if (
           executionPermission !== "unrestricted" &&
@@ -5112,6 +5244,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
               id: input.id,
               operationId: input.operationId,
               requestHash: input.requestHash,
+              sandboxBinding,
               task: input.task,
               teamStepId,
               tenant: principal.tenant,
@@ -5120,13 +5253,15 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
               "id", "agentId", "tenant", "agentInstructions", "agentModel",
               "agentRuntime", "agentWorkspace", "authVersion", "operationId",
               "requestHash", "task", "executionPermission", "teamStepId",
-              "githubBrokerPolicy"
+              "boundSandboxId", "boundSandboxGeneration", "githubBrokerPolicy"
             ) VALUES (
               ${input.id}, ${input.agentId}, ${principal.tenant},
               ${agentSnapshot.instructions}, ${agentSnapshot.model},
               ${agentSnapshot.runtime}, ${agentSnapshot.workspace},
               ${input.authVersion}, ${input.operationId}, ${input.requestHash},
               ${input.task}, ${executionPermission}, ${teamStepId},
+              ${sandboxBinding?.expectedSandboxId ?? null},
+              ${sandboxBinding?.expectedGeneration ?? null},
               CAST(${githubBrokerPolicy === null ? null : JSON.stringify(githubBrokerPolicy)} AS jsonb)
             ) ON CONFLICT ("agentId", "operationId") DO NOTHING RETURNING *`
           )

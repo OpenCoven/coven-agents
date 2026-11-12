@@ -1321,3 +1321,97 @@ test("a live view is offered only for a running run with a configured provider",
     { run: run({ status: "running" }), tenant: PRINCIPAL.tenant },
   ]);
 });
+
+test("start hashes and forwards a sandbox binding, and types its refusal", async () => {
+  const sandboxBinding = {
+    expectedGeneration: 3,
+    expectedSandboxId: "sandbox-recorded-1",
+  };
+  const admitted: Record<string, unknown>[] = [];
+  const service = createRunnerService({
+    admit: (input) => {
+      admitted.push(input as Record<string, unknown>);
+      return Promise.resolve({
+        error: {
+          code: "sandbox_binding_refused",
+          message: "safe",
+          name: "RunnerAdmissionError",
+          retryable: false,
+          sandboxBindingReason: "generation_mismatch",
+        },
+        kind: "refused",
+      } as never);
+    },
+    createId: () => RUN_ID,
+    store: baseStore(),
+  });
+
+  assert.deepEqual(
+    await service.startRun(PRINCIPAL, 1, AGENT_ID, {
+      operationId: OPERATION_ID,
+      sandboxBinding,
+      task: "Do the thing.",
+    }),
+    {
+      code: "sandbox_binding_refused",
+      kind: "refused",
+      reason: "generation_mismatch",
+      retryable: false,
+    }
+  );
+  await service.startRun(PRINCIPAL, 1, AGENT_ID, {
+    operationId: OPERATION_ID,
+    task: "Do the thing.",
+  });
+
+  const [bound, unbound] = admitted;
+  assert.deepEqual(bound?.sandboxBinding, sandboxBinding);
+  // The binding is part of the operation identity, so reusing an operation
+  // with another binding cannot be mistaken for a duplicate.
+  assert.notEqual(bound?.requestHash, unbound?.requestHash);
+  // An unbound start is admitted with exactly the fields it had before.
+  assert.equal(Object.hasOwn(unbound ?? {}, "sandboxBinding"), false);
+  assert.deepEqual(Object.keys(unbound ?? {}).sort(), [
+    "agentId",
+    "authVersion",
+    "id",
+    "operationId",
+    "principal",
+    "requestHash",
+    "task",
+  ]);
+});
+
+test("start rejects a malformed sandbox binding before any lookup", async () => {
+  let lookups = 0;
+  const service = createRunnerService({
+    admit: () => Promise.reject(new Error("must not admit")),
+    createId: () => RUN_ID,
+    store: baseStore({
+      getAgent: () => {
+        lookups += 1;
+        return Promise.resolve(null);
+      },
+    }),
+  });
+
+  const results = await Promise.all(
+    [
+      { expectedSandboxId: "sandbox" },
+      { expectedGeneration: 1, expectedSandboxId: "sandbox", name: "by-name" },
+      { expectedGeneration: -1, expectedSandboxId: "sandbox" },
+    ].map((sandboxBinding) =>
+      service.startRun(PRINCIPAL, 1, AGENT_ID, {
+        operationId: OPERATION_ID,
+        sandboxBinding,
+        task: "Do the thing.",
+      } as never)
+    )
+  );
+  assert.deepEqual(results, [
+    { kind: "invalid" },
+    { kind: "invalid" },
+    { kind: "invalid" },
+  ]);
+  assert.equal(lookups, 0);
+});

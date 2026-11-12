@@ -121,6 +121,8 @@ const contractSourceFiles = [
   "packages/agent-contracts/src/identity.ts",
   "packages/agent-contracts/src/index.test.ts",
   "packages/agent-contracts/src/index.ts",
+  "packages/agent-contracts/src/sandbox-binding.test.ts",
+  "packages/agent-contracts/src/sandbox-binding.ts",
   "packages/agent-contracts/src/team.test.ts",
 ] as const;
 const credentialSourceFiles = [

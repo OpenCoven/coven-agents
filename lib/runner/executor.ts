@@ -2,6 +2,7 @@ import "server-only";
 
 import type { RunnerExecutionProvenance } from "./execution-provenance";
 import type { HarnessCredential } from "./harness";
+import type { SandboxBindingRefusalReason } from "./sandbox-binding";
 import type { RunnerStore } from "./store";
 import type {
   RunnerAgentRecord,
@@ -124,6 +125,14 @@ export type RunnerExecutor = Readonly<{
     workspace: string
   ) => Promise<RestrictedWorkspaceInspection>;
   isCleanupPending: (error: unknown) => boolean;
+  /**
+   * Names why `ensureExecutionContext` refused a run that carries a sandbox
+   * binding, or null for any other error. A provider that reports a reason
+   * here made no create, start, delete, resize, or relabel call for it.
+   */
+  sandboxBindingRefusal?: (
+    error: unknown
+  ) => SandboxBindingRefusalReason | null;
   start: (input: RunnerExecutorStartInput) => Promise<RunnerStartedExecution>;
 }>;
 

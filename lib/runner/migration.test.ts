@@ -670,3 +670,31 @@ test("migration 0031 adds the capacity-neutral authority revalidation marker", (
   );
   assert.match(snapshot, /"authorityRevalidation"/u);
 });
+
+test("migration 0044 adds only the nullable run sandbox binding", () => {
+  const directory = new URL("../db/migrations/", import.meta.url);
+  const migrationName = readdirSync(directory).find((name) =>
+    name.startsWith("0044_")
+  );
+  assert.ok(migrationName, "migration 0044 must exist");
+  const migration = readFileSync(new URL(migrationName, directory), "utf8");
+
+  assert.match(
+    migration,
+    /ALTER TABLE "RunnerRun" ADD COLUMN "boundSandboxId" varchar\(128\);/u
+  );
+  assert.match(
+    migration,
+    /ALTER TABLE "RunnerRun" ADD COLUMN "boundSandboxGeneration" integer;/u
+  );
+  // Existing rows stay unbound: no default, no NOT NULL, no backfill.
+  assert.doesNotMatch(migration, /DEFAULT|NOT NULL/iu);
+  assert.doesNotMatch(migration, /\bUPDATE\b|\bDELETE\b|\bINSERT\b|\bDROP\b/u);
+  // Both columns or neither, so a half-written binding cannot exist.
+  assert.match(migration, /RunnerRun_sandboxBinding_valid/u);
+  assert.match(
+    migration,
+    /"boundSandboxId" is null and "RunnerRun"\."boundSandboxGeneration" is null/u
+  );
+  assert.doesNotMatch(migration, /RunnerAgent|daytonaSandboxId/u);
+});

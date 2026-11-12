@@ -44,6 +44,7 @@ import type {
   RunnerResourceRepairOptions,
   RunnerResourceRepairResult,
 } from "./resource-lifecycle";
+import type { SandboxBindingRefusalReason } from "./sandbox-binding";
 import type { RunnerStore } from "./store";
 import type {
   RunnerAgentRecord,
@@ -166,6 +167,12 @@ export type RunnerStartResult =
         | "operation_conflict";
       kind: "refused";
       retryable: boolean;
+    }>
+  | Readonly<{
+      code: "sandbox_binding_refused";
+      kind: "refused";
+      reason: SandboxBindingRefusalReason;
+      retryable: false;
     }>
   | Readonly<{ kind: "invalid" }>;
 
@@ -811,7 +818,15 @@ export function createRunnerService(
           id,
           operationId: parsed.data.operationId,
           principal,
-          requestHash: hashRunRequest(agentId, parsed.data.task),
+          requestHash: hashRunRequest(
+            agentId,
+            parsed.data.task,
+            "unrestricted",
+            parsed.data.sandboxBinding ?? null
+          ),
+          ...(parsed.data.sandboxBinding
+            ? { sandboxBinding: parsed.data.sandboxBinding }
+            : {}),
           task: parsed.data.task,
         });
       } catch (error) {
@@ -870,6 +885,17 @@ export function createRunnerService(
               return {
                 code: "lifecycle_conflict",
                 kind: "refused",
+                retryable: false,
+              };
+            case "sandbox_binding_refused":
+              // Without a reason the refusal cannot be reported truthfully.
+              if (!admitted.error.sandboxBindingReason) {
+                throw configuredError("sandbox binding refusal");
+              }
+              return {
+                code: "sandbox_binding_refused",
+                kind: "refused",
+                reason: admitted.error.sandboxBindingReason,
                 retryable: false,
               };
             case "global_busy":

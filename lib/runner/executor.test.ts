@@ -414,7 +414,8 @@ test("configured dispatch checks snapshot policy and legacy containment before c
         store: {
           getDispatchAgent: () => {
             calls.push("dispatch-fence");
-            return Promise.resolve({ agent: agent(), kind: "found" });
+            // The store always returns the locked run with its agent.
+            return Promise.resolve({ agent: agent(), kind: "found", run: {} });
           },
         } as never,
       });

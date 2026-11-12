@@ -26,12 +26,17 @@ import {
   type RunnerResourceOperationObserver,
   runnerResourceProviderSignal,
 } from "../resource-observability";
+import {
+  type SandboxBindingRefusalReason,
+  sandboxBindingRecordRefusal,
+} from "../sandbox-binding";
 import type { RunnerStore } from "../store";
 import type {
   RunnerAgentRecord,
   RunnerDispatchAuthority,
   RunnerOperator,
   RunnerPrincipal,
+  RunnerSandboxBinding,
 } from "../types";
 import {
   type DaytonaSandboxResourcePolicy,
@@ -160,6 +165,22 @@ export class DaytonaSandboxLifecycleError extends Error {
     this.kind = options.kind ?? "lifecycle";
     this.name = "DaytonaSandboxLifecycleError";
     this.retryable = options.retryable;
+  }
+}
+
+/**
+ * A run that carries a sandbox binding could not be dispatched to its exact
+ * recorded sandbox. Raised only by the bound path, which makes at most one
+ * provider read and no provider mutation, so nothing needs cleaning up and
+ * the run must end rather than be retried into the create path.
+ */
+export class DaytonaSandboxBindingRefusedError extends Error {
+  readonly reason: SandboxBindingRefusalReason;
+
+  constructor(reason: SandboxBindingRefusalReason) {
+    super("Daytona dispatch refused the run's sandbox binding.");
+    this.name = "DaytonaSandboxBindingRefusedError";
+    this.reason = reason;
   }
 }
 
@@ -1355,6 +1376,79 @@ async function ensureDaytonaSandboxWithPersistence(
 }
 
 /**
+ * Resolves the one sandbox a bound run was admitted against, or refuses.
+ *
+ * The binding and the agent both come from the locked run, so neither a
+ * request body nor a dispatcher can substitute another sandbox. The provider
+ * is asked exactly once, by the recorded ID: no name lookup, no list, no
+ * label search, and no fallback. Unlike the unbound path this never creates,
+ * recreates, starts, recovers, deletes, resizes, or relabels a sandbox and
+ * never writes the agent record, whatever the provider reports. A provider
+ * failure other than not-found propagates unchanged and stays retryable.
+ */
+async function resolveBoundDaytonaSandbox(
+  agent: RunnerAgentRecord,
+  binding: RunnerSandboxBinding,
+  configuration: DaytonaSandboxConfiguration,
+  dependencies: DaytonaSandboxDependencies
+): Promise<{ agent: RunnerAgentRecord; sandbox: Sandbox }> {
+  const recordRefusal = sandboxBindingRecordRefusal(agent, binding);
+  if (recordRefusal) {
+    throw new DaytonaSandboxBindingRefusedError(recordRefusal);
+  }
+  let sandbox: Sandbox;
+  try {
+    sandbox = await withLifecycleAbort(
+      () => dependencies.daytona.get(binding.expectedSandboxId),
+      dependencies.lifecycle
+    );
+  } catch (error) {
+    if (
+      error instanceof DaytonaSandboxLifecycleError ||
+      classifyDaytonaProviderError(error) !== "not_found"
+    ) {
+      throw error;
+    }
+    // biome-ignore lint/style/useErrorCause: Do not retain raw provider diagnostics.
+    throw new DaytonaSandboxBindingRefusedError("provider_not_found");
+  }
+  // `get` also resolves names; only the exact recorded ID is acceptable.
+  if (sandbox.id !== binding.expectedSandboxId) {
+    throw new DaytonaSandboxBindingRefusedError("returned_id_mismatch");
+  }
+  if (sandbox.state === SandboxState.DESTROYED) {
+    throw new DaytonaSandboxBindingRefusedError("destroyed");
+  }
+  if (sandbox.state !== SandboxState.STARTED) {
+    throw new DaytonaSandboxBindingRefusedError("not_started");
+  }
+  if (sandbox.public !== false) {
+    throw new DaytonaSandboxBindingRefusedError("public_sandbox");
+  }
+  const expectedLabels = {
+    ...daytonaSandboxLabels(agent.tenant, agent.id),
+    sandboxGeneration: String(agent.sandboxGeneration),
+  };
+  if (
+    !Object.entries(expectedLabels).every(
+      ([name, value]) => sandbox.labels?.[name] === value
+    )
+  ) {
+    throw new DaytonaSandboxBindingRefusedError("ownership_mismatch");
+  }
+  if (!sandboxConfigurationMatches(sandbox, configuration)) {
+    throw new DaytonaSandboxBindingRefusedError("configuration_drift");
+  }
+  if (
+    sandbox.labels?.credentialBoundaryVersion !==
+    DAYTONA_CREDENTIAL_BOUNDARY_VERSION
+  ) {
+    throw new DaytonaSandboxBindingRefusedError("credential_boundary_missing");
+  }
+  return { agent, sandbox };
+}
+
+/**
  * Subscriber-facing sandbox lifecycle for CRUD and prewarming. Dispatch work
  * must use ensureDaytonaSandboxForDispatch so ownership derives from its run.
  */
@@ -1391,6 +1485,15 @@ export async function ensureDaytonaSandboxForDispatch(
     throw new DaytonaSandboxLifecycleError(
       "Daytona dispatch is no longer live.",
       { retryable: true }
+    );
+  }
+  const sandboxBinding = associated.run.sandboxBinding ?? null;
+  if (sandboxBinding) {
+    return resolveBoundDaytonaSandbox(
+      associated.agent,
+      sandboxBinding,
+      configuration,
+      dependencies
     );
   }
   return ensureDaytonaSandboxWithPersistence(
