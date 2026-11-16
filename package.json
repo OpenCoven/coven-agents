@@ -68,7 +68,7 @@
     "@streamdown/math": "^1.0.3",
     "@streamdown/mermaid": "^1.0.3",
     "@vercel/analytics": "^2.0.1",
-    "@vercel/blob": "^0.24.1",
+    "@vercel/blob": "^2.9.0",
     "@vercel/functions": "^3.11.0",
     "@vercel/otel": "^2.3.0",
     "ai": "7.0.163",
