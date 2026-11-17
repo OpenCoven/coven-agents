@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   DaytonaNotFoundError,
   DaytonaServiceUnavailableError,
+  type Sandbox,
   SandboxState,
 } from "@daytona/sdk";
 import { sandboxInspectionResultSchema } from "@opencoven/agent-contracts";
@@ -514,6 +515,29 @@ test("missing provider configuration is unavailable with no provider call", asyn
     source: "provider",
     version: 1,
   });
+});
+
+test("every provider field the reader uses is declared by the pinned SDK", () => {
+  // Checked by typecheck: an SDK release that renames or drops one of these
+  // fails the build instead of silently reading as not reported.
+  const fields = [
+    "autoArchiveInterval",
+    "autoDeleteInterval",
+    "autoStopInterval",
+    "cpu",
+    "disk",
+    "domainAllowList",
+    "id",
+    "labels",
+    "memory",
+    "networkBlockAll",
+    "public",
+    "snapshot",
+    "state",
+    "target",
+    "volumes",
+  ] as const satisfies readonly (keyof Sandbox)[];
+  assert.equal(new Set(fields).size, fields.length);
 });
 
 test("the inspection module reaches no mutating provider or credential API", () => {
