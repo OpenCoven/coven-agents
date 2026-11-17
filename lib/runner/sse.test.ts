@@ -113,8 +113,9 @@ test("limits slow-consumer buffering to one event per pull", async () => {
   });
 
   assert.match(new TextDecoder().decode((await reader.read()).value), /id: 1/u);
-  await Promise.resolve();
-  await Promise.resolve();
+  // Wait a whole macrotask, not a fixed number of microtask turns, so a
+  // read-ahead that arrives after one more internal await is still caught.
+  await new Promise<void>((resolve) => setImmediate(resolve));
 
   assert.equal(serialized, 1);
   assert.equal(closed, false);
