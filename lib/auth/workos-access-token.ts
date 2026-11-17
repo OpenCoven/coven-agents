@@ -24,6 +24,7 @@ const SESSION_ID = /^session_[A-Za-z0-9]{1,120}$/u;
 const MAX_TOKEN_LENGTH = 8192;
 /** Session access tokens last minutes; anything longer-lived is refused. */
 const MAX_TOKEN_LIFETIME_SECONDS = 60 * 60;
+const CLOCK_TOLERANCE_SECONDS = 5;
 const USER_LOOKUP_TIMEOUT_MS = 10_000;
 
 export type WorkOSTokenConfiguration = Readonly<{
@@ -117,7 +118,7 @@ export function createWorkOSAccessTokenVerifier(
     try {
       ({ payload } = await jwtVerify(token, keys, {
         algorithms: ["RS256"],
-        clockTolerance: 5,
+        clockTolerance: CLOCK_TOLERANCE_SECONDS,
         currentDate: options.now?.(),
         issuer: [WORKOS_ISSUER, `${WORKOS_ISSUER}/`],
         requiredClaims: ["client_id", "exp", "iat", "sid", "sub"],
@@ -126,9 +127,15 @@ export function createWorkOSAccessTokenVerifier(
       return { kind: isTokenFault(error) ? "rejected" : "unavailable" };
     }
     const claims = claimsSchema.safeParse(payload);
+    const nowSeconds = Math.floor(
+      (options.now?.() ?? new Date()).getTime() / 1000
+    );
     if (
       !claims.success ||
       claims.data.client_id !== configuration.clientId ||
+      // The lifetime cap only means something when the issue time is not in
+      // the future; otherwise a token could claim any later window.
+      claims.data.iat > nowSeconds + CLOCK_TOLERANCE_SECONDS ||
       claims.data.exp - claims.data.iat > MAX_TOKEN_LIFETIME_SECONDS ||
       // `act` marks an impersonated session; it may not act as the owner.
       payload.act !== undefined
