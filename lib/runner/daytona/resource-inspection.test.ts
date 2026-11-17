@@ -479,6 +479,15 @@ test("a pending lifecycle is ambiguous and is not probed", async () => {
       result.outcome === "ambiguous" ? result.reason : null,
       "pending_lifecycle"
     );
+    // Reached after the ID and generation matched, so it is the refusal most
+    // likely to leak the recorded ID; it must not.
+    assert.equal(JSON.stringify(result).includes("sandbox-a"), false);
+    assert.deepEqual(
+      result.outcome === "ambiguous"
+        ? [result.record.agentId, result.record.sandboxId]
+        : null,
+      [AGENT_ID, null]
+    );
   }
 });
 
@@ -692,19 +701,25 @@ test("every provider field the reader uses is declared by the pinned SDK", () =>
   const fields = [
     "autoArchiveInterval",
     "autoDeleteInterval",
+    "autoDestroyAt",
+    "autoPauseInterval",
     "autoStopInterval",
     "cpu",
     "disk",
     "domainAllowList",
+    "gpu",
     "id",
     "labels",
+    "linkedSandboxId",
     "memory",
+    "networkAllowList",
     "networkBlockAll",
     "public",
     "snapshot",
     "state",
     "target",
     "volumes",
+    "warmPoolId",
   ] as const satisfies readonly (keyof Sandbox)[];
   assert.equal(new Set(fields).size, fields.length);
 });
