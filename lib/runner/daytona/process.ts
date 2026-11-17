@@ -245,6 +245,7 @@ function asyncCommand(
     "RUNNER_MANUAL_RECONCILE_SECRET",
     "STRIPE_SECRET_KEY",
     "STRIPE_WEBHOOK_SECRET",
+    "WORKOS_API_KEY",
   ];
   const credentialVariables = [
     ...new Set([
