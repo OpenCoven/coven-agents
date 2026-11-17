@@ -43,7 +43,9 @@ export type WorkOSOwnerDependencies = Readonly<{
  * WorkOS proves who is calling; it does not decide what they may do. The
  * result is a session-shaped value carrying the account's current stored
  * version and entitlement-derived type, which the caller must still pass
- * through the ordinary subscriber authorization. No account is created or
+ * through the ordinary subscriber authorization. Because that version comes
+ * from the row it is later checked against, bumping it does not revoke a
+ * bearer token: a token stays usable until it expires. No account is created or
  * linked here. A verified email that matches zero or several accounts is
  * refused, and so is the one match when its own email is not verified
  * locally. A request without a bearer token is never authenticated from its

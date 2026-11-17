@@ -180,7 +180,10 @@ export function createRunnerAuth(
 
   /**
    * The same application-owned decision for both credentials: a subscriber
-   * session type, a current account version, and a live entitlement.
+   * session type, a current account version, and a live entitlement. On the
+   * bearer path the version is read from the same row it is compared with,
+   * so that check always passes and cannot revoke a bearer token; only the
+   * token's short expiry does (owner audience undecided, #297).
    */
   const authorizeSession = async (
     session: SessionLike

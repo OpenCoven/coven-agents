@@ -51,9 +51,11 @@ async function authorizeSubscriberAccess(session: SessionLike) {
 }
 
 /**
- * WorkOS proves the caller's identity; the local account, its version, and
- * its entitlement still decide access. Every module is imported per request
- * so a deployment without WorkOS configuration loads none of it.
+ * WorkOS proves the caller's identity; the local account and its entitlement
+ * still decide access (the account version cannot revoke a bearer token; see
+ * authenticateWorkOSOwner). The modules are imported per request, not at
+ * startup. The database module loads together with the WorkOS ones, but no
+ * query runs until a token has been verified and its user fetched.
  */
 async function authenticateBearerOwner(request: Request) {
   const [owner, token, queries] = await Promise.all([
