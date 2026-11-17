@@ -159,6 +159,11 @@ test("results cannot carry identifiers, labels, or another version", () => {
     { ...base, observed: { ...observed, gpu: undefined } },
     { ...base, observed: { ...observed, autoPauseInterval: -2 } },
     { ...base, observed: { ...observed, autoPauseInterval: 10_000_001 } },
+    { ...base, observed: { ...observed, autoPauseInterval: 0.5 } },
+    {
+      ...base,
+      observed: { ...observed, domainAllowListMatchesPolicy: undefined },
+    },
     { ...base, observed: { ...observed, volumes: 1025 } },
     { ...base, observed: { ...observed, autoDestroyAtConfigured: undefined } },
     { ...base, observed: { ...observed, linkedSandbox: undefined } },
