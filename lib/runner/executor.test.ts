@@ -434,11 +434,13 @@ test("configured dispatch checks snapshot policy and legacy containment before c
         );
       }
       assert.equal(calls.includes("forbidden-create"), false);
+      // Read the authoritative binding first; unbound sandbox work remains
+      // behind snapshot preflight, including after a transient retry.
       assert.deepEqual(
         calls,
         scenario.cpu === undefined || scenario.timeout
-          ? ["snapshot"]
-          : ["snapshot", "dispatch-fence", "sandbox"]
+          ? ["dispatch-fence", "snapshot"]
+          : ["dispatch-fence", "snapshot", "sandbox"]
       );
       if (scenario.timeout) {
         snapshotUnavailable = false;
@@ -447,9 +449,10 @@ test("configured dispatch checks snapshot policy and legacy containment before c
           agent().id
         );
         assert.deepEqual(calls, [
-          "snapshot",
+          "dispatch-fence",
           "snapshot",
           "dispatch-fence",
+          "snapshot",
           "sandbox",
         ]);
       }

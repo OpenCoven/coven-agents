@@ -991,7 +991,7 @@ export const runnerRun = pgTable(
     ),
     check(
       "RunnerRun_sandboxBinding_valid",
-      sql`(${table.boundSandboxId} is null and ${table.boundSandboxGeneration} is null) or (${table.boundSandboxId} ~ '^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$' and ${table.boundSandboxGeneration} >= 0)`
+      sql`(${table.boundSandboxId} is null and ${table.boundSandboxGeneration} is null) or (${table.boundSandboxId} is not null and ${table.boundSandboxGeneration} is not null and ${table.boundSandboxId} ~ '^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$' and ${table.boundSandboxGeneration} >= 0)`
     ),
     check(
       "RunnerRun_executionPermission_valid",

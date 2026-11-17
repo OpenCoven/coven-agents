@@ -1375,6 +1375,36 @@ async function ensureDaytonaSandboxWithPersistence(
   return { agent, sandbox };
 }
 
+/** Observed policy must match too: labels alone cannot attest mutable settings. */
+function boundSandboxPolicyMatches(
+  sandbox: Sandbox,
+  configuration: DaytonaSandboxConfiguration
+): boolean {
+  return (
+    daytonaSandboxConfigurationIdentity(sandbox, configuration) !==
+      "mismatch" &&
+    sandbox.snapshot === configuration.snapshotName &&
+    sandbox.target === configuration.target &&
+    sandbox.cpu === configuration.resources.cpu &&
+    sandbox.memory === configuration.resources.memory &&
+    sandbox.disk === configuration.resources.disk &&
+    sandbox.gpu === 0 &&
+    sandbox.autoStopInterval === configuration.autoStopInterval &&
+    sandbox.autoArchiveInterval === configuration.autoArchiveInterval &&
+    sandbox.autoDeleteInterval === configuration.autoDeleteInterval &&
+    sandbox.autoPauseInterval === 0 &&
+    sandbox.autoDestroyAt === undefined &&
+    sandbox.domainAllowList === configuration.domainAllowList &&
+    sandbox.networkAllowList === undefined &&
+    sandbox.outboundProxyUrl === undefined &&
+    sandbox.networkBlockAll === false &&
+    sandbox.linkedSandboxId === undefined &&
+    sandbox.warmPoolId === undefined &&
+    (sandbox.volumes === undefined ||
+      (Array.isArray(sandbox.volumes) && sandbox.volumes.length === 0))
+  );
+}
+
 /**
  * Resolves the one sandbox a bound run was admitted against, or refuses.
  *
@@ -1436,7 +1466,7 @@ async function resolveBoundDaytonaSandbox(
   ) {
     throw new DaytonaSandboxBindingRefusedError("ownership_mismatch");
   }
-  if (!sandboxConfigurationMatches(sandbox, configuration)) {
+  if (!boundSandboxPolicyMatches(sandbox, configuration)) {
     throw new DaytonaSandboxBindingRefusedError("configuration_drift");
   }
   if (
@@ -1475,7 +1505,8 @@ export async function ensureDaytonaSandboxForDispatch(
   operator: RunnerOperator,
   authority: RunnerDispatchAuthority,
   configuration: DaytonaSandboxConfiguration,
-  dependencies: DaytonaSandboxDependencies
+  dependencies: DaytonaSandboxDependencies,
+  verifySnapshot?: () => Promise<void>
 ): Promise<{ agent: RunnerAgentRecord; sandbox: Sandbox }> {
   const associated = await dependencies.store.getDispatchAgent(
     operator,
@@ -1489,13 +1520,20 @@ export async function ensureDaytonaSandboxForDispatch(
   }
   const sandboxBinding = associated.run.sandboxBinding ?? null;
   if (sandboxBinding) {
-    return resolveBoundDaytonaSandbox(
+    const resolved = await resolveBoundDaytonaSandbox(
       associated.agent,
       sandboxBinding,
       configuration,
       dependencies
     );
+    // Refusals need only the exact sandbox read. A valid binding still must
+    // pass the pinned profile preflight before execution or credential
+    // staging can follow. Read-only resolution is not sandbox preparation.
+    await verifySnapshot?.();
+    return resolved;
   }
+  // Unbound creation, start and policy adoption remain behind the preflight.
+  await verifySnapshot?.();
   return ensureDaytonaSandboxWithPersistence(
     associated.agent,
     configuration,
