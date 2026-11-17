@@ -99,8 +99,10 @@ const observedSchema = z
     diskGib: resource,
     domainAllowListConfigured: z.boolean(),
     /**
-     * The sandbox's domain allow list equals the owner's configured policy,
-     * by the same rule as the drift inventory. Both absent is a match.
+     * The sandbox's domain allow list equals the owner's configured policy by
+     * exact string equality, as in the drift inventory. Unlike the inventory,
+     * absent or null on both sides is a match, and a provider null TTL, warm
+     * pool or linked sandbox reads as not set rather than as drift.
      */
     domainAllowListMatchesPolicy: z.boolean(),
     gpu: resource.nullable(),

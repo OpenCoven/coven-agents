@@ -164,7 +164,9 @@ function observed(
     diskGib: sandbox.disk,
     domainAllowListConfigured:
       domainAllowList !== null && domainAllowList.trim().length > 0,
-    // The drift inventory's rule: exact equality with the configured policy.
+    // Exact string equality with the configured policy, as in the drift
+    // inventory, except that a provider null with no configured list counts
+    // as a match here, where the inventory reports drift.
     domainAllowListMatchesPolicy:
       domainAllowList === (configuration.domainAllowList ?? null),
     gpu: optional(sandbox.gpu, isNumber),
