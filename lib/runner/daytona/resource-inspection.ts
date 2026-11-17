@@ -184,8 +184,10 @@ function observed(
     },
     linkedSandbox: optional(sandbox.linkedSandboxId, isString) !== null,
     memoryGib: sandbox.memory,
+    // The owner policy sets no network allow list, so any non-empty value,
+    // whitespace included, is drift.
     networkAllowListConfigured:
-      (optional(sandbox.networkAllowList, isString)?.trim().length ?? 0) > 0,
+      (optional(sandbox.networkAllowList, isString)?.length ?? 0) > 0,
     networkBlockAll: optional(sandbox.networkBlockAll, isBoolean),
     public: sandbox.public,
     snapshot: snapshot !== null && snapshot.length > 0 ? snapshot : null,
