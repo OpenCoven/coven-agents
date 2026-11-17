@@ -169,20 +169,32 @@ export const sandboxInspectionResultSchema = z.discriminatedUnion("outcome", [
       version,
     })
     .strict(),
-  z
-    .object({
-      outcome: z.literal("ambiguous"),
-      reason: z.enum([
-        "generation_mismatch",
-        "no_recorded_sandbox",
-        "pending_lifecycle",
-        "returned_id_mismatch",
-        "sandbox_id_mismatch",
-      ]),
-      record: recordSchema,
-      version,
-    })
-    .strict(),
+  z.discriminatedUnion("reason", [
+    // Decided from the database alone, before the provider is asked: the
+    // recorded sandbox ID is never disclosed.
+    z
+      .object({
+        outcome: z.literal("ambiguous"),
+        reason: z.enum([
+          "generation_mismatch",
+          "no_recorded_sandbox",
+          "pending_lifecycle",
+          "sandbox_id_mismatch",
+        ]),
+        record: recordSchema.extend({ sandboxId: z.null() }).strict(),
+        version,
+      })
+      .strict(),
+    // The provider was asked about the supplied ID and answered for another.
+    z
+      .object({
+        outcome: z.literal("ambiguous"),
+        reason: z.literal("returned_id_mismatch"),
+        record: recordSchema,
+        version,
+      })
+      .strict(),
+  ]),
   // Deliberately indistinguishable for a missing agent and another tenant's.
   z.object({ outcome: z.literal("unauthorized"), version }).strict(),
   z

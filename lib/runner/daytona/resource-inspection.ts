@@ -229,7 +229,7 @@ export async function inspectDaytonaSandbox(
   }
   const { agent } = read;
   // Until the whole binding has matched, the recorded sandbox ID is withheld.
-  const refused: SandboxInspectionRecord = {
+  const refused: SandboxInspectionRecord & { sandboxId: null } = {
     agentId: agent.id,
     fence: read.fence,
     generation: agent.sandboxGeneration,
@@ -237,15 +237,14 @@ export async function inspectDaytonaSandbox(
     sandboxId: null,
   };
   const ambiguous = (
-    reason: Extract<
-      SandboxInspectionResult,
-      { outcome: "ambiguous" }
-    >["reason"],
-    record: SandboxInspectionRecord = refused
+    reason: Exclude<
+      Extract<SandboxInspectionResult, { outcome: "ambiguous" }>["reason"],
+      "returned_id_mismatch"
+    >
   ): SandboxInspectionResult => ({
     outcome: "ambiguous",
     reason,
-    record,
+    record: refused,
     version,
   });
 
@@ -292,7 +291,12 @@ export async function inspectDaytonaSandbox(
       : unavailable("provider");
   }
   if (sandbox.id !== recordedSandboxId) {
-    return ambiguous("returned_id_mismatch", matched);
+    return {
+      outcome: "ambiguous",
+      reason: "returned_id_mismatch",
+      record: matched,
+      version,
+    };
   }
 
   let observation: SandboxInspectionObserved;
