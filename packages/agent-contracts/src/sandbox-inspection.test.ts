@@ -86,11 +86,48 @@ test("every outcome parses and carries only its own fields", () => {
       record: { ...record, sandboxId: null },
       version: 1,
     },
+    // The provider was asked about the supplied ID, so it may be echoed.
+    {
+      outcome: "ambiguous",
+      reason: "returned_id_mismatch",
+      record,
+      version: 1,
+    },
     { outcome: "unauthorized", version: 1 },
     { outcome: "unavailable", source: "provider", version: 1 },
   ];
   for (const result of results) {
     assert.deepEqual(sandboxInspectionResultSchema.parse(result), result);
+  }
+});
+
+test("a refusal decided from the database never carries the recorded sandbox ID", () => {
+  for (const reason of [
+    "generation_mismatch",
+    "no_recorded_sandbox",
+    "pending_lifecycle",
+    "sandbox_id_mismatch",
+  ]) {
+    assert.equal(
+      sandboxInspectionResultSchema.safeParse({
+        outcome: "ambiguous",
+        reason,
+        record,
+        version: 1,
+      }).success,
+      false,
+      reason
+    );
+    assert.equal(
+      sandboxInspectionResultSchema.safeParse({
+        outcome: "ambiguous",
+        reason,
+        record: { ...record, sandboxId: null },
+        version: 1,
+      }).success,
+      true,
+      reason
+    );
   }
 });
 

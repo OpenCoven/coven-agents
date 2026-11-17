@@ -595,6 +595,22 @@ test("a network allow list, TTL, auto-pause, GPU, and attachments are reported",
   }
 });
 
+test("a whitespace-only network allow list is still reported as configured", async () => {
+  // The owner policy sets no network allow list, so any value is drift.
+  const owner = agent();
+  const { result } = await inspect({
+    answer: () =>
+      Promise.resolve(providerSandbox(owner, { networkAllowList: " " })),
+  });
+  assert.equal(result.outcome, "observed");
+  assert.equal(
+    result.outcome === "observed"
+      ? result.observed.networkAllowListConfigured
+      : null,
+    true
+  );
+});
+
 test("optional provider metadata of the wrong type is unavailable, never read as not set", async () => {
   const owner = agent();
   const malformed = [
