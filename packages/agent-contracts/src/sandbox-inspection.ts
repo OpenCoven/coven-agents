@@ -100,9 +100,10 @@ const observedSchema = z
     domainAllowListConfigured: z.boolean(),
     /**
      * The sandbox's domain allow list equals the owner's configured policy by
-     * exact string equality, as in the drift inventory. Unlike the inventory,
-     * absent or null on both sides is a match, and a provider null TTL, warm
-     * pool or linked sandbox reads as not set rather than as drift.
+     * exact string equality, as in the drift inventory; both absent is a
+     * match in both. Unlike the inventory, a provider null with no configured
+     * list is also a match, and a provider null TTL, warm pool or linked
+     * sandbox reads as not set rather than as drift.
      */
     domainAllowListMatchesPolicy: z.boolean(),
     gpu: resource.nullable(),
