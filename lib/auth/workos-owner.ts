@@ -13,6 +13,7 @@ export type WorkOSOwnerAccount = Readonly<{
   authVersion: number;
   campaignExpiresAt?: Date | null;
   campaignGrantedAt?: Date | null;
+  emailVerified: boolean;
   id: string;
   subscribedUntil?: Date | null;
 }>;
@@ -43,9 +44,10 @@ export type WorkOSOwnerDependencies = Readonly<{
  * result is a session-shaped value carrying the account's current stored
  * version and entitlement-derived type, which the caller must still pass
  * through the ordinary subscriber authorization. No account is created or
- * linked here, a verified email that matches zero or several accounts is
- * refused, and a request without a bearer token is never authenticated from
- * its cookies.
+ * linked here. A verified email that matches zero or several accounts is
+ * refused, and so is the one match when its own email is not verified
+ * locally. A request without a bearer token is never authenticated from its
+ * cookies.
  */
 export async function authenticateWorkOSOwner(
   request: Request,
@@ -85,7 +87,7 @@ export async function authenticateWorkOSOwner(
     return { kind: "unavailable" };
   }
   const [account] = accounts;
-  if (accounts.length !== 1 || !account) {
+  if (accounts.length !== 1 || !account || account.emailVerified !== true) {
     return { kind: "unauthorized" };
   }
   return {
