@@ -14,6 +14,7 @@ const NOW = new Date("2026-11-11T12:00:00.000Z");
 const configuration = { apiKey: "sk_test_fixture", clientId: "client_fixture" };
 const account: WorkOSOwnerAccount = {
   authVersion: 4,
+  emailVerified: true,
   id: "11111111-1111-4111-8111-111111111111",
   subscribedUntil: new Date("2026-12-01T00:00:00.000Z"),
 };
@@ -138,6 +139,15 @@ test("zero or several matching accounts are refused; none is created", async () 
       kind: "unauthorized",
     });
   }
+});
+
+test("the one matching account must have a locally verified email", async () => {
+  const { dependencies } = fixture({
+    accounts: [{ ...account, emailVerified: false }],
+  });
+  assert.deepEqual(await authenticateWorkOSOwner(bearer(), dependencies), {
+    kind: "unauthorized",
+  });
 });
 
 test("an upstream outage is unavailable, never authentication", async () => {

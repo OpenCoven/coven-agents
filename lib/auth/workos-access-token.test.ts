@@ -137,6 +137,9 @@ test("every invalid token is rejected", async () => {
   const rejected = [
     await sign({ exp: seconds(NOW) - 60 }),
     await sign({ iat: seconds(NOW) + 600, nbf: seconds(NOW) + 600 }),
+    // Issued in the future with no `nbf`: the lifetime cap must be
+    // measured from now, not from whatever issue time the token claims.
+    await sign({ exp: seconds(NOW) + 900, iat: seconds(NOW) + 600 }),
     await sign({ iss: "https://evil.example" }),
     await sign({ client_id: "client_other" }),
     await sign({}, { omit: ["client_id"] }),
