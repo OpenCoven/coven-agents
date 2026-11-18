@@ -1,3 +1,5 @@
+import { isCanonicalUuid } from "./session";
+
 /**
  * Paths that stay reachable while the beta gate is closed.
  *
@@ -114,6 +116,36 @@ export function isCookielessGitHubToolRoute(
   basePath = ""
 ): boolean {
   return applicationPath(pathname, basePath) === "/api/internal/github-tool";
+}
+
+/** These handlers enforce the credential scope and the current owner's beta eligibility. */
+export function isOwnerCredentialRoute(
+  pathname: string,
+  method: string,
+  basePath = ""
+) {
+  const parts = applicationPath(pathname, basePath).split("/");
+  if (
+    parts[0] !== "" ||
+    parts[1] !== "api" ||
+    !isCanonicalUuid(parts[3] ?? "")
+  ) {
+    return false;
+  }
+  const [, , resource, , action, detail] = parts;
+  if (resource === "agents" && method === "POST") {
+    return (
+      (parts.length === 5 && action === "runs") ||
+      (parts.length === 6 && action === "sandbox" && detail === "inspection")
+    );
+  }
+  if (resource !== "runs") {
+    return false;
+  }
+  if (method === "GET") {
+    return parts.length === 4 || (parts.length === 5 && action === "events");
+  }
+  return method === "POST" && parts.length === 5 && action === "stop";
 }
 
 export function isBetaExempt(pathname: string, basePath = ""): boolean {

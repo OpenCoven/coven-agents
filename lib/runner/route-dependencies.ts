@@ -6,6 +6,7 @@ import { enforceAbusePolicy } from "@/lib/abuse/enforce";
 import type { IdempotencyStore } from "@/lib/abuse/idempotency";
 import { configuredApplicationOrigin } from "@/lib/auth/application-origin";
 import type { SessionLike } from "@/lib/auth/subscriber-access";
+import { isAllowedIdentity, readBetaGate } from "@/lib/beta";
 import { isCanonicalUuid } from "@/lib/session";
 import { createRunnerAuth, type RunnerBearerOwnerAuthentication } from "./auth";
 import { createRunnerHttpHandlers, type RunnerHttpHandlers } from "./http";
@@ -77,7 +78,17 @@ async function authenticateBearerOwner(
     grant.scope,
     grant.target
   );
-  if (!record) {
+  if (
+    !record ||
+    !isAllowedIdentity(
+      readBetaGate({
+        BETA_ALLOWLIST: process.env.BETA_ALLOWLIST,
+        BETA_CAMPAIGN_ENABLED: process.env.BETA_CAMPAIGN_ENABLED,
+        BETA_MODE: process.env.BETA_MODE,
+      }),
+      record.email
+    )
+  ) {
     return { kind: "unauthorized" };
   }
   return {

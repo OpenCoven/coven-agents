@@ -978,6 +978,19 @@ export function createRunnerHttpHandlers(
         const stream = eventStream({
           lastEventId,
           read: async (cursor) => {
+            if (context.principal.ownerCredentialId) {
+              const current = await dependencies.auth.authorizeBearerOwner?.(
+                request,
+                { scope: "run:events", target: { runId } }
+              );
+              if (
+                current?.kind !== "allowed" ||
+                current.principal.ownerCredentialId !==
+                  context.principal.ownerCredentialId
+              ) {
+                return null;
+              }
+            }
             const page = await service.readRunEvents(
               context.principal,
               runId,

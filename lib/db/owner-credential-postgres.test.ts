@@ -14,6 +14,7 @@ test("scoped issuance persists only the digest and revocation takes effect on th
   const {
     issueOwnerCredential,
     listOwnerCredentials,
+    mayDispatchOwnerRun,
     revokeOwnerCredential,
     findAuthorizedOwnerCredential,
   } = await import("./owner-credentials");
@@ -35,6 +36,34 @@ test("scoped issuance persists only the digest and revocation takes effect on th
     assert.equal(JSON.stringify(row).includes(issued.secret), false);
     const [listed] = await listOwnerCredentials(owner, agentId);
     assert.equal("digest" in listed || "secret" in listed, false);
+    const runId = randomUUID();
+    await sql`INSERT INTO "RunnerRun" (id, "agentId", tenant, "agentInstructions", "agentModel", "agentRuntime", "operationId", "requestHash", task,status,"dispatchState","completedAt") VALUES (${runId},${agentId}, ${tenant}, 'fixture', 'auto', 'copilot', ${randomUUID()}, ${"a".repeat(64)}, 'fixture','cancelled','terminal',now())`;
+    assert.equal(
+      (await findAuthorizedOwnerCredential(digest, "run:read", { runId }))?.id,
+      issued.id
+    );
+    const machine = await issueOwnerCredential(owner, agentId, [
+      "run:start",
+      "run:events",
+    ]);
+    assert.ok(machine);
+    const mayDispatch = () =>
+      mayDispatchOwnerRun(machine.id, agentId, tenant, owner.authVersion);
+    assert.equal(await mayDispatch(), true);
+    await sql`update "RunnerOwnerCredential" set scopes=array['run:events'] where id=${machine.id}`;
+    assert.equal(await mayDispatch(), false);
+    await sql`update "RunnerOwnerCredential" set scopes=array['run:start'], "issuedAt"=now()-interval '2 hours', "expiresAt"=now()-interval '1 hour' where id=${machine.id}`;
+    assert.equal(await mayDispatch(), false);
+    const machineDigest = ownerBearerDigest(`Bearer ${machine.secret}`);
+    assert.ok(machineDigest);
+    assert.equal(
+      await findAuthorizedOwnerCredential(machineDigest, "run:start", {
+        agentId,
+      }),
+      null
+    );
+    await sql`update "RunnerOwnerCredential" set "issuedAt"=now(), "expiresAt"=now()+interval '1 hour' where id=${machine.id}`;
+    assert.equal(await mayDispatch(), true);
     const lookup = () =>
       findAuthorizedOwnerCredential(digest, "run:read", { agentId });
     assert.equal((await lookup())?.id, issued.id);
@@ -50,7 +79,18 @@ test("scoped issuance persists only the digest and revocation takes effect on th
     );
     await sql`update "User" set "authVersion"=1 where id=${userId}`;
     assert.equal(await lookup(), null);
+    assert.equal(await mayDispatch(), false);
     await sql`update "User" set "authVersion"=0 where id=${userId}`;
+    assert.equal(
+      await revokeOwnerCredential(
+        { ...owner, userId: randomUUID() },
+        agentId,
+        machine.id
+      ),
+      false
+    );
+    assert.equal(await revokeOwnerCredential(owner, agentId, machine.id), true);
+    assert.equal(await mayDispatch(), false);
     assert.equal(await revokeOwnerCredential(owner, agentId, issued.id), true);
     assert.equal(await lookup(), null);
   } finally {

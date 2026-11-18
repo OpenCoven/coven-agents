@@ -495,7 +495,7 @@ async function revalidateCredentialAuthority(
   run: RunnerRunRecord
 ): Promise<RunnerCredentialAuthority> {
   if (!dependencies.revalidateCredentialAuthority) {
-    return "allowed";
+    return run.ownerCredentialId ? "unavailable" : "allowed";
   }
   try {
     return await dependencies.revalidateCredentialAuthority(run);
@@ -693,6 +693,35 @@ export async function dispatchRunnerClaim(
     preparedAttemptId = prepared;
   } catch {
     return { kind: "retained", reason: "launch_fenced", runId: run.id };
+  }
+
+  // Preparation can wait on another transaction after the claim preflight.
+  // Check the machine grant again before a provider can create a sandbox.
+  if (run.ownerCredentialId) {
+    const decision = await revalidateCredentialAuthority(dependencies, run);
+    if (decision === "authority_revoked") {
+      return (await terminalizePreparedDispatchFailure(
+        dependencies,
+        callbacks,
+        preparedAttemptId,
+        run,
+        "authority_revoked",
+        "Run authority is no longer valid.",
+        false
+      ))
+        ? { kind: "refused", reason: "authority", runId: run.id }
+        : { kind: "retained", reason: "cleanup_pending", runId: run.id };
+    }
+    if (decision === "unavailable") {
+      return (await requeuePreparedDispatch(
+        dependencies,
+        callbacks,
+        preparedAttemptId,
+        run.id
+      ))
+        ? { kind: "retryable", reason: "credential_unavailable", runId: run.id }
+        : { kind: "retained", reason: "cleanup_pending", runId: run.id };
+    }
   }
 
   let ensured: Awaited<ReturnType<RunnerExecutor["ensureExecutionContext"]>>;

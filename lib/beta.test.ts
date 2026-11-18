@@ -4,6 +4,7 @@ import {
   betaVerdict,
   isAllowedIdentity,
   isBetaExempt,
+  isOwnerCredentialRoute,
   readBetaGate,
 } from "./beta";
 
@@ -291,5 +292,28 @@ test("the campaign only opens the gate for the exact string 'on'", () => {
     });
     assert.equal(gate.open, false, `flag ${JSON.stringify(flag)}`);
     assert.equal(betaVerdict(gate, "/", "stranger@example.com"), "deny");
+  }
+});
+
+test("only the five machine operations route a bearer past browser middleware", () => {
+  const id = "12345678-abcd-4321-9876-123456789abc";
+  for (const [method, path] of [
+    ["POST", `agents/${id}/runs`],
+    ["POST", `agents/${id}/sandbox/inspection`],
+    ["GET", `runs/${id}`],
+    ["GET", `runs/${id}/events`],
+    ["POST", `runs/${id}/stop`],
+  ]) {
+    assert.ok(isOwnerCredentialRoute(`/base/api/${path}`, method, "/base"));
+  }
+  for (const [method, path] of [
+    ["GET", `agents/${id}/runs`],
+    ["POST", `agents/${id}/owner-credentials`],
+    ["POST", `runs/${id}/stop/extra`],
+    ["DELETE", `runs/${id}`],
+    ["GET", "runs/not-a-uuid"],
+    ["GET", `runs/${id}/live`],
+  ]) {
+    assert.equal(isOwnerCredentialRoute(`/api/${path}`, method), false);
   }
 });

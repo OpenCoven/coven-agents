@@ -650,6 +650,61 @@ test.describe("hermetic subscriber browser certification", () => {
     const secondHeldRunId = runIdFrom(secondHeld);
     await reconcileUntilRunStatus(request, page, secondHeldRunId, "running");
 
+    const grantPath = `/api/agents/${queuedAgentId}/owner-credentials`;
+    const grant = await api(page, grantPath, {
+      body: { scopes: ["run:start"] },
+      method: "POST",
+    });
+    expect(grant.status).toBe(201);
+    const { secret, id: grantId } = grant.body as {
+      secret: string;
+      id: string;
+    };
+    const bearer = { authorization: `Bearer ${secret}` };
+    const blockedRun = await request.post(`/api/agents/${queuedAgentId}/runs`, {
+      data: {
+        operationId: "10000000-0000-4000-8000-000000000011",
+        task: "Queued machine revocation",
+      },
+      headers: bearer,
+    });
+    expect(blockedRun.status()).toBe(202);
+    const { run: machineRun } = await blockedRun.json();
+    expect(await runnerRunOutcomeForRun(machineRun.id)).toEqual({
+      errorCode: null,
+      provider: null,
+      status: "queued",
+    });
+    expect(
+      (
+        await request.get(`/api/runs/${machineRun.id}`, { headers: bearer })
+      ).status()
+    ).toBe(401);
+    expect(
+      (
+        await request.post(`/api/agents/${secondAgentId}/runs`, {
+          data: {},
+          headers: bearer,
+        })
+      ).status()
+    ).toBe(401);
+    const [revocation] = await Promise.all([
+      api(page, grantPath, { body: { id: grantId }, method: "DELETE" }),
+      reconcileOnce(request),
+    ]);
+    expect(revocation.status).toBe(204);
+    await reconcileUntilRunStatus(request, page, machineRun.id, "failed");
+    expect(await runnerRunOutcomeForRun(machineRun.id)).toEqual({
+      errorCode: "authority_revoked",
+      provider: null,
+      status: "failed",
+    });
+    expect(await runCertificationCounts(machineRun.id)).toEqual({
+      provenance: 0,
+      records: 1,
+      usage: 0,
+    });
+
     const queued = await api(page, `/api/agents/${queuedAgentId}/runs`, {
       body: {
         operationId: "10000000-0000-4000-8000-000000000009",
@@ -737,5 +792,65 @@ test.describe("hermetic subscriber browser certification", () => {
       expect(deleted.status).toBe(200);
       expect(deleted.body).toEqual({ ok: true });
     }
+  });
+  test("issues a one-agent credential and drives a cookie-free run through cancellation and revocation", async ({
+    page,
+    request,
+  }) => {
+    const account = HERMETIC_USERS.subscriberA;
+    const version = await restoreHermeticSubscriberEntitlement(account.id);
+    await openAuthenticatedPage(page, account, version);
+    const path = `/api/agents/${agentId}/owner-credentials`;
+    const issued = await api(page, path, {
+      body: {
+        scopes: [
+          "run:start",
+          "run:read",
+          "run:events",
+          "run:stop",
+          "sandbox:inspect",
+        ],
+      },
+      method: "POST",
+    });
+    expect(issued.status).toBe(201);
+    const { id, secret } = issued.body as { id: string; secret: string };
+    const headers = { authorization: `Bearer ${secret}` };
+    const list = await api(page, path);
+    expect(list.status).toBe(200);
+    expect(list.text.includes(secret)).toBe(false);
+    const started = await request.post(`/api/agents/${agentId}/runs`, {
+      data: {
+        operationId: "10000000-0000-4000-8000-000000000010",
+        task: "Machine cancellation [[hermetic:hold]]",
+      },
+      headers,
+    });
+    expect(started.status()).toBe(202);
+    const { run } = await started.json();
+    await reconcileUntilRunStatus(request, page, run.id, "running");
+    const runPath = `/api/runs/${run.id}`;
+    // A held executor may have no second event until cancellation. Open the
+    // resumed request first and let the terminal event finish its response.
+    const resumedRequest = request.get(`${runPath}/events`, {
+      headers: { ...headers, "last-event-id": "1" },
+    });
+    const stopped = await request.post(`${runPath}/stop`, { headers });
+    expect(stopped.status()).toBe(200);
+    const resumed = await resumedRequest;
+    expect(resumed.status()).toBe(200);
+    expect(resumed.headers()["content-type"]).toContain("text/event-stream");
+    const events = await resumed.text();
+    const ids = eventIds(events);
+    expect(ids.length).toBeGreaterThan(0);
+    expect(ids.every((value) => value > 1)).toBe(true);
+    expect(events.includes(secret)).toBe(false);
+    const terminal = await request.get(runPath, { headers });
+    expect(terminal.status()).toBe(200);
+    expect((await terminal.json()).run.status).toBe("cancelled");
+    expect((await terminal.text()).includes(secret)).toBe(false);
+    const revoked = await api(page, path, { body: { id }, method: "DELETE" });
+    expect(revoked.status).toBe(204);
+    expect((await request.get(runPath, { headers })).status()).toBe(401);
   });
 });

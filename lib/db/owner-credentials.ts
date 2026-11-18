@@ -152,6 +152,7 @@ export async function findAuthorizedOwnerCredential(
   const [record] = await db
     .select({
       authVersion: credential.authVersion,
+      email: user.email,
       id: credential.id,
       tenant: credential.tenant,
       userId: credential.userId,
