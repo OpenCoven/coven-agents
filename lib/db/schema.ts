@@ -830,6 +830,50 @@ export const runnerAgent = pgTable(
 
 export type RunnerAgent = InferSelectModel<typeof runnerAgent>;
 
+export const runnerOwnerCredential = pgTable(
+  "RunnerOwnerCredential",
+  {
+    agentId: uuid("agentId").notNull(),
+    authVersion: integer("authVersion").notNull(),
+    digest: varchar("digest", { length: 64 }).notNull().unique(),
+    expiresAt: timestamp("expiresAt", { withTimezone: true }).notNull(),
+    id: uuid("id").primaryKey().defaultRandom(),
+    issuedAt: timestamp("issuedAt", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revokedAt", { withTimezone: true }),
+    scopes: text("scopes").array().notNull(),
+    tenant: varchar("tenant", { length: 64 }).notNull(),
+    userId: uuid("userId")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.agentId, table.tenant],
+      foreignColumns: [runnerAgent.id, runnerAgent.tenant],
+    }).onDelete("cascade"),
+    check(
+      "RunnerOwnerCredential_owner",
+      sql`${table.tenant} = 'u_' || replace(${table.userId}::text, '-', '')`
+    ),
+    check(
+      "RunnerOwnerCredential_digest",
+      sql`${table.digest} ~ '^[0-9a-f]{64}$'`
+    ),
+    check(
+      "RunnerOwnerCredential_lifetime",
+      sql`${table.expiresAt} > ${table.issuedAt} and ${table.expiresAt} <= ${table.issuedAt} + interval '1 hour'`
+    ),
+    check(
+      "RunnerOwnerCredential_scopes",
+      sql`cardinality(${table.scopes}) between 1 and 5 and array_position(${table.scopes}, null) is null and ${table.scopes} <@ array['run:start','run:read','run:events','run:stop','sandbox:inspect']::text[]`
+    ),
+    index("RunnerOwnerCredential_owner_agent_idx").on(
+      table.userId,
+      table.agentId
+    ),
+  ]
+);
+
 export const runnerRun = pgTable(
   "RunnerRun",
   {
@@ -916,6 +960,7 @@ export const runnerRun = pgTable(
     logCursor: integer("logCursor").notNull().default(0),
     operationId: uuid("operationId").notNull(),
     output: text("output").notNull().default(""),
+    ownerCredentialId: uuid("ownerCredentialId"),
     queueSequence: integer("queueSequence")
       .generatedAlwaysAsIdentity()
       .notNull(),
