@@ -9,6 +9,7 @@ import {
   type Sandbox,
   SandboxState,
 } from "@daytona/sdk";
+import { HARNESS_SPECS } from "../harness";
 import type { RunnerResourceOperationObservation } from "../resource-observability";
 import type { RunnerStore } from "../store";
 import type { RunnerAgentRecord, RunnerPrincipal } from "../types";
@@ -1427,6 +1428,8 @@ test("successful probe work with unconfirmed cleanup remains durably provisionin
   });
   const warming = agent({ ...current, version: 5, warmStatus: "provisioning" });
   let finishes = 0;
+  let probeCommands = 0;
+  let cleanupListings = 0;
   const providerSandbox = {
     ...sandbox(SandboxState.STARTED),
     process: {
@@ -1434,15 +1437,20 @@ test("successful probe work with unconfirmed cleanup remains durably provisionin
       deleteSession: () => new Promise(() => undefined),
       executeCommand: () =>
         Promise.reject(new Error("prewarm probe must use a session")),
-      executeSessionCommand: () =>
-        Promise.resolve({
+      executeSessionCommand: () => {
+        probeCommands += 1;
+        return Promise.resolve({
           cmdId: "probe-command",
           exitCode: 0,
           stdout: "1.0.0",
-        }),
+        });
+      },
       getSessionCommand: () => Promise.resolve({}),
       getSessionCommandLogs: () => Promise.resolve({}),
-      listSessions: () => new Promise(() => undefined),
+      listSessions: () => {
+        cleanupListings += 1;
+        return new Promise(() => undefined);
+      },
     },
   } as unknown as Sandbox;
   const result = await warmDaytonaSandbox(principal, current, config, {
@@ -1450,13 +1458,16 @@ test("successful probe work with unconfirmed cleanup remains durably provisionin
       create: () => Promise.reject(new Error("must not create")),
       get: () => Promise.resolve(providerSandbox),
     },
+    // The probe must finish inside the deadline so that only its cleanup is
+    // left unconfirmed. Five milliseconds lost that race on a loaded machine
+    // and reported a retryable failure instead.
     lifecycle: {
-      deadline: Date.now() + 5,
+      deadline: Date.now() + 250,
       signal: new AbortController().signal,
     },
     probe: (value, signal, timeoutSeconds, sessionId) =>
       probeDaytonaHarnesses(value, {
-        deadline: Date.now() + 5,
+        deadline: Date.now() + 250,
         sessionId,
         signal,
         timeoutSeconds,
@@ -1476,6 +1487,10 @@ test("successful probe work with unconfirmed cleanup remains durably provisionin
 
   assert.deepEqual(result, { agent: warming, kind: "in_progress" });
   assert.equal(finishes, 0);
+  // The same pending result follows a failed probe, so prove this one ran
+  // every harness command and then attempted cleanup.
+  assert.equal(probeCommands, HARNESS_SPECS.length);
+  assert.ok(cleanupListings >= 1);
 });
 
 test("an aborted warm propagates to the probe and releases its durable warm fence", async () => {
