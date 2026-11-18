@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { contractDescriptor } from "../contract-descriptor";
+import { runSandboxBindingSchema } from "./sandbox-binding";
 
 export { contractDescriptor } from "../contract-descriptor";
 export type { EvidenceRedactionInput } from "./evidence";
@@ -31,6 +32,19 @@ export {
   sandboxInspectionResultSchema,
   sandboxInspectionStateSchema,
 } from "./sandbox-inspection";
+export type {
+  RunSandboxBinding,
+  RunSandboxBindingRefusal,
+  RunSandboxBindingRefusalReason,
+} from "./sandbox-binding";
+export {
+  RUN_SANDBOX_BINDING_CONTRACT_VERSION,
+  RUN_SANDBOX_BINDING_REFUSAL_CODE,
+  RUN_SANDBOX_BINDING_REFUSAL_REASONS,
+  runSandboxBindingRefusalReasonSchema,
+  runSandboxBindingRefusalSchema,
+  runSandboxBindingSchema,
+} from "./sandbox-binding";
 
 if (contractDescriptor.apiVersions.length !== 1) {
   throw new Error("Agent Runner must publish exactly one API version.");
@@ -496,6 +510,11 @@ export const runAgentInputSchema = z.object({
 export const startRunInputSchema = z
   .object({
     operationId: canonicalUuidSchema,
+    /**
+     * Optional expectation, never a selector: the run is refused unless the
+     * agent's already-recorded sandbox matches. See `./sandbox-binding`.
+     */
+    sandboxBinding: runSandboxBindingSchema.optional(),
     task: z.string().trim().min(1).max(AGENT_RUNNER_LIMITS.maxTaskLength),
   })
   .strict();

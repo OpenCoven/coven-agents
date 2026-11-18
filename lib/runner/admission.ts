@@ -25,6 +25,12 @@ import {
   runnerDispatchAuthorizers,
 } from "./executor";
 import { encodeRunnerAttemptRedactionSecrets } from "./redaction-secrets";
+import {
+  SANDBOX_BINDING_REFUSAL_CODE,
+  SANDBOX_BINDING_REFUSAL_MESSAGE,
+  type SandboxBindingRefusalReason,
+  sandboxBindingRecordRefusal,
+} from "./sandbox-binding";
 import type { RunnerStore } from "./store";
 import {
   DEFAULT_RUNNER_ADMISSION_LIMITS,
@@ -64,6 +70,7 @@ export type RunnerAdmissionErrorCode =
   | "agent_not_found"
   | "global_busy"
   | "operation_conflict"
+  | "sandbox_binding_refused"
   | "sandbox_trust_conflict"
   | "sandbox_unavailable"
   | "tenant_queue_full";
@@ -75,16 +82,22 @@ export type RunnerAdmissionErrorCode =
 export class RunnerAdmissionError extends Error {
   readonly code: RunnerAdmissionErrorCode;
   readonly retryable: boolean;
+  /** Set only for `sandbox_binding_refused`. */
+  readonly sandboxBindingReason?: SandboxBindingRefusalReason;
 
   constructor(
     code: RunnerAdmissionErrorCode,
     message: string,
-    retryable: boolean
+    retryable: boolean,
+    sandboxBindingReason?: SandboxBindingRefusalReason
   ) {
     super(message);
     this.name = "RunnerAdmissionError";
     this.code = code;
     this.retryable = retryable;
+    if (sandboxBindingReason) {
+      this.sandboxBindingReason = sandboxBindingReason;
+    }
   }
 }
 
@@ -150,7 +163,13 @@ export type RunnerDispatchResult =
     }
   | {
       kind: "refused";
-      reason: "authority" | "capacity" | "credential" | "harness" | "workspace";
+      reason:
+        | "authority"
+        | "capacity"
+        | "credential"
+        | "harness"
+        | "sandbox_binding"
+        | "workspace";
       runId: string;
     };
 
@@ -340,6 +359,7 @@ export async function admitRunnerRun(
       ...(initialDispatch ? { initialDispatch } : {}),
       operationId: input.operationId,
       requestHash: input.requestHash,
+      ...(input.sandboxBinding ? { sandboxBinding: input.sandboxBinding } : {}),
       task: input.task,
       teamStepId: input.teamStepId ?? null,
     });
@@ -367,6 +387,16 @@ export async function admitRunnerRun(
           "operation_conflict",
           "The operation identifier is already bound to a different request.",
           false
+        ),
+        kind: "refused",
+      };
+    case "sandbox_binding_refused":
+      return {
+        error: new RunnerAdmissionError(
+          SANDBOX_BINDING_REFUSAL_CODE,
+          SANDBOX_BINDING_REFUSAL_MESSAGE,
+          false,
+          result.reason
         ),
         kind: "refused",
       };
@@ -490,11 +520,13 @@ export async function terminalizeUnstartedDispatchFailure(
     | "github_broker_unavailable"
     | "harness_unsupported"
     | "no_credential"
+    | "sandbox_binding_refused"
     | "sandbox_trust_conflict"
     | "workspace_configuration_unsafe"
     | "workspace_required",
   message: string,
-  retryable: boolean
+  retryable: boolean,
+  details?: string
 ): Promise<boolean> {
   if (
     !dependencies.store.finalizeRun ||
@@ -508,7 +540,7 @@ export async function terminalizeUnstartedDispatchFailure(
       {
         commandEvidence: [],
         completedAt: (dependencies.clock ?? (() => new Date()))(),
-        error: { code, message, retryable },
+        error: { code, ...(details ? { details } : {}), message, retryable },
         expectedVersion: authority.expectedVersion,
         fileEvidence: [],
         leaseToken: authority.leaseToken,
@@ -541,7 +573,8 @@ async function terminalizePreparedDispatchFailure(
   run: RunnerRunRecord,
   code: Parameters<typeof terminalizeUnstartedDispatchFailure>[3],
   message: string,
-  retryable: boolean
+  retryable: boolean,
+  details?: string
 ): Promise<boolean> {
   const released = await releasePreparedDispatch(
     authorizers,
@@ -555,7 +588,8 @@ async function terminalizePreparedDispatchFailure(
         run,
         code,
         message,
-        retryable
+        retryable,
+        details
       )
     : false;
 }
@@ -578,6 +612,29 @@ export async function dispatchRunnerClaim(
   );
   if (associated.kind !== "found") {
     return { kind: "retained", reason: "launch_fenced", runId: run.id };
+  }
+  // The binding is read from the locked run, never from the claim, so a
+  // dispatcher cannot drop it. A record that no longer matches is refused
+  // before preparation, credential lease, or any provider call.
+  const sandboxBinding = associated.run.sandboxBinding ?? null;
+  if (sandboxBinding) {
+    const recordRefusal = sandboxBindingRecordRefusal(
+      associated.agent,
+      sandboxBinding
+    );
+    if (recordRefusal) {
+      return (await terminalizeUnstartedDispatchFailure(
+        dependencies,
+        authority,
+        run,
+        SANDBOX_BINDING_REFUSAL_CODE,
+        SANDBOX_BINDING_REFUSAL_MESSAGE,
+        false,
+        recordRefusal
+      ))
+        ? { kind: "refused", reason: "sandbox_binding", runId: run.id }
+        : { kind: "retained", reason: "cleanup_pending", runId: run.id };
+    }
   }
   if (!isRunnableHarness(run.agentRuntime)) {
     return (await terminalizeUnstartedDispatchFailure(
@@ -644,6 +701,25 @@ export async function dispatchRunnerClaim(
       callbacks.currentAuthority()
     );
   } catch (error) {
+    // Checked before cleanup-pending: a bound refusal made no provider
+    // mutation, so it releases preparation and ends the run instead of
+    // retaining a fence or being retried into the create path.
+    const bindingRefusal =
+      dependencies.executor.sandboxBindingRefusal?.(error) ?? null;
+    if (bindingRefusal) {
+      return (await terminalizePreparedDispatchFailure(
+        dependencies,
+        callbacks,
+        preparedAttemptId,
+        run,
+        SANDBOX_BINDING_REFUSAL_CODE,
+        SANDBOX_BINDING_REFUSAL_MESSAGE,
+        false,
+        bindingRefusal
+      ))
+        ? { kind: "refused", reason: "sandbox_binding", runId: run.id }
+        : { kind: "retained", reason: "cleanup_pending", runId: run.id };
+    }
     if (dependencies.executor.isCleanupPending(error)) {
       return { kind: "retained", reason: "cleanup_pending", runId: run.id };
     }

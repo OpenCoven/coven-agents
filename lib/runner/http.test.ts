@@ -7,6 +7,7 @@ import {
   type AgentDefinition,
   type RunEvent,
   type RunSnapshot,
+  runSandboxBindingRefusalSchema,
 } from "@opencoven/agent-contracts";
 import type {
   AbuseAdmission,
@@ -3157,4 +3158,85 @@ test("unrecognized provider failures are absent from runner envelopes and logs",
     { name: "unknown" },
     { name: "unknown" },
   ]);
+});
+
+test("run start passes a sandbox binding through and reports its refusal reason", async () => {
+  const received: unknown[] = [];
+  const fixture = handlers({
+    service: service({
+      startRun: (
+        _principal: unknown,
+        _authVersion: unknown,
+        _agentId: unknown,
+        input: unknown
+      ) => {
+        received.push(input);
+        return Promise.resolve({
+          code: "sandbox_binding_refused" as const,
+          kind: "refused" as const,
+          reason: "provider_not_found" as const,
+          retryable: false as const,
+        });
+      },
+    } as never),
+  });
+  const sandboxBinding = {
+    expectedGeneration: 3,
+    expectedSandboxId: "sandbox-recorded-1",
+  };
+  const response = await fixture.handlers.startAgentRun(
+    new Request(`https://app.test/api/agents/${AGENT_ID}/runs`, {
+      body: JSON.stringify({
+        operationId: OPERATION_ID,
+        sandboxBinding,
+        task: "Do the thing.",
+      }),
+      method: "POST",
+    }),
+    AGENT_ID
+  );
+
+  assert.deepEqual(received, [
+    { operationId: OPERATION_ID, sandboxBinding, task: "Do the thing." },
+  ]);
+  assert.equal(response.status, 409);
+  const body = (await response.json()) as { error: unknown };
+  assert.deepEqual(body.error, {
+    code: "sandbox_binding_refused",
+    details: "provider_not_found",
+    message:
+      "The run's sandbox binding did not match the agent's recorded sandbox; nothing was created or changed.",
+    retryable: false,
+  });
+  assert.equal(
+    runSandboxBindingRefusalSchema.safeParse(body.error).success,
+    true
+  );
+  // A refusal schedules no dispatch or reconciliation.
+  assert.equal(fixture.after.length, 0);
+});
+
+test("run start rejects a malformed sandbox binding as an invalid request", async () => {
+  const fixture = handlers({
+    service: service({
+      startRun: () => Promise.reject(new Error("must not reach the service")),
+    }),
+  });
+  const response = await fixture.handlers.startAgentRun(
+    new Request(`https://app.test/api/agents/${AGENT_ID}/runs`, {
+      body: JSON.stringify({
+        operationId: OPERATION_ID,
+        sandboxBinding: { expectedSandboxId: "sandbox", name: "by-name" },
+        task: "Do the thing.",
+      }),
+      method: "POST",
+    }),
+    AGENT_ID
+  );
+
+  assert.equal(response.status, 400);
+  assert.equal(
+    ((await response.json()) as { error: { code: string } }).error.code,
+    "invalid_request"
+  );
 });

@@ -31,6 +31,7 @@ const expectedErrors = {
   reconcile_unavailable: [503, true],
   run_not_found: [404, false],
   runner_unavailable: [503, true],
+  sandbox_binding_refused: [409, false],
   stale_version: [409, true],
   subscription_required: [403, false],
   unauthorized: [401, false],
@@ -395,4 +396,29 @@ test("transport validates success responses instead of returning unchecked JSON"
     unexpected: true,
   });
   assert.deepEqual(await projected.json(), { agent });
+});
+
+test("transport carries bounded error details only when a caller supplies them", async () => {
+  const transport = await import("./transport");
+  const refused = transport.runnerErrorResponse(
+    { createRequestId: () => REQUEST_ID },
+    "sandbox_binding_refused",
+    { details: "generation_mismatch" }
+  );
+  const envelope = runErrorEnvelopeSchema.parse(await refused.json());
+  assert.equal(refused.status, 409);
+  assert.equal(envelope.error.details, "generation_mismatch");
+  assert.equal(envelope.error.retryable, false);
+
+  const plain = transport.runnerErrorResponse(
+    { createRequestId: () => REQUEST_ID },
+    "busy"
+  );
+  assert.equal(
+    Object.hasOwn(
+      runErrorEnvelopeSchema.parse(await plain.json()).error,
+      "details"
+    ),
+    false
+  );
 });

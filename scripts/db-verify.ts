@@ -27,6 +27,7 @@ export async function runDatabaseVerification(
           "lib/db/minute-pack-postgres.test.ts",
           "lib/db/stripe-reconciliation-postgres.test.ts",
           "lib/github/postgres-lifecycle.test.ts",
+          "lib/runner/sandbox-binding-postgres.test.ts",
         ],
         {
           env: {
@@ -37,6 +38,8 @@ export async function runDatabaseVerification(
             MINUTE_PACK_POSTGRES_TEST_URL: url,
             NODE_TEST_CONTEXT: undefined,
             POSTGRES_URL: url,
+            RUN_SANDBOX_BINDING_POSTGRES_TEST_REQUIRED: "1",
+            RUN_SANDBOX_BINDING_POSTGRES_TEST_URL: url,
             STRIPE_RECONCILIATION_POSTGRES_TEST_URL: url,
           },
           signal: controller.signal,

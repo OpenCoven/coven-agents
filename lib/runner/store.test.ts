@@ -5287,3 +5287,224 @@ test("the sandbox fence read is tenant-scoped, read-only, and fails closed", asy
     );
   }
 });
+
+const startBinding = {
+  expectedGeneration: 3,
+  expectedSandboxId: "sandbox-recorded-1",
+} as const;
+const boundStartAgent = (overrides: Partial<RunnerAgentRecord> = {}) =>
+  agent({
+    daytonaSandboxId: startBinding.expectedSandboxId,
+    sandboxGeneration: startBinding.expectedGeneration,
+    sandboxLifecycle: "ready",
+    ...overrides,
+  });
+const boundStartInput = (overrides: Record<string, unknown> = {}) => {
+  const current = run();
+  return {
+    agentId: current.agentId,
+    authVersion: 9,
+    id: current.id,
+    operationId: current.operationId,
+    requestHash: hashRunRequest(
+      current.agentId,
+      current.task,
+      "unrestricted",
+      startBinding
+    ),
+    sandboxBinding: startBinding,
+    task: current.task,
+    ...overrides,
+  };
+};
+
+for (const scenario of [
+  {
+    agent: boundStartAgent({ daytonaSandboxId: null }),
+    reason: "no_recorded_sandbox",
+  },
+  {
+    agent: boundStartAgent({ daytonaSandboxId: "sandbox-replacement" }),
+    reason: "sandbox_id_mismatch",
+  },
+  {
+    agent: boundStartAgent({ sandboxGeneration: 4 }),
+    reason: "generation_mismatch",
+  },
+  ...(
+    [
+      "unprovisioned",
+      "provisioning",
+      "provisioning_ambiguous",
+      "resizing",
+      "resetting",
+      "decommissioning",
+      "decommission_failed",
+    ] as const
+  ).map((sandboxLifecycle) => ({
+    agent: boundStartAgent({ sandboxLifecycle }),
+    reason: "lifecycle_not_ready",
+  })),
+] as const) {
+  test(`a bound start is refused from the locked agent row without inserting a run: ${scenario.reason} (${scenario.agent.sandboxLifecycle})`, async () => {
+    const { statements, store } = scripted([scenario.agent], []);
+
+    assert.deepEqual(await store.startRun(principal, boundStartInput()), {
+      kind: "sandbox_binding_refused",
+      reason: scenario.reason,
+    });
+    assert.deepEqual(
+      statements.map((statement) => statement.name),
+      ["lock-agent-for-run-start", "get-operation-run-before-admission"]
+    );
+  });
+}
+
+test("a bound start is refused while another attempt or uncleaned attempt is outstanding", async () => {
+  const fenceCases: Record<string, unknown>[][] = [
+    [{ outstanding: true }],
+    // A missing or malformed fence row must not read as "no fence".
+    [],
+    [{ outstanding: null }],
+    [{ outstanding: "f" }],
+  ];
+  await Promise.all(
+    fenceCases.map(async (fenceRows) => {
+      const { statements, store } = scripted(
+        [boundStartAgent()],
+        [],
+        fenceRows
+      );
+
+      assert.deepEqual(await store.startRun(principal, boundStartInput()), {
+        kind: "sandbox_binding_refused",
+        reason: "fence_outstanding",
+      });
+      assert.deepEqual(
+        statements.map((statement) => statement.name),
+        [
+          "lock-agent-for-run-start",
+          "get-operation-run-before-admission",
+          "get-run-sandbox-binding-fence",
+        ]
+      );
+      const fence = queryText(statements[2] as RunnerStoreStatement);
+      assert.match(fence, /'dispatching', 'running'/u);
+      assert.match(fence, /"dispatchState" = 'terminal'/u);
+      assert.match(fence, /"daytonaAttemptId" IS NOT NULL/u);
+      assert.doesNotMatch(fence, /\b(?:UPDATE|INSERT|DELETE)\b/u);
+    })
+  );
+});
+
+test("a matching bound start persists the binding with the run", async () => {
+  const { statements, store } = scripted(
+    [boundStartAgent()],
+    [],
+    [{ outstanding: false }]
+  );
+
+  // The scripted database returns no inserted row; only the insert matters.
+  await store.startRun(principal, boundStartInput()).catch(() => undefined);
+
+  const insert = statements.find((entry) => entry.name === "insert-run");
+  assert.ok(insert, "a matching bound start must insert its run");
+  assert.match(
+    queryText(insert),
+    /"boundSandboxId", "boundSandboxGeneration", "githubBrokerPolicy"/u
+  );
+  const params = queryParams(insert);
+  assert.deepEqual(params.slice(-3), [
+    startBinding.expectedSandboxId,
+    startBinding.expectedGeneration,
+    null,
+  ]);
+});
+
+test("an unbound start reads no fence and stores no binding", async () => {
+  // Every lifecycle an unbound start accepts today is still accepted.
+  await Promise.all(
+    (
+      [
+        "unprovisioned",
+        "provisioning",
+        "provisioning_ambiguous",
+        "ready",
+      ] as const
+    ).map(async (sandboxLifecycle) => {
+      const { statements, store } = scripted([agent({ sandboxLifecycle })], []);
+      const { sandboxBinding: _unbound, ...unbound } = boundStartInput({
+        requestHash: hashRunRequest(run().agentId, run().task),
+      });
+
+      await store.startRun(principal, unbound).catch(() => undefined);
+
+      const names = statements.map((statement) => statement.name);
+      assert.equal(names.includes("get-run-sandbox-binding-fence"), false);
+      const insert = statements.find((entry) => entry.name === "insert-run");
+      assert.ok(
+        insert,
+        `an unbound ${sandboxLifecycle} start must still insert`
+      );
+      assert.deepEqual(queryParams(insert).slice(-3), [null, null, null]);
+    })
+  );
+});
+
+test("operation reuse conflicts when the sandbox binding differs", async () => {
+  const boundRow = {
+    ...run({ requestHash: boundStartInput().requestHash }),
+    boundSandboxGeneration: startBinding.expectedGeneration,
+    boundSandboxId: startBinding.expectedSandboxId,
+  };
+  const start = (
+    existing: Record<string, unknown>,
+    input: Record<string, unknown>
+  ) =>
+    scripted([boundStartAgent()], [existing]).store.startRun(
+      principal,
+      input as never
+    );
+
+  // An exact resubmission is a duplicate even though its own run is now an
+  // outstanding attempt: idempotency is decided before the binding check.
+  assert.equal((await start(boundRow, boundStartInput())).kind, "duplicate");
+  // Same operation and hash but a different or missing binding never matches.
+  assert.equal(
+    (
+      await start(
+        boundRow,
+        boundStartInput({
+          sandboxBinding: { ...startBinding, expectedGeneration: 4 },
+        })
+      )
+    ).kind,
+    "conflict"
+  );
+  const { sandboxBinding: _dropped, ...unbound } = boundStartInput();
+  assert.equal((await start(boundRow, unbound)).kind, "conflict");
+  assert.equal(
+    (await start(run({ requestHash: boundRow.requestHash }), boundStartInput()))
+      .kind,
+    "conflict"
+  );
+});
+
+test("a half-written binding row never reads as an unbound run", async () => {
+  await Promise.all(
+    [
+      { boundSandboxId: startBinding.expectedSandboxId },
+      { boundSandboxGeneration: startBinding.expectedGeneration },
+      { boundSandboxGeneration: -1, boundSandboxId: "sandbox" },
+      { boundSandboxGeneration: 1, boundSandboxId: "" },
+    ].map((partial) =>
+      assert.rejects(
+        scripted(
+          [boundStartAgent()],
+          [{ ...run(), ...partial }]
+        ).store.startRun(principal, boundStartInput()),
+        /sandbox binding could not be read/u
+      )
+    )
+  );
+});

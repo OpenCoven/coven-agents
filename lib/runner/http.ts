@@ -1244,8 +1244,14 @@ export function createRunnerHttpHandlers(
                   dependencies,
                   "admission_unavailable"
                 );
+              case "sandbox_binding_refused":
+                return runnerErrorResponse(
+                  dependencies,
+                  "sandbox_binding_refused",
+                  { details: scheduled.reason }
+                );
               default:
-                return unreachableResult(scheduled.code);
+                return unreachableResult(scheduled);
             }
           case "accepted":
             return runnerJsonResponse(

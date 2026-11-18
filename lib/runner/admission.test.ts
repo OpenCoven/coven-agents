@@ -2473,3 +2473,296 @@ test("capacity refusal terminalizes the claimed run before freeing its lease", a
     "cleanup",
   ]);
 });
+
+const sandboxBinding = {
+  expectedGeneration: 3,
+  expectedSandboxId: "sandbox-recorded-1",
+} as const;
+const boundAgent = (overrides: Partial<RunnerAgentRecord> = {}) =>
+  agent({
+    daytonaSandboxId: sandboxBinding.expectedSandboxId,
+    sandboxGeneration: sandboxBinding.expectedGeneration,
+    sandboxLifecycle: "ready",
+    ...overrides,
+  });
+
+/** A dispatch whose every durable and provider step is recorded in order. */
+function boundDispatch(
+  options: Readonly<{
+    claimBinding?: RunnerRunRecord["sandboxBinding"];
+    ensure?: RunnerExecutor["ensureExecutionContext"];
+    lockedAgent?: RunnerAgentRecord;
+    lockedBinding?: RunnerRunRecord["sandboxBinding"];
+    sandboxBindingRefusal?: RunnerExecutor["sandboxBindingRefusal"];
+  }> = {}
+) {
+  const calls: string[] = [];
+  const errors: unknown[] = [];
+  const claimedRun = run({
+    sandboxBinding:
+      options.claimBinding === undefined
+        ? sandboxBinding
+        : options.claimBinding,
+  });
+  const authority = {
+    expectedVersion: claimedRun.version,
+    leaseToken: claimedRun.dispatchLeaseToken as string,
+    runId: claimedRun.id,
+  } as RunnerDispatchAuthority;
+  const result = dispatchRunnerClaim(
+    { authority, run: claimedRun },
+    {
+      acquireCredential: async () => {
+        calls.push("credential");
+        throw new Error("must not acquire a credential");
+      },
+      credentialInput: () => {
+        calls.push("credential-input");
+        throw new Error("must not build credential input");
+      },
+      executor: executor({
+        ensureExecutionContext:
+          options.ensure ??
+          (async () => {
+            calls.push("sandbox");
+            throw new Error("must not prepare a sandbox");
+          }),
+        ...(options.sandboxBindingRefusal
+          ? { sandboxBindingRefusal: options.sandboxBindingRefusal }
+          : {}),
+      }),
+      limits: admissionLimitsFromEnvironment({}),
+      operator,
+      store: {
+        authorizeDaytonaPreparation: async () => {
+          calls.push("prepare");
+          return {
+            attemptId,
+            authority: {
+              ...authority,
+              attemptId,
+              expectedVersion: authority.expectedVersion + 1,
+            } as RunnerDispatchAuthority,
+            kind: "authorized" as const,
+          };
+        },
+        cleanupTerminalLease: async () => {
+          calls.push("cleanup");
+          return { kind: "updated" as const, value: claimedRun };
+        },
+        finalizeRun: async (
+          _operator: RunnerOperator,
+          input: { error?: unknown; status?: string }
+        ) => {
+          calls.push(`finalize:${input.status}`);
+          errors.push(input.error);
+          return {
+            kind: "finalized" as const,
+            prunedRunIds: [],
+            run: { ...claimedRun, version: claimedRun.version + 1 },
+          };
+        },
+        getDispatchAgent: async () => {
+          calls.push("get-agent");
+          return {
+            agent: options.lockedAgent ?? boundAgent(),
+            kind: "found" as const,
+            run: run({
+              sandboxBinding:
+                options.lockedBinding === undefined
+                  ? sandboxBinding
+                  : options.lockedBinding,
+            }),
+          };
+        },
+        releaseDaytonaPreparation: async () => {
+          calls.push("release-preparation");
+          return {
+            authority: {
+              ...authority,
+              expectedVersion: authority.expectedVersion + 2,
+            } as RunnerDispatchAuthority,
+            kind: "released" as const,
+          };
+        },
+        releaseUnstartedDispatch: async () => {
+          calls.push("requeue");
+          return { kind: "released" as const, value: claimedRun };
+        },
+      } as never,
+    }
+  );
+  return { calls, claimedRun, errors, result };
+}
+
+test("admission carries a sandbox binding to storage and types its refusal", async () => {
+  const current = run();
+  let storedInput: StartRunnerRunInput | undefined;
+  const admitInput = {
+    agentId: current.agentId,
+    authVersion: 1,
+    id: current.id,
+    operationId: current.operationId,
+    principal: {
+      kind: "subscriber",
+      tenant: current.tenant,
+      userId: "user",
+    } as RunnerPrincipal,
+    requestHash: current.requestHash,
+    task: current.task,
+  };
+  const dependencies = (
+    startRun: (input: StartRunnerRunInput) => Promise<unknown>
+  ) => ({
+    clock: () => new Date("2026-08-28T15:00:00.000Z"),
+    limits: admissionLimitsFromEnvironment({}),
+    randomToken: () => "lease",
+    store: {
+      startRun: (_principal: RunnerPrincipal, input: StartRunnerRunInput) =>
+        startRun(input),
+    } as never,
+  });
+
+  const refused = await admitRunnerRun(
+    { ...admitInput, sandboxBinding },
+    dependencies(async (input) => {
+      storedInput = input;
+      return {
+        kind: "sandbox_binding_refused",
+        reason: "generation_mismatch",
+      };
+    })
+  );
+  assert.deepEqual(storedInput?.sandboxBinding, sandboxBinding);
+  assert.equal(refused.kind, "refused");
+  assert.equal(
+    refused.kind === "refused" && refused.error.code,
+    "sandbox_binding_refused"
+  );
+  assert.equal(
+    refused.kind === "refused" && refused.error.sandboxBindingReason,
+    "generation_mismatch"
+  );
+  assert.equal(refused.kind === "refused" && refused.error.retryable, false);
+
+  await admitRunnerRun(
+    admitInput,
+    dependencies(async (input) => {
+      storedInput = input;
+      return { kind: "not_found" };
+    })
+  );
+  // An unbound request reaches storage exactly as before.
+  assert.equal(Object.hasOwn(storedInput ?? {}, "sandboxBinding"), false);
+});
+
+for (const scenario of [
+  {
+    expected: "no_recorded_sandbox",
+    lockedAgent: boundAgent({ daytonaSandboxId: null }),
+  },
+  {
+    expected: "sandbox_id_mismatch",
+    lockedAgent: boundAgent({ daytonaSandboxId: "sandbox-replacement" }),
+  },
+  {
+    expected: "generation_mismatch",
+    lockedAgent: boundAgent({ sandboxGeneration: 4 }),
+  },
+  {
+    expected: "lifecycle_not_ready",
+    lockedAgent: boundAgent({ sandboxLifecycle: "resetting" }),
+  },
+] as const) {
+  test(`a bound dispatch whose record changed is refused before preparation: ${scenario.expected}`, async () => {
+    const dispatched = boundDispatch({ lockedAgent: scenario.lockedAgent });
+
+    assert.deepEqual(await dispatched.result, {
+      kind: "refused",
+      reason: "sandbox_binding",
+      runId: dispatched.claimedRun.id,
+    });
+    // No preparation, sandbox, credential, or provider step.
+    assert.deepEqual(dispatched.calls, [
+      "get-agent",
+      "finalize:failed",
+      "cleanup",
+    ]);
+    assert.deepEqual(dispatched.errors, [
+      {
+        code: "sandbox_binding_refused",
+        details: scenario.expected,
+        message:
+          "The run's sandbox binding did not match the agent's recorded sandbox; nothing was created or changed.",
+        retryable: false,
+      },
+    ]);
+  });
+}
+
+test("the binding is taken from the locked run, not from the dispatch claim", async () => {
+  // A claim that lost its binding must not turn a bound run into one that may
+  // create a sandbox.
+  const dispatched = boundDispatch({
+    claimBinding: null,
+    lockedAgent: boundAgent({ sandboxGeneration: 4 }),
+  });
+
+  assert.equal((await dispatched.result).kind, "refused");
+  assert.deepEqual(dispatched.calls, [
+    "get-agent",
+    "finalize:failed",
+    "cleanup",
+  ]);
+});
+
+test("a provider-side binding refusal releases preparation and ends the run without retry", async () => {
+  const refusal = new Error("binding refused");
+  const dispatched = boundDispatch({
+    ensure: async () => {
+      dispatched.calls.push("sandbox");
+      throw refusal;
+    },
+    sandboxBindingRefusal: (error) =>
+      error === refusal ? "provider_not_found" : null,
+  });
+
+  assert.deepEqual(await dispatched.result, {
+    kind: "refused",
+    reason: "sandbox_binding",
+    runId: dispatched.claimedRun.id,
+  });
+  // Never requeued (a retry could reach the create path) and never retained
+  // as cleanup-pending (nothing was created to clean up).
+  assert.deepEqual(dispatched.calls, [
+    "get-agent",
+    "prepare",
+    "sandbox",
+    "release-preparation",
+    "finalize:failed",
+    "cleanup",
+  ]);
+  assert.deepEqual(dispatched.errors, [
+    {
+      code: "sandbox_binding_refused",
+      details: "provider_not_found",
+      message:
+        "The run's sandbox binding did not match the agent's recorded sandbox; nothing was created or changed.",
+      retryable: false,
+    },
+  ]);
+});
+
+test("an ordinary ensure failure on a bound run is still requeued", async () => {
+  const dispatched = boundDispatch({
+    ensure: async () => {
+      dispatched.calls.push("sandbox");
+      throw new Error("provider unavailable");
+    },
+    sandboxBindingRefusal: () => null,
+  });
+
+  assert.equal((await dispatched.result).kind, "retryable");
+  assert.equal(dispatched.calls.includes("finalize:failed"), false);
+  assert.equal(dispatched.calls.includes("credential"), false);
+});

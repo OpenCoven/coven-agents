@@ -19,7 +19,7 @@ import {
   sanitizeEvidenceText,
 } from "@opencoven/agent-contracts";
 import type { RunEvent as HarnessRunEvent } from "@opencoven/harness";
-import type { RunnerExecutionPermission } from "./types";
+import type { RunnerExecutionPermission, RunnerSandboxBinding } from "./types";
 
 export const MAX_COMMAND_RESULTS_PER_RUN =
   AGENT_RUNNER_LIMITS.maxCommandResults;
@@ -307,12 +307,23 @@ export function createAcceptedRunEvent(
 export function hashRunRequest(
   agentId: string,
   task: string,
-  executionPermission: RunnerExecutionPermission = "unrestricted"
+  executionPermission: RunnerExecutionPermission = "unrestricted",
+  sandboxBinding: RunnerSandboxBinding | null = null
 ): string {
-  const identity =
+  const permissionIdentity =
     executionPermission === "unrestricted"
       ? { agentId, task }
       : { agentId, executionPermission, task };
+  // Added only when present, so every unbound request keeps its hash.
+  const identity = sandboxBinding
+    ? {
+        ...permissionIdentity,
+        sandboxBinding: {
+          expectedGeneration: sandboxBinding.expectedGeneration,
+          expectedSandboxId: sandboxBinding.expectedSandboxId,
+        },
+      }
+    : permissionIdentity;
   return createHash("sha256")
     .update(JSON.stringify(identity), "utf8")
     .digest("hex");

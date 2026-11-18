@@ -35,6 +35,7 @@ export const RUNNER_ERROR_CODES = [
   "reconcile_unavailable",
   "run_not_found",
   "runner_unavailable",
+  "sandbox_binding_refused",
   "stale_version",
   "subscription_required",
   "unauthorized",
@@ -150,6 +151,12 @@ const RUNNER_ERROR_DEFINITIONS = {
     retryable: true,
     status: 503,
   },
+  sandbox_binding_refused: {
+    message:
+      "The run's sandbox binding did not match the agent's recorded sandbox; nothing was created or changed.",
+    retryable: false,
+    status: 409,
+  },
   stale_version: {
     message: "The agent changed concurrently. Try again.",
     retryable: true,
@@ -182,6 +189,7 @@ export type RunnerJsonResult<T> =
   | Readonly<{ kind: "response"; response: Response }>;
 
 type RunnerErrorOptions = Readonly<{
+  details?: string;
   message?: string;
   retryable?: boolean;
 }>;
@@ -232,6 +240,7 @@ export function runnerErrorResponse(
     apiVersion: AGENT_RUNNER_API_VERSION,
     error: {
       code,
+      ...(options.details ? { details: options.details } : {}),
       message: options.message ?? definition.message,
       retryable: options.retryable ?? definition.retryable,
     },
