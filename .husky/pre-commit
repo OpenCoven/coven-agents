@@ -1,2 +1,5 @@
+#!/bin/sh
+set -e
 corepack pnpm secret:scan
 corepack pnpm exec lint-staged
+corepack pnpm secret:scan
