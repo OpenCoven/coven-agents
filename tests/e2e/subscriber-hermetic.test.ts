@@ -9,6 +9,7 @@ import { tenantForUser } from "@/lib/session";
 import {
   HERMETIC_USERS,
   incrementHermeticAuthVersion,
+  machineRunEffects,
   providerProvenanceForRun,
   restoreHermeticSubscriberEntitlement,
   revokeHermeticEntitlement,
@@ -703,6 +704,11 @@ test.describe("hermetic subscriber browser certification", () => {
       provenance: 0,
       records: 1,
       usage: 0,
+    });
+
+    expect(await machineRunEffects(machineRun.id)).toEqual({
+      attempts: 0,
+      leases: 0,
     });
 
     const queued = await api(page, `/api/agents/${queuedAgentId}/runs`, {

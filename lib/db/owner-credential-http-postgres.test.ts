@@ -72,6 +72,10 @@ test("machine refusals precede body and service access, and inspection accepts o
   try {
     await db`insert into "User" (id,email,"authVersion","subscribedUntil") values (${userId},'http@example.invalid',1,now()+interval '1 day')`;
     await db`insert into "RunnerAgent" (id,tenant,name,instructions,model,runtime) values (${agentId},${owner.tenant},'fixture','fixture','auto','copilot')`;
+    const foreignUser = randomUUID();
+    const foreignAgent = randomUUID();
+    await db`insert into "User" (id,email) values (${foreignUser},'foreign@example.invalid')`;
+    await db`insert into "RunnerAgent" (id,tenant,name,instructions,model,runtime) values (${foreignAgent},${tenantForUser(foreignUser)},'foreign','fixture','auto','copilot')`;
     const start = await issueOwnerCredential(owner, agentId, ["run:start"]);
     const inspect = await issueOwnerCredential(owner, agentId, [
       "sandbox:inspect",
@@ -90,6 +94,7 @@ test("machine refusals precede body and service access, and inspection accepts o
     );
     await deniedStart(undefined, agentId, 403);
     await deniedStart(start.secret, randomUUID());
+    await deniedStart(start.secret, foreignAgent);
     const ownerRequest = makeRequest(start.secret);
     assert.equal(auth.authorizeDiagnostic(ownerRequest).kind, "unauthorized");
     assert.equal(auth.authorizeReconcile(ownerRequest).kind, "unauthorized");
