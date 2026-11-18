@@ -780,6 +780,27 @@ function runSnapshot(run: RunnerRunRecord): RunSnapshot {
   };
 }
 
+async function mayReturnExistingRun(
+  transaction: RunnerStoreTransaction,
+  principal: RunnerPrincipal,
+  run: RunnerRunRecord
+) {
+  if (!principal.ownerCredentialId) {
+    return true;
+  }
+  if (principal.ownerCredentialId !== run.ownerCredentialId) {
+    return false;
+  }
+  const [grant] = await transaction.execute(
+    statement(
+      "check-owner-run-replay",
+      { id: principal.ownerCredentialId },
+      sql`SELECT 1 AS allowed FROM "RunnerOwnerCredential" WHERE id=${principal.ownerCredentialId} AND tenant=${principal.tenant} AND "agentId"=${run.agentId} AND "revokedAt" IS NULL AND "expiresAt">clock_timestamp() AND 'run:read'=ANY(scopes)`
+    )
+  );
+  return grant?.allowed === 1;
+}
+
 function matchesRunRequest(
   run: RunnerRunRecord,
   input: StartRunnerRunInput,
@@ -5147,6 +5168,15 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           principal.tenant
         );
         if (existingOperation) {
+          if (
+            !(await mayReturnExistingRun(
+              transaction,
+              principal,
+              existingOperation
+            ))
+          ) {
+            return { kind: "not_found" };
+          }
           return matchesRunRequest(
             existingOperation,
             input,
@@ -5468,6 +5498,9 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           );
         }
         const run = asRun(existing);
+        if (!(await mayReturnExistingRun(transaction, principal, run))) {
+          return { kind: "not_found" };
+        }
         return matchesRunRequest(run, input, executionPermission)
           ? { kind: "duplicate", run: runSnapshot(run) }
           : { kind: "conflict", run: runSnapshot(run) };

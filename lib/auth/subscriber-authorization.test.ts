@@ -79,3 +79,17 @@ test("a missing subscriber row fails closed", async () => {
 
   assert.deepEqual(decision, { kind: "subscription_required" });
 });
+
+test("active campaign-only authority reaches the same subscriber decision as dispatch", async () => {
+  const access = await revalidateSubscriberAccess(
+    { user: { authVersion: 2, id: USER_ID, type: "subscriber" } },
+    async () => ({
+      authVersion: 2,
+      campaignExpiresAt: new Date(NOW.getTime() + 60_000),
+      campaignGrantedAt: new Date(NOW.getTime() - 60_000),
+      subscribedUntil: null,
+    }),
+    NOW
+  );
+  assert.equal(access.kind, "allowed");
+});

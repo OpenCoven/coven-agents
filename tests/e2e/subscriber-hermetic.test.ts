@@ -819,6 +819,18 @@ test.describe("hermetic subscriber browser certification", () => {
     const list = await api(page, path);
     expect(list.status).toBe(200);
     expect(list.text.includes(secret)).toBe(false);
+    // A valid grant still cannot adopt a cookie-started operation and replay its output.
+    const replay = await request.post(`/api/agents/${agentId}/runs`, {
+      data: {
+        operationId: "10000000-0000-4000-8000-000000000001",
+        task: "Complete the hermetic certification task.",
+      },
+      headers,
+    });
+    expect(replay.status()).toBe(404);
+    expect((await replay.text()).includes("Hermetic runner completed")).toBe(
+      false
+    );
     const started = await request.post(`/api/agents/${agentId}/runs`, {
       data: {
         operationId: "10000000-0000-4000-8000-000000000010",

@@ -2659,3 +2659,38 @@ test("guest launch removes inherited WorkOS control-plane credentials", async ()
   );
   assert.equal(output, "||fixture-harness");
 });
+
+test("owner revocation at the provider boundary prevents staging or launch and releases preparation", async () => {
+  await Promise.all(
+    [1, 2].map(async (denyAt) => {
+      const { sandbox, calls } = processDouble();
+      let checks = 0;
+      let released = false;
+      await assert.rejects(
+        startDaytonaProcess({
+          ...startInput(sandbox),
+          authorizeOwnerEffect: async () => {
+            checks += 1;
+            return checks !== denyAt;
+          },
+          releasePreparation: async () => {
+            released = true;
+            return LAUNCH_AUTHORITY;
+          },
+        }),
+        DaytonaProcessError
+      );
+      assert.equal(
+        calls.filter(
+          (call) => call.env && Object.values(call.env).includes(SECRET)
+        ).length,
+        denyAt - 1
+      );
+      assert.equal(
+        calls.some((call) => call.kind === "start"),
+        false
+      );
+      assert.equal(released, true);
+    })
+  );
+});

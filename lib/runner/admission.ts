@@ -1046,11 +1046,19 @@ export async function dispatchRunnerClaim(
       : { kind: "retained", reason: "cleanup_pending", runId: run.id };
   }
 
+  let ownerRevokedAtEffect = false;
+  const authorizeOwnerEffect = async () => {
+    const decision = await revalidateCredentialAuthority(dependencies, run);
+    ownerRevokedAtEffect = decision === "authority_revoked";
+    return decision === "allowed";
+  };
   let started: Awaited<ReturnType<RunnerExecutor["start"]>>;
   try {
     started = await credential.acquisition.use((credentialAtBoundary) =>
       dependencies.executor.start({
-        authorizers: callbacks,
+        authorizers: run.ownerCredentialId
+          ? { ...callbacks, authorizeOwnerEffect }
+          : callbacks,
         context: ensured.context,
         credential: credentialAtBoundary,
         deleteAttemptRedaction: async () =>
@@ -1118,6 +1126,18 @@ export async function dispatchRunnerClaim(
       return { kind: "retained", reason: "cleanup_pending", runId: run.id };
     }
     const cleanupAuthority = callbacks.currentAuthority();
+    if (ownerRevokedAtEffect) {
+      return (await terminalizeUnstartedDispatchFailure(
+        dependencies,
+        cleanupAuthority,
+        run,
+        "authority_revoked",
+        "Run authority is no longer valid.",
+        false
+      ))
+        ? { kind: "refused", reason: "authority", runId: run.id }
+        : { kind: "retained", reason: "cleanup_pending", runId: run.id };
+    }
     return (await terminalizeUnstartedDispatchFailure(
       dependencies,
       cleanupAuthority,

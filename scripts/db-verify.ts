@@ -26,6 +26,7 @@ export async function runDatabaseVerification(
           "--test-reporter=tap",
           "lib/db/minute-pack-postgres.test.ts",
           "lib/db/owner-credential-postgres.test.ts",
+          "lib/db/owner-credential-http-postgres.test.ts",
           "lib/db/sandbox-binding-postgres.test.ts",
           "lib/db/stripe-reconciliation-postgres.test.ts",
           "lib/github/postgres-lifecycle.test.ts",

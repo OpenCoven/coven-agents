@@ -36,7 +36,7 @@ export type RunnerBearerOwnerAuthentication =
   | Readonly<{
       kind: "authenticated";
       session: SessionLike;
-      credentialId?: string;
+      credentialId: string;
     }>
   | Readonly<{ kind: "unauthorized" | "unavailable" }>;
 
@@ -238,8 +238,11 @@ export function createRunnerAuth(
       if (owner.kind !== "authenticated") {
         return owner;
       }
+      if (!owner.credentialId) {
+        return { kind: "unauthorized" };
+      }
       const decision = await authorizeSession(owner.session);
-      if (decision.kind !== "allowed" || !owner.credentialId) {
+      if (decision.kind !== "allowed") {
         return decision;
       }
       return {

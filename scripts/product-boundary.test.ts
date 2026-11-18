@@ -63,6 +63,7 @@ const applicationRouteFiles = [
   "app/(chat)/api/vote/route.ts",
   "app/api/account/avatar/route.ts",
   "app/api/admin/route.ts",
+  "app/api/agents/[id]/owner-credentials/route.ts",
   "app/api/agents/[id]/route.ts",
   "app/api/agents/[id]/runs/route.ts",
   "app/api/agents/[id]/sandbox/inspection/route.ts",

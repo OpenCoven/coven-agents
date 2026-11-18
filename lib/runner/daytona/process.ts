@@ -617,6 +617,7 @@ export type DaytonaAttemptRedactionRelease = (
  * returned data, authorization input, or error messages.
  */
 export async function startDaytonaProcess(input: {
+  authorizeOwnerEffect?: () => Promise<boolean>;
   authorizeLaunch: DaytonaLaunchAuthorizer;
   authorizePreparation: DaytonaPreparationAuthorizer;
   authorizeUnrestrictedExecution: DaytonaUnrestrictedExecutionAuthorizer;
@@ -1007,6 +1008,14 @@ export async function startDaytonaProcess(input: {
 
   let stagingSettled = false;
   try {
+    if (input.authorizeOwnerEffect && !(await input.authorizeOwnerEffect())) {
+      stagingSettled = true;
+      throw new DaytonaProcessError(
+        "Machine authorization no longer permits credential staging.",
+        "credential_stage_failed",
+        false
+      );
+    }
     const staged = await process.executeCommand(
       stagingCommand(auth.name, credentialPath),
       undefined,
@@ -1080,6 +1089,13 @@ export async function startDaytonaProcess(input: {
     ) {
       throw new DaytonaProcessError(
         "Daytona unrestricted execution authorization could not be confirmed.",
+        "process_start_failed",
+        false
+      );
+    }
+    if (input.authorizeOwnerEffect && !(await input.authorizeOwnerEffect())) {
+      throw new DaytonaProcessError(
+        "Machine authorization no longer permits launch.",
         "process_start_failed",
         false
       );

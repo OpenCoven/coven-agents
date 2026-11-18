@@ -39,6 +39,7 @@ export type RunnerLaunchAuthorization = Readonly<{
 }>;
 
 export type RunnerExecutionAuthorizers = Readonly<{
+  authorizeOwnerEffect?: () => Promise<boolean>;
   authorizeLaunch: (
     launch: RunnerLaunchAuthorization
   ) => Promise<RunnerDispatchAuthority | null>;
