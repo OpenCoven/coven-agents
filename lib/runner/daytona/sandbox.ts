@@ -1375,6 +1375,21 @@ async function ensureDaytonaSandboxWithPersistence(
   return { agent, sandbox };
 }
 
+// Match the order-independent identity while requiring exactly the configured entries.
+function boundDomainAllowListMatches(
+  observed: unknown,
+  configured: string | undefined
+): boolean {
+  if (configured === undefined) {
+    return observed === undefined;
+  }
+  return (
+    typeof observed === "string" &&
+    observed.split(",").sort(compareAscii).join(",") ===
+      configured.split(",").sort(compareAscii).join(",")
+  );
+}
+
 /** Observed policy must match too: labels alone cannot attest mutable settings. */
 function boundSandboxPolicyMatches(
   sandbox: Sandbox,
@@ -1394,7 +1409,10 @@ function boundSandboxPolicyMatches(
     sandbox.autoDeleteInterval === configuration.autoDeleteInterval &&
     sandbox.autoPauseInterval === 0 &&
     sandbox.autoDestroyAt === undefined &&
-    sandbox.domainAllowList === configuration.domainAllowList &&
+    boundDomainAllowListMatches(
+      sandbox.domainAllowList,
+      configuration.domainAllowList
+    ) &&
     sandbox.networkAllowList === undefined &&
     sandbox.outboundProxyUrl === undefined &&
     sandbox.networkBlockAll === false &&

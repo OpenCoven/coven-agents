@@ -690,11 +690,37 @@ test("migration 0044 adds only the nullable run sandbox binding", () => {
   // Existing rows stay unbound: no default, no NOT NULL, no backfill.
   assert.doesNotMatch(migration, /DEFAULT|NOT NULL/iu);
   assert.doesNotMatch(migration, /\bUPDATE\b|\bDELETE\b|\bINSERT\b|\bDROP\b/u);
-  // Both columns or neither, so a half-written binding cannot exist.
+  // 0044 allows unbound rows. 0045 closes its partial-NULL CHECK gap.
   assert.match(migration, /RunnerRun_sandboxBinding_valid/u);
   assert.match(
     migration,
     /"boundSandboxId" is null and "RunnerRun"\."boundSandboxGeneration" is null/u
   );
   assert.doesNotMatch(migration, /RunnerAgent|daytonaSandboxId/u);
+});
+
+test("migration 0045 replaces only the binding CHECK and rejects partial NULL pairs", () => {
+  const migration = readFileSync(
+    new URL(
+      "../db/migrations/0045_run_sandbox_binding_valid.sql",
+      import.meta.url
+    ),
+    "utf8"
+  );
+  const statements = migration
+    .split("--> statement-breakpoint")
+    .map((sql) => sql.trim());
+  assert.equal(statements.length, 2);
+  assert.equal(
+    statements[0],
+    'ALTER TABLE "RunnerRun" DROP CONSTRAINT "RunnerRun_sandboxBinding_valid";'
+  );
+  assert.match(
+    statements[1] ?? "",
+    /^ALTER TABLE "RunnerRun" ADD CONSTRAINT "RunnerRun_sandboxBinding_valid" CHECK /u
+  );
+  assert.match(
+    statements[1] ?? "",
+    /"boundSandboxId" is not null and "RunnerRun"\."boundSandboxGeneration" is not null/u
+  );
 });

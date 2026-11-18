@@ -19,7 +19,7 @@ import type {
   RunnerSandboxBinding,
 } from "../types";
 import { configuredDaytonaRunnerExecutor } from "./executor";
-import { daytonaSandboxLabels } from "./names";
+import { daytonaSandboxLabels, daytonaSandboxName } from "./names";
 import {
   DAYTONA_CREDENTIAL_BOUNDARY_VERSION,
   DaytonaSandboxBindingRefusedError,
@@ -785,6 +785,35 @@ test("a recognized prior identity still requires matching observed policy withou
       configurationId: "next-configuration",
       priorConfigurationIds: ["current-configuration"],
     },
+    { daytona: fake.daytona, store: fake.store }
+  );
+  assert.equal(result.sandbox.id, SANDBOX_ID);
+  assert.deepEqual(fake.calls, ONE_GET);
+});
+
+test("a deterministic sandbox name cannot substitute for the recorded ID", async () => {
+  const fake = recording({
+    binding: {
+      ...binding,
+      expectedSandboxId: daytonaSandboxName(TENANT, AGENT_ID),
+    },
+  });
+  assert.equal(await refusal(fake), "sandbox_id_mismatch");
+  assert.deepEqual(fake.calls, NO_PROVIDER_CALL);
+});
+
+test("bound dispatch accepts the same domain allow list in a different order", async () => {
+  const fake = recording({
+    get: () =>
+      Promise.resolve({
+        ...recording().data,
+        domainAllowList: "a.example,b.example",
+      }),
+  });
+  const result = await ensureDaytonaSandboxForDispatch(
+    { kind: "runner-operator" },
+    authority,
+    { ...configuration, domainAllowList: "b.example,a.example" },
     { daytona: fake.daytona, store: fake.store }
   );
   assert.equal(result.sandbox.id, SANDBOX_ID);
