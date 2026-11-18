@@ -117,6 +117,7 @@ const DATA_FIELDS: ReadonlySet<string> = new Set([
   "name",
   "networkAllowList",
   "networkBlockAll",
+  "outboundProxyUrl",
   "public",
   "snapshot",
   "state",
@@ -256,6 +257,7 @@ test("a matching binding is observed with exactly one provider get", async () =>
       memoryGib: 4,
       networkAllowListConfigured: false,
       networkBlockAll: false,
+      outboundProxyConfigured: false,
       public: false,
       snapshot: "coven-agents-copilot-2",
       state: "started",
@@ -748,5 +750,52 @@ test("the inspection module reaches no mutating provider or credential API", () 
     "daytonaSandboxName",
   ]) {
     assert.equal(source.includes(forbidden), false, forbidden);
+  }
+});
+
+test("inspection reports outbound proxy drift without disclosing its URL", async () => {
+  const owner = agent();
+  for (const outboundProxyUrl of [
+    undefined,
+    "https://proxy.example.invalid/secret-path",
+  ]) {
+    // biome-ignore lint/performance/noAwaitInLoops: Each provider observation must preserve the exact read-only call log.
+    const { calls, result } = await inspect({
+      answer: () =>
+        Promise.resolve(providerSandbox(owner, { outboundProxyUrl } as never)),
+    });
+    onlyOneGet(calls);
+    assert.equal(result.outcome, "observed");
+    assert.ok(result.outcome === "observed");
+    assert.equal(
+      result.observed.outboundProxyConfigured,
+      outboundProxyUrl !== undefined
+    );
+    assert.equal(
+      JSON.stringify(result).includes("proxy.example.invalid"),
+      false
+    );
+    assert.equal(JSON.stringify(result).includes("secret-path"), false);
+  }
+});
+
+test("malformed outbound proxy metadata is unavailable instead of reading as absent", async () => {
+  const owner = agent();
+  for (const outboundProxyUrl of [
+    42,
+    {},
+    () => "https://proxy.example.invalid",
+  ]) {
+    // biome-ignore lint/performance/noAwaitInLoops: Each malformed observation must fail closed without mutation.
+    const { calls, result } = await inspect({
+      answer: () =>
+        Promise.resolve(providerSandbox(owner, { outboundProxyUrl } as never)),
+    });
+    onlyOneGet(calls);
+    assert.deepEqual(result, {
+      outcome: "unavailable",
+      source: "provider",
+      version: 1,
+    });
   }
 });

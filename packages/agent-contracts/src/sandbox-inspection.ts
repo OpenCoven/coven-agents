@@ -120,6 +120,7 @@ const observedSchema = z
     /** The owner policy sets no network allow list, so any value is drift. */
     networkAllowListConfigured: z.boolean(),
     networkBlockAll: z.boolean().nullable(),
+    outboundProxyConfigured: z.boolean(),
     public: z.boolean(),
     snapshot: z.string().min(1).max(256).nullable(),
     state: sandboxInspectionStateSchema,

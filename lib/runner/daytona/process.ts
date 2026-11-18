@@ -246,6 +246,7 @@ function asyncCommand(
     "STRIPE_SECRET_KEY",
     "STRIPE_WEBHOOK_SECRET",
     "WORKOS_API_KEY",
+    "WORKOS_COOKIE_PASSWORD",
   ];
   const credentialVariables = [
     ...new Set([

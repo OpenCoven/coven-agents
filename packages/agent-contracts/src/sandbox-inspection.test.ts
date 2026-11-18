@@ -44,6 +44,7 @@ const observed = {
   memoryGib: 4,
   networkAllowListConfigured: false,
   networkBlockAll: null,
+  outboundProxyConfigured: false,
   public: false,
   snapshot: "snapshot-1",
   state: "stopped",

@@ -35,6 +35,7 @@ const observed: SandboxInspectionResult = {
 function fixture(
   options: Readonly<{
     admission?: AbuseAdmission;
+    preAdmission?: AbuseAdmission;
     authorization?: RunnerBearerOwnerAuthorization | null;
     result?: SandboxInspectionResult | Error;
   }> = {}
@@ -66,6 +67,10 @@ function fixture(
       };
     },
     enforceAbuse: (input) => {
+      if (input.route === "runner_sandbox_inspect_auth") {
+        events.push("pre-auth-abuse");
+        return Promise.resolve(options.preAdmission ?? { kind: "allowed" });
+      }
       events.push("abuse");
       admissions.push(input);
       return Promise.resolve(options.admission ?? { kind: "allowed" });
@@ -99,7 +104,13 @@ test("an authorized owner receives the contract result and nothing is cached", a
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("cache-control"), "no-store");
   assert.deepEqual(await response.json(), observed);
-  assert.deepEqual(events, ["auth", "abuse", "service", "inspect"]);
+  assert.deepEqual(events, [
+    "pre-auth-abuse",
+    "auth",
+    "abuse",
+    "service",
+    "inspect",
+  ]);
   assert.deepEqual(inspections, [
     {
       agentId: AGENT_ID,
@@ -131,10 +142,10 @@ test("the tenant comes from the authenticated owner, never from the body", async
   );
   assert.equal(response.status, 400);
   assert.equal(await errorCode(response), "invalid_request");
-  assert.deepEqual(events, ["auth", "abuse"]);
+  assert.deepEqual(events, ["pre-auth-abuse", "auth", "abuse"]);
 });
 
-test("every unauthenticated outcome stops before abuse, body, and service work", async () => {
+test("every unauthenticated outcome stops before owner budget, body, and service work", async () => {
   const cases = [
     [{ kind: "unauthorized" }, 401, "unauthorized"],
     [{ kind: "subscription_required" }, 403, "subscription_required"],
@@ -147,7 +158,10 @@ test("every unauthenticated outcome stops before abuse, body, and service work",
     const response = await handler(request(), AGENT_ID);
     assert.equal(response.status, status);
     assert.equal(await errorCode(response), code);
-    assert.deepEqual(events, authorization === null ? [] : ["auth"]);
+    assert.deepEqual(
+      events,
+      authorization === null ? ["pre-auth-abuse"] : ["pre-auth-abuse", "auth"]
+    );
   }
 });
 
@@ -171,20 +185,20 @@ test("abuse control denial and outage stop before the service", async () => {
   const limited = await denied.handler(request(), AGENT_ID);
   assert.equal(limited.status, 429);
   assert.equal(limited.headers.get("retry-after"), "30");
-  assert.deepEqual(denied.events, ["auth", "abuse"]);
+  assert.deepEqual(denied.events, ["pre-auth-abuse", "auth", "abuse"]);
 
   const outage = fixture({
     admission: { kind: "unavailable" } as AbuseAdmission,
   });
   const response = await outage.handler(request(), AGENT_ID);
   assert.equal(await errorCode(response), "abuse_control_unavailable");
-  assert.deepEqual(outage.events, ["auth", "abuse"]);
+  assert.deepEqual(outage.events, ["pre-auth-abuse", "auth", "abuse"]);
 });
 
 test("a malformed agent ID or body never reaches the service", async () => {
   const badId = fixture();
   assert.equal((await badId.handler(request(), "not-a-uuid")).status, 400);
-  assert.deepEqual(badId.events, ["auth", "abuse"]);
+  assert.deepEqual(badId.events, ["pre-auth-abuse", "auth", "abuse"]);
 
   for (const body of [
     {},
@@ -196,7 +210,7 @@ test("a malformed agent ID or body never reaches the service", async () => {
     const { events, handler } = fixture();
     // biome-ignore lint/performance/noAwaitInLoops: Cases run in order so a failure names its own input.
     assert.equal((await handler(request(body), AGENT_ID)).status, 400);
-    assert.deepEqual(events, ["auth", "abuse"]);
+    assert.deepEqual(events, ["pre-auth-abuse", "auth", "abuse"]);
   }
 
   const large = fixture();
@@ -205,7 +219,7 @@ test("a malformed agent ID or body never reaches the service", async () => {
     AGENT_ID
   );
   assert.equal(response.status, 413);
-  assert.deepEqual(large.events, ["auth", "abuse"]);
+  assert.deepEqual(large.events, ["pre-auth-abuse", "auth", "abuse"]);
 });
 
 test("a missing or foreign agent is a non-disclosing not found", async () => {
@@ -241,4 +255,19 @@ test("an unexpected failure exposes no detail", async () => {
   const text = await response.text();
   assert.equal(text.includes("secret"), false);
   assert.equal(text.includes("internal_error"), true);
+});
+
+test("the anonymous budget stops WorkOS authentication before body or service effects", async () => {
+  for (const preAdmission of [
+    { kind: "denied", responseStatus: 429, retryAfterSeconds: 30 },
+    { kind: "unavailable", responseStatus: 503 },
+  ] as const) {
+    const { events, handler } = fixture({ preAdmission });
+    const input = request();
+    // biome-ignore lint/performance/noAwaitInLoops: Each budget failure must stop all downstream effects.
+    const response = await handler(input, AGENT_ID);
+    assert.equal(response.status, preAdmission.responseStatus);
+    assert.equal(input.bodyUsed, false);
+    assert.deepEqual(events, ["pre-auth-abuse"]);
+  }
 });

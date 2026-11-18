@@ -18,6 +18,19 @@ export {
   TENANT_ID_PATTERN,
 } from "./identity";
 export type {
+  RunSandboxBinding,
+  RunSandboxBindingRefusal,
+  RunSandboxBindingRefusalReason,
+} from "./sandbox-binding";
+export {
+  RUN_SANDBOX_BINDING_CONTRACT_VERSION,
+  RUN_SANDBOX_BINDING_REFUSAL_CODE,
+  RUN_SANDBOX_BINDING_REFUSAL_REASONS,
+  runSandboxBindingRefusalReasonSchema,
+  runSandboxBindingRefusalSchema,
+  runSandboxBindingSchema,
+} from "./sandbox-binding";
+export type {
   SandboxInspectionObserved,
   SandboxInspectionPolicy,
   SandboxInspectionRecord,
@@ -32,19 +45,6 @@ export {
   sandboxInspectionResultSchema,
   sandboxInspectionStateSchema,
 } from "./sandbox-inspection";
-export type {
-  RunSandboxBinding,
-  RunSandboxBindingRefusal,
-  RunSandboxBindingRefusalReason,
-} from "./sandbox-binding";
-export {
-  RUN_SANDBOX_BINDING_CONTRACT_VERSION,
-  RUN_SANDBOX_BINDING_REFUSAL_CODE,
-  RUN_SANDBOX_BINDING_REFUSAL_REASONS,
-  runSandboxBindingRefusalReasonSchema,
-  runSandboxBindingRefusalSchema,
-  runSandboxBindingSchema,
-} from "./sandbox-binding";
 
 if (contractDescriptor.apiVersions.length !== 1) {
   throw new Error("Agent Runner must publish exactly one API version.");

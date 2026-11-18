@@ -31,6 +31,7 @@ export type DaytonaSandboxInspectionItem = DaytonaSandboxInventoryItem &
     gpu?: number;
     networkAllowList?: string;
     networkBlockAll?: boolean;
+    outboundProxyUrl?: string;
   }>;
 
 /**
@@ -191,6 +192,8 @@ function observed(
     networkAllowListConfigured:
       (optional(sandbox.networkAllowList, isString)?.length ?? 0) > 0,
     networkBlockAll: optional(sandbox.networkBlockAll, isBoolean),
+    outboundProxyConfigured:
+      optional(sandbox.outboundProxyUrl, isString) !== null,
     public: sandbox.public,
     snapshot: snapshot !== null && snapshot.length > 0 ? snapshot : null,
     state: observedState(sandbox.state),

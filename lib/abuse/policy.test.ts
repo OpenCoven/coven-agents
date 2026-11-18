@@ -54,6 +54,7 @@ const EXPECTED_ROUTES = [
   "runner_diagnostic",
   "runner_reconcile",
   "runner_sandbox_inspect",
+  "runner_sandbox_inspect_auth",
   "skill_read",
   "skill_write",
   "skill_delete",
@@ -127,6 +128,7 @@ const EXPECTED_POLICIES = {
     100,
     3600
   ),
+  runner_sandbox_inspect_auth: expectedPolicy(["ip"], 1024, 20, 60, 100, 3600),
   runner_stop: expectedPolicy(["ip", "tenant"], 1024, 5, 60, 20, 3600),
   runner_write: expectedPolicy(["ip", "user"], 64_000, 10, 60, 40, 3600),
   skill_delete: expectedPolicy(["ip", "tenant"], 0, 5, 60, 20, 3600),

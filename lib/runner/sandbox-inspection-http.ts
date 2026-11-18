@@ -49,8 +49,9 @@ function jsonMediaType(request: Request): boolean {
  * it stays out of URLs and access logs. The caller is an owner presenting a
  * bearer identity token; cookies and operator secrets are not consulted, so
  * there is no ambient credential for a cross-site request to ride on. Order
- * is media type, then authentication, then abuse control, before the body is
- * read or any service, database, or provider work begins.
+ * is media type, anonymous abuse budget, authentication, then owner abuse
+ * budget, before the body is read or a runner service is constructed. Authentication
+ * itself can read WorkOS and local account state.
  */
 export function createSandboxInspectionHandler(
   dependencies: SandboxInspectionHttpDependencies
@@ -59,6 +60,23 @@ export function createSandboxInspectionHandler(
     try {
       if (!jsonMediaType(request)) {
         return runnerErrorResponse(dependencies, "unsupported_media_type");
+      }
+      // Bound remote JWKS and WorkOS user lookups even for tokens with no local account.
+      const anonymousAdmission = await dependencies.enforceAbuse({
+        failClosed: true,
+        ip: dependencies.ipAddress(request),
+        route: "runner_sandbox_inspect_auth",
+      });
+      if (anonymousAdmission.kind !== "allowed") {
+        if (anonymousAdmission.kind === "denied") {
+          const limited = runnerErrorResponse(dependencies, "rate_limited");
+          limited.headers.set(
+            "retry-after",
+            String(anonymousAdmission.retryAfterSeconds)
+          );
+          return limited;
+        }
+        return runnerErrorResponse(dependencies, "abuse_control_unavailable");
       }
       const owner = dependencies.auth.authorizeBearerOwner
         ? await dependencies.auth.authorizeBearerOwner(request)

@@ -49,6 +49,7 @@ export const ABUSE_ROUTES = Object.freeze([
   "runner_diagnostic",
   "runner_reconcile",
   "runner_sandbox_inspect",
+  "runner_sandbox_inspect_auth",
   "skill_read",
   "skill_write",
   "skill_delete",
