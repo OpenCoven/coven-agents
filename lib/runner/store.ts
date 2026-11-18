@@ -235,6 +235,9 @@ function asRun(row: Record<string, unknown>): RunnerRunRecord {
         ? false
         : column(row, "authorityRevalidation"),
     authVersion: column(row, "authVersion"),
+    ...(row.ownerCredentialId
+      ? { ownerCredentialId: column<string>(row, "ownerCredentialId") }
+      : {}),
     cancellationRequestedAt: nullableTimestampColumn(
       row,
       "cancellationRequestedAt"
@@ -5316,14 +5319,14 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             },
             sql`INSERT INTO "RunnerRun" (
               "id", "agentId", "tenant", "agentInstructions", "agentModel",
-              "agentRuntime", "agentWorkspace", "authVersion", "operationId",
+              "agentRuntime", "agentWorkspace", "authVersion", "ownerCredentialId", "operationId",
               "requestHash", "task", "executionPermission", "teamStepId",
               "boundSandboxId", "boundSandboxGeneration", "githubBrokerPolicy"
             ) VALUES (
               ${input.id}, ${input.agentId}, ${principal.tenant},
               ${agentSnapshot.instructions}, ${agentSnapshot.model},
               ${agentSnapshot.runtime}, ${agentSnapshot.workspace},
-              ${input.authVersion}, ${input.operationId}, ${input.requestHash},
+              ${input.authVersion}, ${principal.ownerCredentialId ?? null}, ${input.operationId}, ${input.requestHash},
               ${input.task}, ${executionPermission}, ${teamStepId},
               ${sandboxBinding?.expectedSandboxId ?? null},
               ${sandboxBinding?.expectedGeneration ?? null},

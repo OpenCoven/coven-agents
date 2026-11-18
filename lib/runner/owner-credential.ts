@@ -30,3 +30,8 @@ export function ownerBearerDigest(header: string | null) {
   const secret = bearerPattern.exec(header)?.[1];
   return secret?.startsWith(prefix) ? digest(secret) : null;
 }
+
+export type OwnerCredentialRequest = {
+  scope: OwnerCredentialScope;
+  target: { agentId: string } | { runId: string };
+};

@@ -16,6 +16,7 @@ import type { RunnerExecutionProvenance } from "./execution-provenance";
  * This is deliberately not interchangeable with RunnerOperator.
  */
 export type RunnerPrincipal = {
+  ownerCredentialId?: string;
   kind: "subscriber";
   tenant: string;
   userId: string;
@@ -162,6 +163,7 @@ export type RunnerRunRecord = Omit<
   agentRuntime: RunnerRuntime;
   agentWorkspace: string | null;
   authVersion: number | null;
+  ownerCredentialId?: string;
   authorityRevalidation?: boolean;
   cancellationRequestedAt: Date | null;
   completedAt: Date | null;

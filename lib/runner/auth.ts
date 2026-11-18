@@ -6,6 +6,7 @@ import type {
   SubscriberAccessDecision,
 } from "@/lib/auth/subscriber-access";
 import type { SubscriberSession } from "@/lib/session";
+import type { OwnerCredentialRequest } from "./owner-credential";
 import type { RunnerPrincipal } from "./types";
 
 export type RunnerSecretEnvironment = Readonly<{
@@ -32,7 +33,11 @@ export type RunnerSecretAuthorization =
   | Readonly<{ kind: "unauthorized" | "unavailable" }>;
 
 export type RunnerBearerOwnerAuthentication =
-  | Readonly<{ kind: "authenticated"; session: SessionLike }>
+  | Readonly<{
+      kind: "authenticated";
+      session: SessionLike;
+      credentialId?: string;
+    }>
   | Readonly<{ kind: "unauthorized" | "unavailable" }>;
 
 export type RunnerBearerOwnerAuthorization =
@@ -46,7 +51,8 @@ export type RunnerAuth = Readonly<{
    * unavailable and never fall back to a cookie or an operator secret.
    */
   authorizeBearerOwner?: (
-    request: Request
+    request: Request,
+    grant?: OwnerCredentialRequest
   ) => Promise<RunnerBearerOwnerAuthorization>;
   authorizeDiagnostic: (request: Request) => RunnerSecretAuthorization;
   authorizeReconcile: (request: Request) => RunnerSecretAuthorization;
@@ -56,7 +62,8 @@ export type RunnerAuth = Readonly<{
 export type RunnerAuthDependencies = Readonly<{
   authenticate: () => Promise<SessionLike>;
   authenticateBearerOwner?: (
-    request: Request
+    request: Request,
+    grant?: OwnerCredentialRequest
   ) => Promise<RunnerBearerOwnerAuthentication>;
   authorizeSubscriberAccess: (
     session: SessionLike
@@ -218,19 +225,30 @@ export function createRunnerAuth(
   };
 
   return {
-    authorizeBearerOwner: async (request) => {
+    authorizeBearerOwner: async (request, grant) => {
       if (!dependencies.authenticateBearerOwner) {
         return { kind: "unavailable" };
       }
       let owner: RunnerBearerOwnerAuthentication;
       try {
-        owner = await dependencies.authenticateBearerOwner(request);
+        owner = await dependencies.authenticateBearerOwner(request, grant);
       } catch {
         return { kind: "unavailable" };
       }
-      return owner.kind === "authenticated"
-        ? authorizeSession(owner.session)
-        : owner;
+      if (owner.kind !== "authenticated") {
+        return owner;
+      }
+      const decision = await authorizeSession(owner.session);
+      if (decision.kind !== "allowed" || !owner.credentialId) {
+        return decision;
+      }
+      return {
+        ...decision,
+        principal: {
+          ...decision.principal,
+          ownerCredentialId: owner.credentialId,
+        },
+      };
     },
     authorizeDiagnostic: (request) =>
       authorizeSecret(request, diagnosticSecretFromEnvironment(environment)),

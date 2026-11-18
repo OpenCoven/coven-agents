@@ -1,3 +1,4 @@
+import type { OwnerCredentialRequest } from "./owner-credential";
 import "server-only";
 
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -358,9 +359,25 @@ async function authorizeSubscriber(
   request: Request,
   route: AbuseEnforcementInput["route"],
   dependencies: RunnerHttpDependencies,
-  mutation?: "empty" | "json"
+  mutation?: "empty" | "json",
+  grant?: OwnerCredentialRequest
 ): Promise<Response | RunnerAuthenticatedSubscriber> {
-  if (mutation) {
+  const bearer = request.headers.get("authorization") !== null;
+  if (bearer && !grant) {
+    return runnerErrorResponse(dependencies, "unauthorized");
+  }
+  if (
+    bearer &&
+    mutation === "json" &&
+    request.headers
+      .get("content-type")
+      ?.split(";", 1)[0]
+      ?.trim()
+      .toLowerCase() !== "application/json"
+  ) {
+    return runnerErrorResponse(dependencies, "unsupported_media_type");
+  }
+  if (!bearer && mutation) {
     const rejected = validateRunnerMutationRequest(request, dependencies, {
       jsonBody: mutation === "json",
     });
@@ -368,7 +385,23 @@ async function authorizeSubscriber(
       return rejected;
     }
   }
-  const subscriber = await dependencies.auth.authorizeSubscriber();
+  if (bearer) {
+    const budget = await dependencies.enforceAbuse(
+      policyInput(
+        "runner_sandbox_inspect_auth",
+        dependencies.ipAddress(request)
+      )
+    );
+    if (budget.kind !== "allowed") {
+      return abuseFailure(dependencies, budget);
+    }
+  }
+  const subscriber = bearer
+    ? await dependencies.auth.authorizeBearerOwner?.(request, grant)
+    : await dependencies.auth.authorizeSubscriber();
+  if (!subscriber || subscriber.kind === "unavailable") {
+    return runnerErrorResponse(dependencies, "runner_unavailable");
+  }
   if (subscriber.kind !== "allowed") {
     return subscriberFailure(dependencies, subscriber);
   }
@@ -882,7 +915,9 @@ export function createRunnerHttpHandlers(
         const context = await authorizeSubscriber(
           request,
           "runner_read",
-          dependencies
+          dependencies,
+          undefined,
+          { scope: "run:read", target: { runId } }
         );
         if (isResponse(context)) {
           return context;
@@ -912,7 +947,9 @@ export function createRunnerHttpHandlers(
         const context = await authorizeSubscriber(
           request,
           "runner_read",
-          dependencies
+          dependencies,
+          undefined,
+          { scope: "run:events", target: { runId } }
         );
         if (isResponse(context)) {
           return context;
@@ -1183,7 +1220,8 @@ export function createRunnerHttpHandlers(
           request,
           "runner_run_start",
           dependencies,
-          "json"
+          "json",
+          { scope: "run:start", target: { agentId } }
         );
         if (isResponse(context)) {
           return context;
@@ -1273,7 +1311,8 @@ export function createRunnerHttpHandlers(
           request,
           "runner_stop",
           dependencies,
-          "empty"
+          "empty",
+          { scope: "run:stop", target: { runId } }
         );
         if (isResponse(context)) {
           return context;

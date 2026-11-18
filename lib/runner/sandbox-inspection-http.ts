@@ -61,7 +61,7 @@ export function createSandboxInspectionHandler(
       if (!jsonMediaType(request)) {
         return runnerErrorResponse(dependencies, "unsupported_media_type");
       }
-      // Bound remote JWKS and WorkOS user lookups even for tokens with no local account.
+      // Bound credential and account lookups even for tokens with no local account.
       const anonymousAdmission = await dependencies.enforceAbuse({
         failClosed: true,
         ip: dependencies.ipAddress(request),
@@ -79,7 +79,10 @@ export function createSandboxInspectionHandler(
         return runnerErrorResponse(dependencies, "abuse_control_unavailable");
       }
       const owner = dependencies.auth.authorizeBearerOwner
-        ? await dependencies.auth.authorizeBearerOwner(request)
+        ? await dependencies.auth.authorizeBearerOwner(request, {
+            scope: "sandbox:inspect",
+            target: { agentId },
+          })
         : ({ kind: "unavailable" } as const);
       if (owner.kind === "unavailable") {
         return runnerErrorResponse(dependencies, "runner_unavailable");

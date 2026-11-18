@@ -256,6 +256,19 @@ async function credentialContextForRun(
   ) {
     return { kind: "authority_revoked" };
   }
+  if (run.ownerCredentialId) {
+    const { mayDispatchOwnerRun } = await import("@/lib/db/owner-credentials");
+    if (
+      !(await mayDispatchOwnerRun(
+        run.ownerCredentialId,
+        run.agentId,
+        run.tenant,
+        run.authVersion
+      ))
+    ) {
+      return { kind: "authority_revoked" };
+    }
+  }
   const environment = dependencies.environment ?? process.env;
   /**
    * Two entitlement sources, one decision. A paid subscription is 300 minutes

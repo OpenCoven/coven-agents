@@ -6,8 +6,13 @@ import { enforceAbusePolicy } from "@/lib/abuse/enforce";
 import type { IdempotencyStore } from "@/lib/abuse/idempotency";
 import { configuredApplicationOrigin } from "@/lib/auth/application-origin";
 import type { SessionLike } from "@/lib/auth/subscriber-access";
-import { createRunnerAuth } from "./auth";
+import { isCanonicalUuid } from "@/lib/session";
+import { createRunnerAuth, type RunnerBearerOwnerAuthentication } from "./auth";
 import { createRunnerHttpHandlers, type RunnerHttpHandlers } from "./http";
+import {
+  type OwnerCredentialRequest,
+  ownerBearerDigest,
+} from "./owner-credential";
 import { createSandboxInspectionHandler } from "./sandbox-inspection-http";
 
 function productionRuntime() {
@@ -50,49 +55,41 @@ async function authorizeSubscriberAccess(session: SessionLike) {
   return authorization.authorizeSubscriberAccess(session);
 }
 
-/**
- * WorkOS proves the caller's identity; the local account and its entitlement
- * still decide access (the account version cannot revoke a bearer token; see
- * authenticateWorkOSOwner). The modules are imported per request, not at
- * startup. The database module loads together with the WorkOS ones, but no
- * query runs until a token has been verified and its user fetched.
- */
-async function authenticateBearerOwner(request: Request) {
-  const [owner, token, queries] = await Promise.all([
-    import("@/lib/auth/workos-owner"),
-    import("@/lib/auth/workos-access-token"),
-    import("@/lib/db/queries"),
-  ]);
-  return owner.authenticateWorkOSOwner(request, {
-    configuration: () => token.readWorkOSTokenConfiguration(process.env),
-    fetchUser: token.fetchVerifiedWorkOSUser,
-    findAccountsByEmail: queries.getUser,
-    verifier: workosVerifier(token),
-  });
-}
-
-type WorkOSTokenModule = typeof import("@/lib/auth/workos-access-token");
-let cachedVerifier:
-  | Readonly<{
-      clientId: string;
-      verify: ReturnType<WorkOSTokenModule["createWorkOSAccessTokenVerifier"]>;
-    }>
-  | undefined;
-
-/** One verifier per client ID so its remote key set is cached across requests. */
-function workosVerifier(token: WorkOSTokenModule) {
-  return (
-    configuration: Parameters<
-      WorkOSTokenModule["createWorkOSAccessTokenVerifier"]
-    >[0]
-  ) => {
-    if (cachedVerifier?.clientId !== configuration.clientId) {
-      cachedVerifier = {
-        clientId: configuration.clientId,
-        verify: token.createWorkOSAccessTokenVerifier(configuration),
-      };
-    }
-    return cachedVerifier.verify;
+async function authenticateBearerOwner(
+  request: Request,
+  grant?: OwnerCredentialRequest
+): Promise<RunnerBearerOwnerAuthentication> {
+  const digest = ownerBearerDigest(request.headers.get("authorization"));
+  if (
+    !digest ||
+    !grant ||
+    !isCanonicalUuid(
+      "agentId" in grant.target ? grant.target.agentId : grant.target.runId
+    )
+  ) {
+    return { kind: "unauthorized" };
+  }
+  const { findAuthorizedOwnerCredential } = await import(
+    "@/lib/db/owner-credentials"
+  );
+  const record = await findAuthorizedOwnerCredential(
+    digest,
+    grant.scope,
+    grant.target
+  );
+  if (!record) {
+    return { kind: "unauthorized" };
+  }
+  return {
+    credentialId: record.id,
+    kind: "authenticated",
+    session: {
+      user: {
+        authVersion: record.authVersion,
+        id: record.userId,
+        type: "subscriber",
+      },
+    },
   };
 }
 
@@ -130,6 +127,7 @@ export function productionRunnerHttpHandlers(): RunnerHttpHandlers {
     appOrigin: () => configuredApplicationOrigin(process.env),
     auth: createRunnerAuth({
       authenticate,
+      authenticateBearerOwner,
       authorizeSubscriberAccess,
     }),
     createOperatorService: async () => {

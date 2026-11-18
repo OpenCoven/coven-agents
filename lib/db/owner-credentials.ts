@@ -103,6 +103,43 @@ export function issueOwnerCredential(
 
 type Target = { agentId: string } | { runId: string };
 
+function activeWithScope(scope: OwnerCredentialScope) {
+  return and(
+    arrayContains(credential.scopes, [scope]),
+    isNull(credential.revokedAt),
+    lte(credential.issuedAt, sql`clock_timestamp()`),
+    gt(credential.expiresAt, sql`clock_timestamp()`)
+  );
+}
+
+export async function mayDispatchOwnerRun(
+  id: string,
+  agentId: string,
+  tenant: string,
+  authVersion: number
+) {
+  const [record] = await db
+    .select({ id: credential.id })
+    .from(credential)
+    .innerJoin(
+      user,
+      and(
+        eq(user.id, credential.userId),
+        eq(user.authVersion, credential.authVersion)
+      )
+    )
+    .where(
+      and(
+        eq(credential.id, id),
+        eq(credential.agentId, agentId),
+        eq(credential.tenant, tenant),
+        eq(credential.authVersion, authVersion),
+        activeWithScope("run:start")
+      )
+    );
+  return Boolean(record);
+}
+
 export async function findAuthorizedOwnerCredential(
   digest: string,
   scope: OwnerCredentialScope,
@@ -128,14 +165,7 @@ export async function findAuthorizedOwnerCredential(
       )
     )
     .where(
-      and(
-        eq(credential.digest, digest),
-        arrayContains(credential.scopes, [scope]),
-        isNull(credential.revokedAt),
-        lte(credential.issuedAt, sql`clock_timestamp()`),
-        gt(credential.expiresAt, sql`clock_timestamp()`),
-        targetMatches
-      )
+      and(eq(credential.digest, digest), activeWithScope(scope), targetMatches)
     );
   return record ?? null;
 }
