@@ -1,0 +1,2 @@
+#!/bin/sh
+corepack pnpm exec tsx scripts/secret-scan.ts --message "$1"

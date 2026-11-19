@@ -1,5 +1,13 @@
 # Working in coven-agents
 
+## Start here
+
+From your task worktree, run `corepack pnpm install --frozen-lockfile`, then `corepack pnpm hygiene doctor`. Installation runs Husky's setup. If the doctor reports a missing hook, run `corepack pnpm exec husky` and repeat the check. Run `corepack pnpm exec next typegen` before the first typecheck in a fresh checkout.
+
+Read the issue and PR before editing. Record the base SHA, the paths you own, and any shared-file handoff. Use the narrowest test first, then the relevant gates below. Report the tested revision, commands, exit codes, and which checks used fixtures or live systems.
+
+Start with [README.md](README.md) for the product and local setup, [the threat model](docs/security/execution-threat-model.md) for trust boundaries, and [the incident runbook](docs/security/incident-response.md) for credential exposure. Keep provider, billing, authentication, and production database credentials out of routine local checks.
+
 ## Branches
 
 Name branches `<type>/<short-slug>`, where type is one of `feat`, `fix`,
@@ -26,7 +34,7 @@ pnpm test:unit        # unit tests
 pnpm build            # the app actually builds
 ```
 
-**GitHub Actions is disabled for this repository and the repo is private.**
+**GitHub Actions is disabled for this repository.**
 That is deliberate pre-release cost control, not a breakage — do not diagnose
 the absent checks as a regression or re-add required status checks while it is
 off. It also means the list above is the *only* gate: nothing remote will
@@ -64,6 +72,12 @@ per-clone — do not rely on it as the only guard.
 the public key is not on this machine, which is how every GitHub-signed bot
 commit looks locally. Never try to "fix" an `E` on a dependabot commit — it is
 not yours to rewrite, and GitHub already shows it as Verified.
+
+## Secret checks
+
+Pre-commit scans the staged index before and after lint-staged. The commit-message hook scans the proposed message. Pre-push scans the outgoing revision range, including messages and blobs from intermediate commits. Run `corepack pnpm secret:scan` for staged files, `corepack pnpm secret:scan:all` for tracked files, and `corepack pnpm secret:scan:history` for locally reachable history.
+
+Report the finding location and category without copying the value or raw logs. Stop publication on findings you cannot classify. A disposable credential belongs in generated test data. When a real credential reaches a remote, follow the incident runbook and rotate it through its owner. Removing a value from the latest tree does not remove it from Git history.
 
 ## Cleaning up
 

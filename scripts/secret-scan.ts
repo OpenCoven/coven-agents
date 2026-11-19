@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { readFileSync, statSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 export const MAX_FILE_BYTES = 1024 * 1024;
@@ -304,7 +305,7 @@ function candidatePaths(cwd: string, mode: ScanMode): string[] {
 function historyBlobs(
   cwd: string,
   selector: readonly string[]
-): Array<{ path: string; sha: string }> {
+): Array<{ path: string; sha: string; size: number }> {
   // The range decides what is looked at, and it decides it FIRST.
   //
   // This used to stat every object in the repository and only then narrow to
@@ -346,15 +347,28 @@ function historyBlobs(
     `${Array.from(pathBySha.keys()).join("\n")}\n`
   ) as string;
 
-  const blobs: Array<{ path: string; sha: string }> = [];
+  const blobs: Array<{ path: string; sha: string; size: number }> = [];
   for (const line of checked.split("\n")) {
-    const [sha, type, size] = line.split(" ");
-    if (type !== "blob" || Number(size) > MAX_FILE_BYTES) {
+    const [sha, type, rawSize] = line.split(" ");
+    if (!line) {
+      continue;
+    }
+    if (
+      type === "missing" ||
+      !["blob", "tree", "commit", "tag"].includes(type)
+    ) {
+      throw new Error("Could not inspect a Git object.");
+    }
+    if (type !== "blob") {
       continue;
     }
     const path = pathBySha.get(sha);
     if (path) {
-      blobs.push({ path, sha });
+      const size = Number(rawSize);
+      if (!Number.isSafeInteger(size) || size < 0) {
+        throw new Error("Invalid Git blob size.");
+      }
+      blobs.push({ path, sha, size });
     }
   }
 
@@ -367,7 +381,10 @@ function scanHistory(
 ): SecretFinding[] {
   const findings: SecretFinding[] = [];
 
-  for (const { path, sha } of historyBlobs(cwd, selector)) {
+  for (const { path, sha, size } of historyBlobs(cwd, selector)) {
+    if (containsSecret(path)) {
+      findings.push({ category: "secret-shaped filename", line: 1, path });
+    }
     if (isForbiddenDotenvPath(path)) {
       findings.push({
         category: "dotenv file present in history",
@@ -377,18 +394,29 @@ function scanHistory(
       continue;
     }
 
-    let content: Buffer;
-    try {
-      content = git(cwd, ["cat-file", "blob", sha]) as Buffer;
-    } catch {
+    if (size > MAX_FILE_BYTES) {
+      findings.push({ category: "file exceeds scan limit", line: 1, path });
       continue;
     }
+    const content = git(cwd, ["cat-file", "blob", sha]) as Buffer;
+    findings.push(...scanBlob(path, content));
+  }
 
-    if (content.includes(0)) {
-      continue;
+  const log = git(
+    cwd,
+    ["log", "--no-show-signature", "-z", "--format=%H%x00%B", ...selector],
+    "utf8"
+  ) as string;
+  const fields = log.split("\0");
+  if (fields.pop() !== "" || fields.length % 2 !== 0) {
+    throw new Error("Could not parse Git commit messages.");
+  }
+  for (let i = 0; i < fields.length; i += 2) {
+    const [sha, message] = [fields[i], fields[i + 1]];
+    if (!/^[0-9a-f]{40,64}$/u.test(sha)) {
+      throw new Error("Could not parse a Git commit identifier.");
     }
-
-    findings.push(...scanText(path, content.toString("utf8")));
+    findings.push(...scanText(`commit ${sha}`, message, false));
   }
 
   return findings;
@@ -407,11 +435,26 @@ function stagedContent(cwd: string, path: string): Buffer {
   return git(cwd, ["show", `:${path}`]) as Buffer;
 }
 
-export function scanText(path: string, text: string): SecretFinding[] {
+function scanBlob(path: string, content: Buffer): SecretFinding[] {
+  const binary = content.includes(0);
+  const text = content.toString("utf8");
+  // Separate printable runs so a credential adjacent to image bytes is still visible.
+  return scanText(
+    path,
+    binary ? text.replace(/[^\x20-\x7e]+/gu, "\n") : text,
+    !binary
+  );
+}
+
+export function scanText(
+  path: string,
+  text: string,
+  allowFixtures = true
+): SecretFinding[] {
   const findings: SecretFinding[] = [];
   let allowLine = -1;
   for (const [index, line] of text.split(/\r?\n/u).entries()) {
-    if (ALLOW_NEXT_LINE.test(line)) {
+    if (allowFixtures && ALLOW_NEXT_LINE.test(line)) {
       allowLine = index + 1;
       continue;
     }
@@ -484,10 +527,7 @@ export function scanRepository({
     }
 
     const content = stagedContent(cwd, path);
-    if (content.includes(0)) {
-      continue;
-    }
-    findings.push(...scanText(path, content.toString("utf8")));
+    findings.push(...scanBlob(path, content));
   }
 
   return findings;
@@ -509,7 +549,31 @@ export function renderFindings(findings: readonly SecretFinding[]): string {
 }
 
 function main() {
-  const [, , flag] = process.argv;
+  const [, , flag, argument] = process.argv;
+  if (flag === "--message") {
+    try {
+      const filename = argument;
+      if (!filename || statSync(filename).size > MAX_FILE_BYTES) {
+        throw new Error("Commit message is missing or exceeds the scan limit.");
+      }
+      const findings = scanText(
+        "commit message",
+        readFileSync(filename, "utf8"),
+        false
+      );
+      if (findings.length > 0) {
+        process.stderr.write(`${renderFindings(findings)}\n`);
+        process.exitCode = 1;
+      }
+    } catch {
+      process.stderr.write(
+        "Secret scan could not inspect the commit message.\n"
+      );
+      process.exitCode = 1;
+    }
+    return;
+  }
+
   const modes: Record<string, ScanMode> = {
     "--history": "history",
     "--range": "history",
@@ -517,7 +581,7 @@ function main() {
     "--tracked": "tracked",
   };
   const mode = flag ? modes[flag] : undefined;
-  const range = flag === "--range" ? process.argv[3] : undefined;
+  const range = flag === "--range" ? argument : undefined;
 
   if (flag === "--range" && !range) {
     process.stderr.write("Usage: secret-scan.ts --range <rev-range>\n");
@@ -526,7 +590,7 @@ function main() {
   }
   if (!mode) {
     process.stderr.write(
-      "Usage: secret-scan.ts --staged|--tracked|--history|--range <rev-range>\n"
+      "Usage: secret-scan.ts --staged|--tracked|--history|--range <rev-range>|--message <file>\n"
     );
     process.exitCode = 2;
     return;

@@ -485,3 +485,52 @@ test("a range scan ignores a secret that lives outside the range", () => {
     "the full audit still sees it"
   );
 });
+
+test("history reports oversized blobs instead of silently skipping them", () => {
+  const cwd = repository();
+  writeFileSync(path.join(cwd, "large.txt"), "x".repeat(MAX_FILE_BYTES + 1));
+  git(cwd, ["add", "large.txt"]);
+  git(cwd, ["-c", "commit.gpgsign=false", "commit", "-qm", "large fixture"]);
+  assert.ok(
+    scanRepository({ cwd, mode: "history" }).some(
+      (finding) => finding.category === "file exceeds scan limit"
+    )
+  );
+});
+
+test("staged and historical scans detect credential text in NUL-containing blobs", () => {
+  const cwd = repository();
+  writeFileSync(
+    path.join(cwd, "image.bin"),
+    Buffer.from(`\0${githubToken()}\0`)
+  );
+  git(cwd, ["add", "image.bin"]);
+  assert.ok(
+    scanRepository({ cwd, mode: "staged" }).some(
+      (finding) => finding.category === "GitHub token"
+    )
+  );
+  git(cwd, ["-c", "commit.gpgsign=false", "commit", "-qm", "binary fixture"]);
+  assert.ok(
+    scanRepository({ cwd, mode: "history" }).some(
+      (finding) => finding.category === "GitHub token"
+    )
+  );
+});
+
+test("history detects a secret in a commit message even with a fixture marker", () => {
+  const cwd = repository();
+  const secret = githubToken();
+  git(cwd, [
+    "-c",
+    "commit.gpgsign=false",
+    "commit",
+    "--allow-empty",
+    "-qm",
+    `fixture\n\nsecret-scan: allow-next-line -- synthetic\n${secret}`,
+  ]);
+  const findings = scanRepository({ cwd, mode: "history" });
+  assert.equal(findings[0]?.category, "GitHub token");
+  assert.match(findings[0]?.path ?? "", /^commit [0-9a-f]+$/u);
+  assert.ok(!renderFindings(findings).includes(secret));
+});
