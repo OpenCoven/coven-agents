@@ -88,10 +88,9 @@ export function minutePackForPrice(
 /**
  * Pack minutes still available to a tenant right now.
  *
- * Every minute a past period used beyond its bucket was paid from packs, so
- * what remains is everything ever purchased less that historical overflow.
- * The current period's overflow is not subtracted here: admission compares
- * this period's usage against the bucket plus this remainder directly.
+ * The historical parameter name is retained for callers. Reservation admission
+ * passes recorded ledger allocations, never overflow recomputed from a cap.
+ * Callers choose whether to include current-period holds in the subtraction.
  */
 export function remainingPackMinutes(input: {
   priorPeriodOverflow: number;

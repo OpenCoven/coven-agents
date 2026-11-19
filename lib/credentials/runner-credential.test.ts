@@ -25,6 +25,7 @@ function reservation(
     costUnits: 15,
     durationSeconds: null,
     expiresAt: new Date("2026-08-28T15:05:00.000Z"),
+    monthlyCap: null,
     periodDay: "2026-08-28",
     periodMonth: new Date("2026-08-01T00:00:00.000Z"),
     releasedAt: null,
@@ -34,6 +35,7 @@ function reservation(
     settledAt: null,
     state: "reserved",
     tenantHash: "a".repeat(64),
+    userId: null,
     ...overrides,
   };
 }

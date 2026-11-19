@@ -48,6 +48,7 @@ dependency, wave order, or promotion claim was inferred from public artifacts.
 | [`docs/beads-project-sync.md`](../beads-project-sync.md) | Governance | Current | Operating policy | 2026-08-31 | — |
 | [`docs/operations/daytona-cutover-attestation.md`](../operations/daytona-cutover-attestation.md) | Evidence | Current | Repository evidence | 2026-08-31 | — |
 | [`docs/operations/vercel-git-deployment-disablement.md`](../operations/vercel-git-deployment-disablement.md) | Governance | Current | Operating policy | 2026-08-31 | — |
+| [`docs/operations/pack-draw-ledger.md`](../operations/pack-draw-ledger.md) | Proposal | Proposed | Non-authoritative proposal | 2026-11-17 | — |
 <!-- coven-agents-planning-registry:v1:end -->
 
 ## Maintenance rules
