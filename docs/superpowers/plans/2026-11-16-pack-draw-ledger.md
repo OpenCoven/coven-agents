@@ -1,5 +1,7 @@
 # Pack draw ledger implementation plan
 
+This is the historical proposal for the original billing branch. Its migration ordering and gate status reflect that checkpoint. Use the current [cutover runbook](../../operations/pack-draw-ledger.md) for runner 0047 followed by billing 0048 and 0049.
+
 **Goal:** Preserve purchased minutes across cap changes and abuse-key rotation in #225/#226, continuing PR #276.
 
 **Approved design:** The owner selected explicit account-keyed draws and authorized coordination of the shared schema and migration metadata. Admission records a per-reservation pack hold; consumption makes it a debit, settlement refunds only that reservation's unused pack allocation, and release or compensation frees the hold. Accounting never reprices historical usage using a later cap or abuse key. Existing account/cap metadata remains for audit.
