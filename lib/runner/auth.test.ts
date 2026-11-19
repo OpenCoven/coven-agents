@@ -137,7 +137,11 @@ test("bearer owner authorization fails closed, never reads the cookie, and appli
 
   // An authenticated owner still needs the ordinary subscriber decision.
   const authenticated = () =>
-    Promise.resolve({ kind: "authenticated" as const, session });
+    Promise.resolve({
+      credentialId: "fixture-grant",
+      kind: "authenticated" as const,
+      session,
+    });
   assert.deepEqual(
     await bearerAuth(authenticated, () =>
       Promise.resolve({ kind: "subscription_required" })
@@ -153,7 +157,12 @@ test("bearer owner authorization fails closed, never reads the cookie, and appli
   assert.deepEqual(await bearerAuth(authenticated), {
     authVersion: 4,
     kind: "allowed",
-    principal: { kind: "subscriber", tenant: TENANT, userId: USER_ID },
+    principal: {
+      kind: "subscriber",
+      ownerCredentialId: "fixture-grant",
+      tenant: TENANT,
+      userId: USER_ID,
+    },
     session: { kind: "subscriber", tenant: TENANT, userId: USER_ID },
     userId: USER_ID,
   });
