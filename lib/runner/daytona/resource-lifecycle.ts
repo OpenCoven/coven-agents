@@ -16,6 +16,7 @@ import {
 import type { RunnerStore } from "../store";
 import type { RunnerOperator } from "../types";
 import { probeDaytonaHarnesses } from "./process";
+import { inspectDaytonaSandbox } from "./resource-inspection";
 import {
   type DaytonaSandboxInventoryService,
   inventoryDaytonaSandboxes,
@@ -89,6 +90,28 @@ export function daytonaPersistentResourceLifecycle(
         outcome: output.kind,
       });
       return output;
+    },
+    inspect: async (principal, agentId, expected) => {
+      const result = await inspectDaytonaSandbox(principal, agentId, expected, {
+        configuration: dependencies.configuration,
+        // The read-only inventory client: inspection only ever calls `get`.
+        daytona: dependencies.inventoryDaytona,
+        store: dependencies.store,
+      });
+      observeRunnerResourceOperation(dependencies.observe, {
+        operation: "inspect",
+        outcome:
+          result.outcome === "observed"
+            ? "ready"
+            : result.outcome === "not_found"
+              ? "not_found"
+              : result.outcome === "unavailable"
+                ? "unavailable"
+                : result.outcome === "ambiguous"
+                  ? "ambiguous"
+                  : "refused",
+      });
+      return result;
     },
     inventory: async () => {
       const result = await inventoryDaytonaSandboxes({

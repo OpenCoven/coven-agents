@@ -140,6 +140,9 @@ importers:
       framer-motion:
         specifier: ^12.43.0
         version: 12.43.0(react-dom@19.3.1(react@19.3.1))(react@19.3.1)
+      jose:
+        specifier: 6.2.12
+        version: 6.2.12
       katex:
         specifier: ^0.19.1
         version: 0.19.1
@@ -3793,8 +3796,8 @@ packages:
   jose@5.10.0:
     resolution: {integrity: sha512-s+3Al/p9g32Iq+oqXxkW//7jk2Vig6FF1CFqzVXoTUXt2qz89YWbL+OwS17NFYEvxC35n0FKeGO2LGYSxeM2Gg==}
 
-  jose@6.2.17:
-    resolution: {integrity: sha512-wOuK9V1yujQFH5S0ZWmLcDZN7+IKh9bUCC2ZPCf2HDlol3WWHy+PPyNjEI75FXRLMp3vDKQcupP59xhVU95hcg==}
+  jose@6.2.12:
+    resolution: {integrity: sha512-9NiFmJEex0sy2Dk58j2UGBSHgUs2ypF9eZSu4L6vjOX3Dp96Sw1F3uL+H+D1sx02jZZdzUT0HgvCy59CuvXcWw==}
 
   json-schema@0.4.0:
     resolution: {integrity: sha512-es94M3nTIfsEPisRafak+HDLfHXnKBhV3vU5eqPcS3flIWqcxJWgXHXiey3YrpaNsanY5ei1VoYEbOzijuq9BA==}
@@ -5178,7 +5181,7 @@ snapshots:
   '@auth/core@0.41.3':
     dependencies:
       '@panva/hkdf': 1.2.1
-      jose: 6.2.17
+      jose: 6.2.12
       oauth4webapi: 3.8.7
       preact: 10.24.3
       preact-render-to-string: 6.5.11(preact@10.24.3)
@@ -8528,7 +8531,7 @@ snapshots:
 
   jose@5.10.0: {}
 
-  jose@6.2.17: {}
+  jose@6.2.12: {}
 
   json-schema@0.4.0: {}
 

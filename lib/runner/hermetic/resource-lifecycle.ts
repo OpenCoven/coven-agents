@@ -82,6 +82,18 @@ export function hermeticPersistentResourceLifecycle(
       });
       return result;
     },
+    // Hermetic certification has no provider sandbox to observe.
+    inspect: () => {
+      observeRunnerResourceOperation(observe, {
+        operation: "inspect",
+        outcome: "unavailable",
+      });
+      return Promise.resolve({
+        outcome: "unavailable" as const,
+        source: "provider" as const,
+        version: 1 as const,
+      });
+    },
     inventory: () => {
       observeRunnerResourceOperation(observe, {
         operation: "inventory",

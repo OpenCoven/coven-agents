@@ -63,8 +63,10 @@ const applicationRouteFiles = [
   "app/(chat)/api/vote/route.ts",
   "app/api/account/avatar/route.ts",
   "app/api/admin/route.ts",
+  "app/api/agents/[id]/owner-credentials/route.ts",
   "app/api/agents/[id]/route.ts",
   "app/api/agents/[id]/runs/route.ts",
+  "app/api/agents/[id]/sandbox/inspection/route.ts",
   "app/api/agents/route.ts",
   "app/api/analytics/route.ts",
   "app/api/billing/portal/route.ts",
@@ -121,6 +123,10 @@ const contractSourceFiles = [
   "packages/agent-contracts/src/identity.ts",
   "packages/agent-contracts/src/index.test.ts",
   "packages/agent-contracts/src/index.ts",
+  "packages/agent-contracts/src/sandbox-binding.test.ts",
+  "packages/agent-contracts/src/sandbox-binding.ts",
+  "packages/agent-contracts/src/sandbox-inspection.test.ts",
+  "packages/agent-contracts/src/sandbox-inspection.ts",
   "packages/agent-contracts/src/team.test.ts",
 ] as const;
 const credentialSourceFiles = [
@@ -258,6 +264,8 @@ const environmentKeys = [
   "STRIPE_SECRET_KEY",
   "STRIPE_WEBHOOK_SECRET",
   "SUBSCRIPTION_CHECKOUT_ENABLED",
+  "WORKOS_API_KEY",
+  "WORKOS_CLIENT_ID",
 ] as const;
 const productionDependencies = [
   "@ai-sdk/otel",
@@ -297,6 +305,7 @@ const productionDependencies = [
   "drizzle-orm",
   "fast-deep-equal",
   "framer-motion",
+  "jose",
   "katex",
   "lucide-react",
   "motion",

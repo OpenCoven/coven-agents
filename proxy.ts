@@ -5,6 +5,7 @@ import {
   betaVerdict,
   isAllowedIdentity,
   isCookielessGitHubToolRoute,
+  isOwnerCredentialRoute,
   readBetaGate,
 } from "./lib/beta";
 import { guestRegex, isDevelopmentEnvironment } from "./lib/constants";
@@ -49,7 +50,11 @@ export async function proxy(request: NextRequest) {
     return NextResponse.next();
   }
 
-  if (isCookielessGitHubToolRoute(pathname, base)) {
+  if (
+    isCookielessGitHubToolRoute(pathname, base) ||
+    (request.headers.has("authorization") &&
+      isOwnerCredentialRoute(pathname, request.method, base))
+  ) {
     return NextResponse.next();
   }
 

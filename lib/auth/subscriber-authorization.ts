@@ -6,6 +6,8 @@ import {
 } from "./subscriber-access";
 
 type SubscriptionRecord = {
+  campaignExpiresAt?: Date | null;
+  campaignGrantedAt?: Date | null;
   authVersion?: number | null;
   subscribedUntil?: Date | null;
 };
@@ -35,6 +37,8 @@ export async function revalidateSubscriberAccess(
     !sessionAuthorityMatches({
       database: {
         authVersion: user.authVersion ?? Number.NaN,
+        campaignExpiresAt: user.campaignExpiresAt,
+        campaignGrantedAt: user.campaignGrantedAt,
         subscribedUntil: user.subscribedUntil ?? null,
       },
       now,

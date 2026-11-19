@@ -150,6 +150,8 @@ const RUNTIME_CONFIGURATION_KEYS = [
   "VERCEL_ENV",
   "VERCEL_PROJECT_PRODUCTION_URL",
   "VERCEL_URL",
+  "WORKOS_CLIENT_ID",
+  "WORKOS_API_KEY",
 ] as const;
 
 function assertRejectedWithMessage(
@@ -157,7 +159,15 @@ function assertRejectedWithMessage(
   message: string
 ) {
   assert.notEqual(result.status, 0);
-  assert.equal(result.stderr.trim(), message);
+  assert.equal(
+    result.stderr.trim(),
+    message,
+    JSON.stringify({
+      error: result.error?.message,
+      signal: result.signal,
+      status: result.status,
+    })
+  );
 }
 
 function emptyEnvironmentDirectory(): string {

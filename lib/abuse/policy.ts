@@ -103,6 +103,9 @@ const POLICIES = Object.freeze({
     64_000,
     rateClass(5, 60, 25, 86_400)
   ),
+  // Read-only, but each admitted call costs one provider read.
+  runner_sandbox_inspect: closedPolicy(["ip", "user"], 1024, EXPENSIVE_READ),
+  runner_sandbox_inspect_auth: closedPolicy(["ip"], 1024, EXPENSIVE_READ),
   runner_stop: closedPolicy(["ip", "tenant"], 1024, DESTRUCTIVE_WRITE),
   runner_write: closedPolicy(["ip", "user"], 64_000, SENSITIVE_WRITE),
   skill_delete: closedPolicy(["ip", "tenant"], 0, DESTRUCTIVE_WRITE),

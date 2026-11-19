@@ -8,6 +8,8 @@ import { configuredApplicationOrigin } from "@/lib/auth/application-origin";
 import type { SessionLike } from "@/lib/auth/subscriber-access";
 import { createRunnerAuth } from "./auth";
 import { createRunnerHttpHandlers, type RunnerHttpHandlers } from "./http";
+import { authenticateBearerOwner } from "./owner-authentication";
+import { createSandboxInspectionHandler } from "./sandbox-inspection-http";
 
 function productionRuntime() {
   return import("./runtime");
@@ -50,6 +52,29 @@ async function authorizeSubscriberAccess(session: SessionLike) {
 }
 
 /**
+ * Bearer-only owner route. It shares abuse control and the subscriber service
+ * with the browser routes but never consults the session cookie.
+ */
+export function productionSandboxInspectionHandler(): (
+  request: Request,
+  agentId: string
+) => Promise<Response> {
+  return createSandboxInspectionHandler({
+    auth: createRunnerAuth({
+      authenticate,
+      authenticateBearerOwner,
+      authorizeSubscriberAccess,
+    }),
+    createService: async (subscriber) => {
+      const runtime = await productionRuntime();
+      return runtime.createProductionRunnerService(subscriber.session);
+    },
+    enforceAbuse: enforceAbusePolicy,
+    ipAddress: (request) => ipAddress(request) ?? null,
+  });
+}
+
+/**
  * Core runtime and diagnostics remain behind separate per-request imports.
  * Importing a route therefore resolves neither database nor Daytona
  * configuration until an authorized handler invokes the relevant dependency.
@@ -60,6 +85,7 @@ export function productionRunnerHttpHandlers(): RunnerHttpHandlers {
     appOrigin: () => configuredApplicationOrigin(process.env),
     auth: createRunnerAuth({
       authenticate,
+      authenticateBearerOwner,
       authorizeSubscriberAccess,
     }),
     createOperatorService: async () => {

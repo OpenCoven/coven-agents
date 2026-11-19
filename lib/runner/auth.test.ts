@@ -7,6 +7,7 @@ import {
   diagnosticSecretFromEnvironment,
   MAX_PRIVILEGED_RUNNER_SECRET_LENGTH,
   manualReconcileSecretFromEnvironment,
+  type RunnerBearerOwnerAuthentication,
   timingSafeSecretEqual,
 } from "./auth";
 
@@ -85,6 +86,88 @@ test("subscriber authorization fails closed for signed-out, expired, stale, and 
   assert.deepEqual(await unavailable.authorizeSubscriber(), {
     kind: "subscription_required",
   });
+});
+
+test("bearer owner authorization fails closed, never reads the cookie, and applies the subscriber decision", async () => {
+  const request = new Request("https://agents.example/api", {
+    headers: { authorization: "Bearer aa.bb.cc" },
+  });
+  const session = {
+    user: { authVersion: 4, id: USER_ID, type: "subscriber" as const },
+  };
+  let cookieReads = 0;
+  let accessChecks = 0;
+  const bearerAuth = (
+    authenticateBearerOwner:
+      | ((request: Request) => Promise<RunnerBearerOwnerAuthentication>)
+      | undefined,
+    authorize: () => Promise<SubscriberAccessDecision> = () =>
+      Promise.resolve(allowedAccess())
+  ) => {
+    const auth = createRunnerAuth({
+      authenticate: () => {
+        cookieReads += 1;
+        return Promise.resolve(session);
+      },
+      authenticateBearerOwner,
+      authorizeSubscriberAccess: () => {
+        accessChecks += 1;
+        return authorize();
+      },
+    });
+    assert.ok(auth.authorizeBearerOwner);
+    return auth.authorizeBearerOwner(request);
+  };
+
+  // Not configured, or the identity check itself failed: unavailable.
+  assert.deepEqual(await bearerAuth(undefined), { kind: "unavailable" });
+  assert.deepEqual(
+    await bearerAuth(() => Promise.reject(new Error("do-not-log"))),
+    { kind: "unavailable" }
+  );
+  // A refused or unavailable identity is passed through unchanged and never
+  // reaches the subscriber decision.
+  for (const kind of ["unauthorized", "unavailable"] as const) {
+    // biome-ignore lint/performance/noAwaitInLoops: Cases run in order so a failure names its own input.
+    assert.deepEqual(await bearerAuth(() => Promise.resolve({ kind })), {
+      kind,
+    });
+  }
+  assert.equal(accessChecks, 0);
+
+  // An authenticated owner still needs the ordinary subscriber decision.
+  const authenticated = () =>
+    Promise.resolve({
+      credentialId: "fixture-grant",
+      kind: "authenticated" as const,
+      session,
+    });
+  assert.deepEqual(
+    await bearerAuth(authenticated, () =>
+      Promise.resolve({ kind: "subscription_required" })
+    ),
+    { kind: "subscription_required" }
+  );
+  assert.deepEqual(
+    await bearerAuth(authenticated, () =>
+      Promise.reject(new Error("subscription lookup failed"))
+    ),
+    { kind: "subscription_required" }
+  );
+  assert.deepEqual(await bearerAuth(authenticated), {
+    authVersion: 4,
+    kind: "allowed",
+    principal: {
+      kind: "subscriber",
+      ownerCredentialId: "fixture-grant",
+      tenant: TENANT,
+      userId: USER_ID,
+    },
+    session: { kind: "subscriber", tenant: TENANT, userId: USER_ID },
+    userId: USER_ID,
+  });
+  assert.equal(accessChecks, 3);
+  assert.equal(cookieReads, 0);
 });
 
 test("operator diagnostics accept only their separate timing-safe bearer secret", () => {
