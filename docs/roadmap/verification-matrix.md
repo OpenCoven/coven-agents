@@ -4,6 +4,12 @@
 
 PR #302 is merged at `181e389fd5e61b44b7626d8fd541209c88b9cfd5`. Its tree matches the tested PR head `4f06dfe342ab366f570297276b2f772cbf22f424`. Frozen installation, build, 2,927 unit tests, 17 disposable PostgreSQL tests, and 34 fixture-backed browser tests passed on the PR tree. Eight unit cases and 16 browser cases were skipped by their existing conditions. Check and typecheck passed again on the merged checkout. The first concurrent unit run hit a test deadline, and the serial full rerun passed with the original deadline. Isolated-checkout hygiene passed. Shared-checkout hygiene reported other active local work. [Baseline verification receipt](https://github.com/OpenCoven/coven-agents/pull/302#issuecomment-7000058884)
 
+## Castles contract checkpoint
+
+The scoped owner and inspection merge is `d1df95c2e202576ff396f786edffd90ece4f303d`. The qualified PR tree passed 3,209 unit, 23 disposable PostgreSQL, and 35 hermetic browser cases. Its inspection contract is pinned in the #296 closure, and the owner credential acceptance is recorded in #297. [Inspection pin](https://github.com/OpenCoven/coven-agents/issues/296#issuecomment-7000403983) · [Owner credential evidence](https://github.com/OpenCoven/coven-agents/issues/297#issuecomment-7000412838)
+
+Guarded binding and execution evidence merged at `1496f0bbb09ac43de596e90baca1ef835caf648b`. The merge tree matches the qualified tree that passed 3,227 unit, 24 disposable PostgreSQL, and 35 hermetic browser cases. The exact merged checkout passed static checks, typecheck, and the focused binding and prewarm tests. Live Castles and Daytona acceptance remains pending. [Guarded binding evidence](https://github.com/OpenCoven/coven-agents/issues/298#issuecomment-7000529257)
+
 ## Historical release evidence
 
 This matrix records implemented source and retained evidence as of 2026-09-09
