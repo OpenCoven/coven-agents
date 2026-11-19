@@ -1,5 +1,11 @@
 # Verification matrix
 
+## Local baseline checkpoint
+
+PR #302 is merged at `181e389fd5e61b44b7626d8fd541209c88b9cfd5`. Its tree matches the tested PR head `4f06dfe342ab366f570297276b2f772cbf22f424`. Frozen installation, build, 2,927 unit tests, 17 disposable PostgreSQL tests, and 34 fixture-backed browser tests passed on the PR tree. Eight unit cases and 16 browser cases were skipped by their existing conditions. Check and typecheck passed again on the merged checkout. The first concurrent unit run hit a test deadline, and the serial full rerun passed with the original deadline. Isolated-checkout hygiene passed. Shared-checkout hygiene reported other active local work. [Baseline verification receipt](https://github.com/OpenCoven/coven-agents/pull/302#issuecomment-7000058884)
+
+## Historical release evidence
+
 This matrix records implemented source and retained evidence as of 2026-09-09
 for application baseline `93b4784b8622cf371e63347f034df3cdd8aac70d`
 and draft [PR #268](https://github.com/OpenCoven/coven-agents/pull/268), which
