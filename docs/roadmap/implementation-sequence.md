@@ -2,7 +2,7 @@
 
 ## Current delivery checkpoint
 
-The baseline gate repair shipped in #302. Scoped owner credentials and inspection shipped in #311, and guarded binding and redacted run evidence shipped in #312. Issues #296, #297, and #298 are complete at the repository contract boundary. Keep the verified merge SHAs in the Castles consumer pins. Finish the contributor and Git hook update in #310, which incorporates the #305 guide. Billing #276 follows runner migration 0047 and requires the 0048/0049 upgrade evidence and an approved paid-history cutover. Keep dependency updates in their own qualification lane.
+The baseline gate repair shipped in #302. Scoped owner credentials and inspection shipped in #311, and guarded binding and redacted run evidence shipped in #312. Issues #296, #297, and #298 are complete at the repository contract boundary. Keep the verified merge SHAs in the Castles consumer pins. The contributor setup and Git hook update carries the reviewed changes from #310 and the guide from #305. Billing #276 follows runner migration 0047 and requires the 0048/0049 upgrade evidence and an approved paid-history cutover. Keep dependency updates in their own qualification lane.
 
 - #299 is assigned to BunsDev. Next, carry server-enforced read-only permission through owner admission and prove a permitted read and denied mutation in the recording executor.
 - #300 needs the lifecycle owner’s bootstrap decision. Record the selected snapshot or install contract and prove the exact-pinned path and refusal when its prerequisites are missing before promoting it.
