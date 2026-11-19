@@ -1444,6 +1444,21 @@ async function resolveBoundDaytonaSandbox(
   if (recordRefusal) {
     throw new DaytonaSandboxBindingRefusedError(recordRefusal);
   }
+  const sandbox = await verifyDaytonaBinding(
+    agent,
+    binding,
+    configuration,
+    dependencies
+  );
+  return { agent, sandbox };
+}
+
+export async function verifyDaytonaBinding(
+  agent: RunnerAgentRecord,
+  binding: RunnerSandboxBinding,
+  configuration: DaytonaSandboxConfiguration,
+  dependencies: Pick<DaytonaSandboxDependencies, "daytona" | "lifecycle">
+): Promise<Sandbox> {
   let sandbox: Sandbox;
   try {
     sandbox = await withLifecycleAbort(
@@ -1493,7 +1508,7 @@ async function resolveBoundDaytonaSandbox(
   ) {
     throw new DaytonaSandboxBindingRefusedError("credential_boundary_missing");
   }
-  return { agent, sandbox };
+  return sandbox;
 }
 
 /**

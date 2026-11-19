@@ -27,11 +27,13 @@ import {
   repairDaytonaSandboxResourceFloors,
 } from "./resource-repair";
 import {
+  DaytonaSandboxBindingRefusedError,
   type DaytonaSandboxConfiguration,
   type DaytonaSandboxLifecycleDependencies,
   type DaytonaSandboxService,
   deleteDaytonaSandbox,
   resetDaytonaSandboxForCancellation,
+  verifyDaytonaBinding,
   warmDaytonaSandbox,
 } from "./sandbox";
 
@@ -65,6 +67,39 @@ export function daytonaPersistentResourceLifecycle(
   dependencies: DaytonaPersistentResourceLifecycleDependencies
 ): RunnerPersistentResourceLifecycle {
   return {
+    bind: async (principal, agentId, binding) => {
+      try {
+        return await dependencies.store.bindExistingSandbox(
+          principal,
+          agentId,
+          binding,
+          async (agent) => {
+            const configuration = dependencies.configuration();
+            const sandbox = await verifyDaytonaBinding(
+              agent,
+              binding,
+              configuration,
+              {
+                daytona: dependencies.daytona(),
+                lifecycle: dependencies.lifecycle,
+              }
+            );
+            if (
+              !configuration.configurationId ||
+              sandbox.labels?.configurationId !== configuration.configurationId
+            ) {
+              throw new DaytonaSandboxBindingRefusedError(
+                "configuration_drift"
+              );
+            }
+          }
+        );
+      } catch (error) {
+        return error instanceof DaytonaSandboxBindingRefusedError
+          ? error.reason
+          : "unavailable";
+      }
+    },
     decommission: async (principal, agentId) => {
       let output: RunnerResourceDecommissionResult;
       try {

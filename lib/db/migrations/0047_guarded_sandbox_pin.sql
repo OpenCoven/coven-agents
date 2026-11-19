@@ -1,0 +1,4 @@
+ALTER TABLE "RunnerAgent" ADD COLUMN "pinnedSandboxId" varchar(128);--> statement-breakpoint
+ALTER TABLE "RunnerAgent" ADD COLUMN "pinnedSandboxGeneration" integer;--> statement-breakpoint
+ALTER TABLE "RunnerAgent" ADD CONSTRAINT "RunnerAgent_pinnedSandboxId_key" UNIQUE("pinnedSandboxId");--> statement-breakpoint
+ALTER TABLE "RunnerAgent" ADD CONSTRAINT "RunnerAgent_pinnedSandbox_valid" CHECK (("RunnerAgent"."pinnedSandboxId" IS NULL AND "RunnerAgent"."pinnedSandboxGeneration" IS NULL) OR ("RunnerAgent"."pinnedSandboxId" IS NOT NULL AND "RunnerAgent"."pinnedSandboxGeneration" IS NOT NULL AND "RunnerAgent"."pinnedSandboxGeneration" >= 0));

@@ -1,6 +1,7 @@
 import "server-only";
 
 import type {
+  RunSandboxBindingRefusalReason,
   SandboxInspectionRequest,
   SandboxInspectionResult,
 } from "@opencoven/agent-contracts";
@@ -123,6 +124,13 @@ export function runnerResourceInventoryLimit(limit?: number): number {
  * behind this boundary.
  */
 export type RunnerPersistentResourceLifecycle = Readonly<{
+  bind?: (
+    principal: RunnerPrincipal,
+    agentId: string,
+    binding: SandboxInspectionRequest
+  ) => Promise<
+    "bound" | "not_found" | "unavailable" | RunSandboxBindingRefusalReason
+  >;
   decommission: (
     principal: RunnerPrincipal,
     agentId: string

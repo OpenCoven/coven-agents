@@ -330,6 +330,13 @@
       "when": 1794971128751,
       "tag": "0046_runner_owner_credentials",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1795063695092,
+      "tag": "0047_guarded_sandbox_pin",
+      "breakpoints": true
     }
   ]
 }
