@@ -331,7 +331,15 @@ async function doctor(): Promise<number> {
     problems.push("gpg.format is not set (expected: ssh, openpgp, or x509)");
   }
 
+  if (process.env.HUSKY === "0") {
+    problems.push("Husky is disabled by HUSKY=0");
+  }
   if (resolve(hooksPath) === resolve(".husky/_")) {
+    try {
+      accessSync(resolve(hooksPath, "h"), constants.R_OK);
+    } catch {
+      problems.push("Missing Husky dispatcher (run corepack pnpm exec husky)");
+    }
     for (const hook of ["pre-commit", "commit-msg", "pre-push"]) {
       try {
         accessSync(resolve(hooksPath, hook), constants.X_OK);
@@ -339,6 +347,11 @@ async function doctor(): Promise<number> {
         problems.push(
           `Missing executable ${hook} hook (run corepack pnpm exec husky)`
         );
+      }
+      try {
+        accessSync(resolve(".husky", hook), constants.R_OK);
+      } catch {
+        problems.push(`Missing tracked hook script .husky/${hook}`);
       }
     }
   } else {

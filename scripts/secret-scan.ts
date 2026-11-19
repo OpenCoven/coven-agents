@@ -404,7 +404,7 @@ function scanHistory(
 
   const log = git(
     cwd,
-    ["log", "-z", "--format=%H%x00%B", ...selector],
+    ["log", "--no-show-signature", "-z", "--format=%H%x00%B", ...selector],
     "utf8"
   ) as string;
   const fields = log.split("\0");
