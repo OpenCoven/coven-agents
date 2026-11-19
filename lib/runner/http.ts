@@ -1344,17 +1344,36 @@ export function createRunnerHttpHandlers(
           case "not_found":
             return runNotFound(dependencies);
           case "in_progress":
+          case "stopped": {
             schedule(dependencies, async () => {
               await service.reconcileAndDispatch();
             });
+            const status = result.kind === "in_progress" ? 202 : 200;
+            const credentialId = context.principal.ownerCredentialId;
+            if (credentialId) {
+              const read = await dependencies.auth.authorizeBearerOwner?.(
+                request,
+                { scope: "run:read", target: { runId } }
+              );
+              if (
+                read?.kind !== "allowed" ||
+                read.principal.ownerCredentialId !== credentialId
+              ) {
+                return new Response(null, {
+                  headers: { "cache-control": "no-store" },
+                  status: status === 202 ? 202 : 204,
+                });
+              }
+            }
             return runnerJsonResponse(
               runSnapshotEnvelopeSchema,
               {
                 apiVersion: AGENT_RUNNER_API_VERSION,
                 run: result.run,
               },
-              { status: 202 }
+              { status }
             );
+          }
           case "stale_version":
             return runnerErrorResponse(dependencies, "stale_version");
           case "unavailable":
@@ -1371,14 +1390,6 @@ export function createRunnerHttpHandlers(
               await service.reconcileAndDispatch();
             });
             return runnerErrorResponse(dependencies, "cleanup_required");
-          case "stopped":
-            schedule(dependencies, async () => {
-              await service.reconcileAndDispatch();
-            });
-            return runnerJsonResponse(runSnapshotEnvelopeSchema, {
-              apiVersion: AGENT_RUNNER_API_VERSION,
-              run: result.run,
-            });
           default:
             return unreachableResult(result);
         }
