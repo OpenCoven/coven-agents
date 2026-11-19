@@ -1,6 +1,6 @@
 import "server-only";
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type {
   CommandEvidence,
   FileEvidence,
@@ -197,7 +197,9 @@ function sameSandboxBinding(
 }
 
 function asAgent(row: Record<string, unknown>): RunnerAgentRecord {
+  const pinnedSandboxId = optionalColumn<string>(row, "pinnedSandboxId");
   return {
+    ...(pinnedSandboxId ? { pinnedSandboxId } : {}),
     createdAt: timestampColumn(row, "createdAt"),
     daytonaSandboxId: column(row, "daytonaSandboxId"),
     description: column(row, "description"),
@@ -766,6 +768,23 @@ function runSnapshot(run: RunnerRunRecord): RunSnapshot {
   return {
     agentId: run.agentId,
     apiVersion: AGENT_RUNNER_API_VERSION,
+    ...(run.startedAt && run.sandboxBinding
+      ? {
+          executedSandbox: {
+            bindingDigest: createHash("sha256")
+              .update(
+                JSON.stringify([
+                  "bound-sandbox-v1",
+                  run.tenant,
+                  run.agentId,
+                  run.sandboxBinding.expectedSandboxId,
+                ])
+              )
+              .digest("hex"),
+            generation: run.sandboxBinding.expectedGeneration,
+          },
+        }
+      : {}),
     commandEvidence: run.commandEvidence,
     completedAt: run.completedAt?.toISOString() ?? null,
     createdAt: run.createdAt.toISOString(),
@@ -1817,6 +1836,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                 AND "tenant" = ${principal.tenant}
                 AND "version" = ${input.expectedVersion}
                 AND "sandboxGeneration" = ${input.expectedGeneration}
+                AND "pinnedSandboxId" IS NULL
                 AND "sandboxLifecycle" IN ('provisioning', 'provisioning_ambiguous')
               RETURNING *`
           )
@@ -2579,6 +2599,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                 AND "version" = ${input.expectedVersion}
                 AND "sandboxGeneration" = ${input.expectedGeneration}
                 AND "daytonaSandboxId" = ${input.sandboxId}
+                AND "pinnedSandboxId" IS NULL
                 AND "sandboxLifecycle" = 'ready'
                 AND "status" = 'idle'
                 AND "warmStatus" <> 'provisioning'
@@ -2621,6 +2642,9 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           return { kind: "not_found" };
         }
         const agent = asAgent(current);
+        if (agent.pinnedSandboxId) {
+          return { kind: "stale_version" };
+        }
         if (
           agent.sandboxLifecycle === "ready" &&
           agent.warmStatus === "provisioning"
@@ -2663,6 +2687,85 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         return updated
           ? { kind: "started", value: asAgent(updated) }
           : { kind: "stale_version" };
+      }),
+
+    bindExistingSandbox: (
+      principal: RunnerPrincipal,
+      agentId: string,
+      binding: RunnerSandboxBinding,
+      verify: (agent: RunnerAgentRecord) => Promise<void>
+    ) =>
+      database.transaction(async (transaction) => {
+        const [row] = await transaction.execute(
+          statement(
+            "lock-agent-for-sandbox-bind",
+            { agentId, tenant: principal.tenant },
+            sql`SELECT * FROM "RunnerAgent" WHERE id=${agentId} AND tenant=${principal.tenant} FOR UPDATE`
+          )
+        );
+        if (!row) {
+          return "not_found" as const;
+        }
+        const agent = asAgent(row);
+        if (agent.sandboxGeneration !== binding.expectedGeneration) {
+          return "generation_mismatch" as const;
+        }
+        if (
+          (row.pinnedSandboxId &&
+            row.pinnedSandboxId !== binding.expectedSandboxId) ||
+          (agent.daytonaSandboxId &&
+            agent.daytonaSandboxId !== binding.expectedSandboxId)
+        ) {
+          return "sandbox_id_mismatch" as const;
+        }
+        if (
+          !(
+            (agent.sandboxLifecycle === "unprovisioned" &&
+              !agent.daytonaSandboxId) ||
+            (agent.sandboxLifecycle === "ready" &&
+              agent.daytonaSandboxId === binding.expectedSandboxId)
+          )
+        ) {
+          return "lifecycle_not_ready" as const;
+        }
+        const [active] = await transaction.execute(
+          statement(
+            "check-sandbox-bind-fences",
+            { agentId },
+            sql`SELECT id FROM "RunnerRun" WHERE "agentId"=${agentId} AND ("dispatchState" <> 'terminal' OR "daytonaAttemptId" IS NOT NULL OR "daytonaCommandId" IS NOT NULL OR "daytonaSessionId" IS NOT NULL) LIMIT 1`
+          )
+        );
+        if (active) {
+          return "fence_outstanding" as const;
+        }
+        if (agent.warmStatus === "provisioning") {
+          return "fence_outstanding" as const;
+        }
+        const [other] = await transaction.execute(
+          statement(
+            "check-other-sandbox-binding",
+            { agentId },
+            sql`SELECT id FROM "RunnerAgent" WHERE id <> ${agentId} AND ("daytonaSandboxId"=${binding.expectedSandboxId} OR "pinnedSandboxId"=${binding.expectedSandboxId}) LIMIT 1`
+          )
+        );
+        if (other) {
+          return "ownership_mismatch" as const;
+        }
+        await verify(agent);
+        if (
+          row.pinnedSandboxId === binding.expectedSandboxId &&
+          row.pinnedSandboxGeneration === binding.expectedGeneration
+        ) {
+          return "bound" as const;
+        }
+        await transaction.execute(
+          statement(
+            "pin-agent-sandbox",
+            { agentId },
+            sql`UPDATE "RunnerAgent" SET "pinnedSandboxId"=${binding.expectedSandboxId},"pinnedSandboxGeneration"=${binding.expectedGeneration},"daytonaSandboxId"=${binding.expectedSandboxId},"sandboxLifecycle"='ready',"version"="version"+1,"sandboxUpdatedAt"=clock_timestamp(),"updatedAt"=clock_timestamp() WHERE id=${agentId} AND tenant=${principal.tenant}`
+          )
+        );
+        return "bound" as const;
       }),
 
     /**
@@ -4737,6 +4840,9 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           return { kind: "not_found" };
         }
         const agent = asAgent(current);
+        if (agent.pinnedSandboxId) {
+          return { kind: "stale_version" };
+        }
         if (
           agent.sandboxLifecycle === "provisioning" &&
           agent.sandboxUpdatedAt > input.provisioningStaleBefore
@@ -4969,7 +5075,8 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
               )
               SELECT *
               FROM "mapped"
-              WHERE "sandboxLifecycle" IN ('ready', 'resizing')
+              WHERE "pinnedSandboxId" IS NULL
+                AND "sandboxLifecycle" IN ('ready', 'resizing')
                 AND "status" = 'idle'
                 AND "warmStatus" <> 'provisioning'
                 AND NOT EXISTS (
@@ -5147,7 +5254,6 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
       const executionPermission = input.executionPermission ?? "unrestricted";
       const githubBrokerPolicy = input.githubBrokerPolicy ?? null;
       const teamStepId = input.teamStepId ?? null;
-      const sandboxBinding = input.sandboxBinding ?? null;
       return database.transaction(async (transaction) => {
         const [agent] = await transaction.execute(
           statement(
@@ -5162,6 +5268,30 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         if (!agent) {
           return { kind: "not_found" };
         }
+        const pinnedId = optionalColumn<string>(agent, "pinnedSandboxId");
+        const pinnedBinding = pinnedId
+          ? {
+              expectedGeneration: column<number>(
+                agent,
+                "pinnedSandboxGeneration"
+              ),
+              expectedSandboxId: pinnedId,
+            }
+          : null;
+        if (
+          pinnedBinding &&
+          input.sandboxBinding &&
+          !sameSandboxBinding(pinnedBinding, input.sandboxBinding)
+        ) {
+          return {
+            kind: "sandbox_binding_refused",
+            reason:
+              pinnedId === input.sandboxBinding.expectedSandboxId
+                ? "generation_mismatch"
+                : "sandbox_id_mismatch",
+          };
+        }
+        const sandboxBinding = input.sandboxBinding ?? pinnedBinding;
         const existingOperation = await lockedOperationRun(
           transaction,
           input,
@@ -5179,7 +5309,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           }
           return matchesRunRequest(
             existingOperation,
-            input,
+            { ...input, sandboxBinding },
             executionPermission
           )
             ? { kind: "duplicate", run: runSnapshot(existingOperation) }
@@ -5501,7 +5631,11 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         if (!(await mayReturnExistingRun(transaction, principal, run))) {
           return { kind: "not_found" };
         }
-        return matchesRunRequest(run, input, executionPermission)
+        return matchesRunRequest(
+          run,
+          { ...input, sandboxBinding },
+          executionPermission
+        )
           ? { kind: "duplicate", run: runSnapshot(run) }
           : { kind: "conflict", run: runSnapshot(run) };
       });
@@ -5572,6 +5706,36 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           throw new Error("Locked Runner agent changed before update.");
         }
         return { kind: "updated", value: asAgent(updated) };
+      }),
+
+    // The agent lock also protects bindExistingSandbox. Retain it through
+    // bounded provider preparation so a concurrent bind cannot pass mid-reuse.
+    withUnpinnedDaytonaSandboxReuse: (
+      principal: RunnerPrincipal,
+      agent: RunnerAgentRecord,
+      prepare: () => Promise<void>
+    ): Promise<boolean> =>
+      database.transaction(async (transaction) => {
+        const [current] = await transaction.execute(
+          statement(
+            "lock-unpinned-sandbox-for-reuse",
+            { agentId: agent.id, tenant: principal.tenant },
+            sql`SELECT id FROM "RunnerAgent"
+              WHERE id = ${agent.id}
+                AND tenant = ${principal.tenant}
+                AND "version" = ${agent.version}
+                AND "sandboxGeneration" = ${agent.sandboxGeneration}
+                AND "daytonaSandboxId" = ${agent.daytonaSandboxId}
+                AND "pinnedSandboxId" IS NULL
+                AND "sandboxLifecycle" = 'ready'
+              FOR UPDATE`
+          )
+        );
+        if (!current) {
+          return false;
+        }
+        await prepare();
+        return true;
       }),
   };
 }

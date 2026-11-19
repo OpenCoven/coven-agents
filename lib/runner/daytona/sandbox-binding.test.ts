@@ -20,6 +20,7 @@ import type {
 } from "../types";
 import { configuredDaytonaRunnerExecutor } from "./executor";
 import { daytonaSandboxLabels, daytonaSandboxName } from "./names";
+import { daytonaPersistentResourceLifecycle } from "./resource-lifecycle";
 import {
   DAYTONA_CREDENTIAL_BOUNDARY_VERSION,
   DaytonaSandboxBindingRefusedError,
@@ -819,3 +820,41 @@ test("bound dispatch accepts the same domain allow list in a different order", a
   assert.equal(result.sandbox.id, SANDBOX_ID);
   assert.deepEqual(fake.calls, ONE_GET);
 });
+
+for (const scenario of [
+  ...providerRefusals,
+  {
+    expected: "bound",
+    name: "valid pre-stamped identity",
+    sandbox: (data: SandboxData) => Promise.resolve(data),
+  },
+]) {
+  test(`guarded owner bind verifies ${scenario.name} with one exact provider read`, async () => {
+    const fake = recording({ get: () => scenario.sandbox(recording().data) });
+    const lifecycle = daytonaPersistentResourceLifecycle({
+      configuration: () => configuration,
+      daytona: () => fake.daytona,
+      inventoryDaytona: () => assert.fail("inventory"),
+      operator: { kind: "runner-operator" },
+      repairDaytona: () => assert.fail("repair"),
+      store: {
+        bindExistingSandbox: async (_principal, _agentId, _binding, verify) => {
+          await verify(
+            agent({ daytonaSandboxId: null, sandboxLifecycle: "unprovisioned" })
+          );
+          return "bound";
+        },
+      } as Pick<RunnerStore, "bindExistingSandbox"> as RunnerStore,
+    });
+    assert.ok(lifecycle.bind);
+    assert.equal(
+      await lifecycle.bind(
+        { kind: "subscriber", tenant: TENANT, userId: AGENT_ID },
+        AGENT_ID,
+        binding
+      ),
+      scenario.expected
+    );
+    assert.deepEqual(fake.calls, [`provider.get:${SANDBOX_ID}`]);
+  });
+}

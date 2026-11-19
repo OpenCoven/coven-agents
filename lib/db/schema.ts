@@ -727,6 +727,8 @@ export const runnerAgent = pgTable(
       length: AGENT_RUNNER_LIMITS.maxModelLength,
     }).notNull(),
     name: varchar("name", { length: 64 }).notNull(),
+    pinnedSandboxGeneration: integer("pinnedSandboxGeneration"),
+    pinnedSandboxId: varchar("pinnedSandboxId", { length: 128 }),
     runtime: varchar("runtime", {
       enum: ["codex", "claude", "copilot"],
       length: 16,
@@ -776,6 +778,11 @@ export const runnerAgent = pgTable(
     }),
   },
   (table) => [
+    unique("RunnerAgent_pinnedSandboxId_key").on(table.pinnedSandboxId),
+    check(
+      "RunnerAgent_pinnedSandbox_valid",
+      sql`(${table.pinnedSandboxId} IS NULL AND ${table.pinnedSandboxGeneration} IS NULL) OR (${table.pinnedSandboxId} IS NOT NULL AND ${table.pinnedSandboxGeneration} IS NOT NULL AND ${table.pinnedSandboxGeneration} >= 0)`
+    ),
     unique("RunnerAgent_id_tenant_key").on(table.id, table.tenant),
     index("RunnerAgent_tenant_updatedAt_idx").on(table.tenant, table.updatedAt),
     index("RunnerAgent_sandbox_recovery_idx")

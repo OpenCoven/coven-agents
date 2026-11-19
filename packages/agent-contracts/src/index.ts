@@ -576,6 +576,13 @@ export const runSnapshotSchema = z
     completedAt: datetimeSchema.nullable().default(null),
     createdAt: datetimeSchema,
     error: runErrorSchema.nullable().optional(),
+    executedSandbox: z
+      .object({
+        bindingDigest: z.string().regex(/^[0-9a-f]{64}$/u),
+        generation: z.number().int().nonnegative(),
+      })
+      .strict()
+      .optional(),
     fileEvidence: z
       .array(fileEvidenceSchema)
       .max(AGENT_RUNNER_LIMITS.maxFileOperations),

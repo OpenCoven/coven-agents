@@ -119,7 +119,7 @@ export type RunnerServiceDependencies = Readonly<{
     Partial<
       Pick<
         RunnerPersistentResourceLifecycle,
-        "inspect" | "inventory" | "repair"
+        "bind" | "inspect" | "inventory" | "repair"
       >
     >;
   reportAdmissionFailure?: (failure: RunnerAdmissionFailure) => void;
@@ -306,6 +306,7 @@ export type RunnerService = Readonly<{
     runId: string
   ) => Promise<RunnerLiveViewResult>;
   /** Read-only: observes the caller's recorded sandbox, mutates nothing. */
+  bindSandbox?: RunnerPersistentResourceLifecycle["bind"];
   inspectSandbox: (
     principal: RunnerPrincipal,
     agentId: string,
@@ -563,6 +564,7 @@ export function createRunnerService(
   }
 
   return {
+    bindSandbox: dependencies.resourceLifecycle?.bind,
     createAgent: async (principal, input, providerIdempotencyKey) => {
       const parsed = parsedDefinition(input);
       if (parsed.kind !== "ok") {
@@ -678,7 +680,6 @@ export function createRunnerService(
       }
       return dependencies.liveView({ run, tenant: principal.tenant });
     },
-
     inspectSandbox: (principal, agentId, expected) => {
       if (!validId(agentId)) {
         return Promise.resolve({ outcome: "unauthorized", version: 1 });
@@ -731,7 +732,7 @@ export function createRunnerService(
         return { kind: "unavailable", source: "database" };
       }
       const [target] = [...agents].sort(newerAgent);
-      if (!target) {
+      if (!target || target.pinnedSandboxId) {
         return { kind: "none" };
       }
       if (!isRunnableHarness(target.runtime)) {

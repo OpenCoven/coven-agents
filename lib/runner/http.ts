@@ -14,6 +14,7 @@ import {
   runErrorEnvelopeSchema,
   runListEnvelopeSchema,
   runLiveViewEnvelopeSchema,
+  runSandboxBindingSchema,
   runSnapshotEnvelopeSchema,
   startRunInputSchema,
   updateAgentInputSchema,
@@ -211,6 +212,7 @@ export type RunnerHttpDependencies = Readonly<{
 
 export type RunnerHttpHandlers = Readonly<{
   createAgent: (request: Request) => Promise<Response>;
+  bindSandbox: (request: Request, agentId: string) => Promise<Response>;
   deleteAgent: (request: Request, agentId: string) => Promise<Response>;
   diagnoseSandbox: (request: Request) => Promise<Response>;
   getAgent: (request: Request, agentId: string) => Promise<Response>;
@@ -729,6 +731,52 @@ export function createRunnerHttpHandlers(
   const eventStream = dependencies.createEventStream ?? createRunEventStream;
 
   return {
+    bindSandbox: (request, agentId) =>
+      safely(dependencies, async () => {
+        const owner = await authorizeSubscriber(
+          request,
+          "runner_write",
+          dependencies,
+          "json"
+        );
+        if (isResponse(owner)) {
+          return owner;
+        }
+        const invalid = invalidId(dependencies, agentId);
+        if (invalid) {
+          return invalid;
+        }
+        const body = await boundedJson(
+          request,
+          "runner_write",
+          runSandboxBindingSchema,
+          dependencies
+        );
+        if (body.kind !== "ok") {
+          return body.response;
+        }
+        const service = await dependencies.createService(owner);
+        const result = await service.bindSandbox?.(
+          owner.principal,
+          agentId,
+          body.value
+        );
+        if (result === "bound") {
+          return Response.json(
+            { ok: true },
+            { headers: { "cache-control": "no-store" } }
+          );
+        }
+        if (result === "not_found") {
+          return agentNotFound(dependencies);
+        }
+        if (!result || result === "unavailable") {
+          return runnerUnavailable(dependencies);
+        }
+        return runnerErrorResponse(dependencies, "sandbox_binding_refused", {
+          details: result,
+        });
+      }),
     createAgent: (request) =>
       safely(dependencies, async () => {
         const context = await authorizeSubscriber(
@@ -811,7 +859,6 @@ export function createRunnerHttpHandlers(
         });
         return agentCreateIdempotencyResponse(dependencies, result);
       }),
-
     deleteAgent: (request, agentId) =>
       safely(dependencies, async () => {
         const context = await authorizeSubscriber(

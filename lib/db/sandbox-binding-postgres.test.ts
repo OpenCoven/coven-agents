@@ -278,3 +278,141 @@ test("an existing original-0044 database receives the additive binding constrain
     rmSync(folder, { force: true, recursive: true });
   }
 });
+
+test("guarded bind pins future starts and exposes execution evidence only after start", {
+  skip: !url,
+}, async () => {
+  assert.ok(url);
+  const client = postgres(url, { max: 1, onnotice: () => undefined });
+  const store = createRunnerStore(
+    drizzleRunnerStoreDatabase(
+      drizzle(client) as Parameters<typeof drizzleRunnerStoreDatabase>[0]
+    )
+  );
+  const agentId = randomUUID();
+  const principal = {
+    kind: "subscriber",
+    tenant: "bind_owner",
+    userId: randomUUID(),
+  } as const;
+  const binding = { expectedGeneration: 0, expectedSandboxId: randomUUID() };
+  const denied = () => assert.fail("unexpected provider read");
+  try {
+    await client`insert into "RunnerAgent" (id,tenant,name,instructions,model,runtime) values (${agentId},${principal.tenant},'fixture','fixture','auto','copilot')`;
+    assert.equal(
+      await store.bindExistingSandbox(
+        { ...principal, tenant: "foreign" },
+        agentId,
+        binding,
+        denied
+      ),
+      "not_found"
+    );
+    assert.equal(
+      await store.bindExistingSandbox(
+        principal,
+        agentId,
+        { ...binding, expectedGeneration: 1 },
+        denied
+      ),
+      "generation_mismatch"
+    );
+    let reads = 0;
+    assert.equal(
+      await store.bindExistingSandbox(principal, agentId, binding, (agent) => {
+        assert.equal(agent.id, agentId);
+        reads += 1;
+        return Promise.resolve();
+      }),
+      "bound"
+    );
+    assert.equal(reads, 1);
+    const pinned = await store.getAgent(principal, agentId);
+    assert.ok(pinned);
+    assert.equal(pinned.pinnedSandboxId, binding.expectedSandboxId);
+    const fence = {
+      agentId,
+      expectedGeneration: pinned.sandboxGeneration,
+      expectedVersion: pinned.version,
+    };
+    const operator = { kind: "runner-operator" } as const;
+    assert.equal(
+      await store.withUnpinnedDaytonaSandboxReuse(principal, pinned, denied),
+      false
+    );
+    assert.deepEqual(await store.beginDaytonaSandboxWarm(principal, fence), {
+      kind: "stale_version",
+    });
+    assert.deepEqual(
+      await store.reserveDaytonaSandbox(principal, {
+        ...fence,
+        expectedSandboxId: pinned.daytonaSandboxId,
+        provisioningStaleBefore: new Date(),
+      }),
+      { kind: "stale_version" }
+    );
+    assert.deepEqual(
+      await store.beginDaytonaSandboxResize(operator, {
+        ...fence,
+        sandboxId: binding.expectedSandboxId,
+        tenant: principal.tenant,
+      }),
+      { kind: "stale_version" }
+    );
+    assert.ok(
+      !(await store.scanDaytonaSandboxRepairCandidates(operator, 100)).some(
+        (candidate) => candidate.mapping.id === agentId
+      )
+    );
+    const id = randomUUID();
+    const result = await store.startRun(principal, {
+      agentId,
+      authVersion: 1,
+      id,
+      operationId: randomUUID(),
+      requestHash: hashRunRequest(agentId, "fixture"),
+      task: "fixture",
+    });
+    assert.equal(result.kind, "created");
+    const [row] =
+      await client`select "boundSandboxId","boundSandboxGeneration" from "RunnerRun" where id=${id}`;
+    assert.equal(row.boundSandboxId, binding.expectedSandboxId);
+    assert.equal(row.boundSandboxGeneration, 0);
+    assert.equal(
+      (await store.getRun(principal, id))?.executedSandbox,
+      undefined
+    );
+    assert.equal(
+      await store.bindExistingSandbox(principal, agentId, binding, denied),
+      "fence_outstanding"
+    );
+    const claimed = await store.claimNextDispatch(operator, {
+      leaseExpiresAt: new Date(Date.now() + 60_000),
+      leaseToken: randomUUID(),
+    });
+    assert.ok(claimed);
+    assert.equal(claimed.run.id, id);
+    assert.equal(
+      (await store.markDispatchRunningForDispatch(operator, claimed.authority))
+        .kind,
+      "updated"
+    );
+    const snapshot = await store.getRun(principal, id);
+    assert.equal(snapshot?.executedSandbox?.generation, 0);
+    assert.match(
+      snapshot?.executedSandbox?.bindingDigest ?? "",
+      /^[0-9a-f]{64}$/u
+    );
+    assert.equal(
+      JSON.stringify(snapshot).includes(binding.expectedSandboxId),
+      false
+    );
+    const [leases] =
+      await client`select count(*)::int as count from "CredentialLease" where "runId"=${id}`;
+    assert.equal(leases.count, 0);
+  } finally {
+    await client`delete from "RunnerRun" where "agentId"=${agentId}`;
+    await client`delete from "RunnerAgent" where id=${agentId}`;
+    await client.end();
+  }
+});

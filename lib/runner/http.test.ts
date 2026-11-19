@@ -2271,6 +2271,48 @@ test("SSE validates cursors, resumes without duplicates, and uses exact headers"
   assert.equal((body.match(/id: 2/g) ?? []).length, 1);
 });
 
+test("only the browser owner can send one valid sandbox binding to the service", async () => {
+  const calls: unknown[][] = [];
+  const fixture = handlers({
+    service: service({
+      bindSandbox: (...args) => {
+        calls.push(args);
+        return Promise.resolve("bound");
+      },
+    }),
+  });
+  const binding = { expectedGeneration: 2, expectedSandboxId: "sandbox-bound" };
+  const bindRequest = (body: object, headers?: HeadersInit) =>
+    new Request("https://app.test/bind", {
+      body: JSON.stringify(body),
+      headers,
+      method: "POST",
+    });
+  const bearer = bindRequest(binding, { authorization: "Bearer fixture" });
+  assert.equal(
+    (await fixture.handlers.bindSandbox(bearer, AGENT_ID)).status,
+    401
+  );
+  assert.equal(bearer.bodyUsed, false);
+  assert.equal(
+    (
+      await fixture.handlers.bindSandbox(
+        bindRequest({ ...binding, name: "bad" }),
+        AGENT_ID
+      )
+    ).status,
+    400
+  );
+  assert.equal(fixture.serviceRequests(), 0);
+  const bound = await fixture.handlers.bindSandbox(
+    bindRequest(binding),
+    AGENT_ID
+  );
+  assert.equal(bound.status, 200);
+  assert.deepEqual(await bound.json(), { ok: true });
+  assert.deepEqual(calls, [[subscriber.principal, AGENT_ID, binding]]);
+});
+
 test("stop accepts an empty body, returns its snapshot, and defers reconciliation", async () => {
   let reconciled = 0;
   const fixture = handlers({

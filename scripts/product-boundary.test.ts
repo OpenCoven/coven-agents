@@ -66,6 +66,7 @@ const applicationRouteFiles = [
   "app/api/agents/[id]/owner-credentials/route.ts",
   "app/api/agents/[id]/route.ts",
   "app/api/agents/[id]/runs/route.ts",
+  "app/api/agents/[id]/sandbox/binding/route.ts",
   "app/api/agents/[id]/sandbox/inspection/route.ts",
   "app/api/agents/route.ts",
   "app/api/analytics/route.ts",
