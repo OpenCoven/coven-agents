@@ -128,6 +128,7 @@ export type DaytonaSandboxConfiguration = DaytonaSandboxResourcePolicy &
   }>;
 
 export type DaytonaSandboxLifecycleDependencies = Readonly<{
+  awaitProviderSettlement?: boolean;
   deadline?: number;
   now?: () => number;
   signal?: AbortSignal;
@@ -611,6 +612,12 @@ function withLifecycleAbort<T>(
   // or mark its durable lifecycle fence immediately.
   throwIfTransitionAborted(lifecycle);
   const signal = lifecycle?.signal;
+  if (lifecycle?.awaitProviderSettlement) {
+    return operation().then((value) => {
+      throwIfTransitionAborted(lifecycle);
+      return value;
+    });
+  }
   if (!signal) {
     return operation();
   }
@@ -883,6 +890,36 @@ type DaytonaSandboxPersistence = Readonly<{
   >;
 }>;
 
+async function prepareAttachedSandbox(
+  sandbox: Sandbox,
+  agent: RunnerAgentRecord,
+  configuration: DaytonaSandboxConfiguration,
+  dependencies: DaytonaSandboxDependencies,
+  persistence: DaytonaSandboxPersistence,
+  adopt: boolean
+): Promise<void> {
+  const lifecycle =
+    persistence.reuseExisting && dependencies.lifecycle
+      ? { ...dependencies.lifecycle, awaitProviderSettlement: true }
+      : dependencies.lifecycle;
+  const prepare = async () => {
+    throwIfTransitionAborted(lifecycle);
+    await startOrRecoverSandbox(sandbox, lifecycle);
+    throwIfTransitionAborted(lifecycle);
+    if (adopt) {
+      await adoptDaytonaSandboxPolicy(sandbox, configuration, dependencies);
+    }
+  };
+  if (!persistence.reuseExisting) {
+    await prepare();
+  } else if (!(await persistence.reuseExisting(agent, prepare))) {
+    throw new DaytonaSandboxLifecycleError(
+      "Daytona sandbox changed before preparation.",
+      { retryable: true }
+    );
+  }
+}
+
 function subscriberSandboxPersistence(
   principal: RunnerPrincipal,
   dependencies: DaytonaSandboxDependencies
@@ -1099,11 +1136,14 @@ async function createSandbox(
     persistence,
     created
   );
-  throwIfTransitionAborted(dependencies.lifecycle);
-  await startOrRecoverSandbox(sandbox, dependencies.lifecycle);
-  if (!created) {
-    await adoptDaytonaSandboxPolicy(sandbox, configuration, dependencies);
-  }
+  await prepareAttachedSandbox(
+    sandbox,
+    persisted,
+    configuration,
+    dependencies,
+    persistence,
+    !created
+  );
   return { agent: persisted, sandbox };
 }
 
@@ -1315,8 +1355,14 @@ async function reconcileAmbiguousDaytonaSandbox(
       return refuseMismatchedSandboxReuse(configuration, dependencies);
     }
     const persisted = await persistSandbox(agent, sandbox, persistence, false);
-    await startOrRecoverSandbox(sandbox, dependencies.lifecycle);
-    await adoptDaytonaSandboxPolicy(sandbox, configuration, dependencies);
+    await prepareAttachedSandbox(
+      sandbox,
+      persisted,
+      configuration,
+      dependencies,
+      persistence,
+      true
+    );
     return { agent: persisted, sandbox };
   } catch (error) {
     if (error instanceof DaytonaSandboxLifecycleError) {
@@ -1380,20 +1426,14 @@ async function ensureDaytonaSandboxWithPersistence(
   if (!sandboxConfigurationMatches(sandbox, configuration)) {
     return refuseMismatchedSandboxReuse(configuration, dependencies);
   }
-  const prepare = async () => {
-    await startOrRecoverSandbox(sandbox, dependencies.lifecycle);
-    await adoptDaytonaSandboxPolicy(sandbox, configuration, dependencies);
-  };
-  if (persistence.reuseExisting) {
-    if (!(await persistence.reuseExisting(agent, prepare))) {
-      throw new DaytonaSandboxLifecycleError(
-        "Daytona sandbox changed before preparation.",
-        { retryable: true }
-      );
-    }
-  } else {
-    await prepare();
-  }
+  await prepareAttachedSandbox(
+    sandbox,
+    agent,
+    configuration,
+    dependencies,
+    persistence,
+    true
+  );
   return { agent, sandbox };
 }
 

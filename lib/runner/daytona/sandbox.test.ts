@@ -234,6 +234,87 @@ test("a binding installed after a prewarm read prevents provider changes", async
   assert.deepEqual(result, { error: "retryable", kind: "failed" });
 });
 
+test("a provider sandbox is fenced again after provisioning attaches it", async () => {
+  const reserved = agent({ sandboxLifecycle: "provisioning", version: 1 });
+  const attached = agent({
+    daytonaSandboxId: "sandbox-id",
+    sandboxLifecycle: "ready",
+    version: 2,
+  });
+  await assert.rejects(
+    ensureDaytonaSandbox(principal, agent(), config, {
+      daytona: {
+        create: () => Promise.resolve(sandbox(SandboxState.STOPPED)),
+        get: () => Promise.reject(new DaytonaNotFoundError("absent")),
+      },
+      store: store({
+        attachDaytonaSandbox: () =>
+          Promise.resolve({ kind: "updated", value: attached }),
+        reserveDaytonaSandbox: () =>
+          Promise.resolve({ kind: "reserved", value: reserved }),
+        withUnpinnedDaytonaSandboxReuse: (
+          _owner: RunnerPrincipal,
+          candidate: RunnerAgentRecord
+        ) => {
+          assert.equal(candidate.version, attached.version);
+          return Promise.resolve(false);
+        },
+      }),
+    }),
+    /changed before preparation/u
+  );
+});
+
+test("an aborted preparation holds its fence until the in-flight provider operation settles", async () => {
+  const controller = new AbortController();
+  const startEntered = Promise.withResolvers<void>();
+  const finishStart = Promise.withResolvers<void>();
+  let fenceReleased = false;
+  const pending = ensureDaytonaSandbox(
+    principal,
+    agent({ daytonaSandboxId: "stored", sandboxLifecycle: "ready" }),
+    config,
+    {
+      daytona: {
+        create: async () => assert.fail("must not create"),
+        get: () =>
+          Promise.resolve(
+            sandbox(SandboxState.STOPPED, {
+              start: () => {
+                startEntered.resolve();
+                return finishStart.promise;
+              },
+            })
+          ),
+      },
+      lifecycle: { signal: controller.signal },
+      store: store({
+        withUnpinnedDaytonaSandboxReuse: async (
+          _owner: RunnerPrincipal,
+          _agent: RunnerAgentRecord,
+          prepare: () => Promise<void>
+        ) => {
+          try {
+            await prepare();
+          } finally {
+            fenceReleased = true;
+          }
+          return true;
+        },
+      }),
+    }
+  );
+  const rejected = assert.rejects(pending);
+  await startEntered.promise;
+  controller.abort();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const releasedWhileInFlight = fenceReleased;
+  finishStart.resolve();
+  await rejected;
+  assert.equal(releasedWhileInFlight, false);
+  assert.equal(fenceReleased, true);
+});
+
 test("stored provider IDs are resolved and stopped or archived sandboxes start", async () => {
   await Promise.all(
     [SandboxState.STOPPED, SandboxState.ARCHIVED].map(async (state) => {
