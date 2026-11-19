@@ -197,7 +197,9 @@ function sameSandboxBinding(
 }
 
 function asAgent(row: Record<string, unknown>): RunnerAgentRecord {
+  const pinnedSandboxId = optionalColumn<string>(row, "pinnedSandboxId");
   return {
+    ...(pinnedSandboxId ? { pinnedSandboxId } : {}),
     createdAt: timestampColumn(row, "createdAt"),
     daytonaSandboxId: column(row, "daytonaSandboxId"),
     description: column(row, "description"),
@@ -1834,6 +1836,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                 AND "tenant" = ${principal.tenant}
                 AND "version" = ${input.expectedVersion}
                 AND "sandboxGeneration" = ${input.expectedGeneration}
+                AND "pinnedSandboxId" IS NULL
                 AND "sandboxLifecycle" IN ('provisioning', 'provisioning_ambiguous')
               RETURNING *`
           )
@@ -2596,6 +2599,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
                 AND "version" = ${input.expectedVersion}
                 AND "sandboxGeneration" = ${input.expectedGeneration}
                 AND "daytonaSandboxId" = ${input.sandboxId}
+                AND "pinnedSandboxId" IS NULL
                 AND "sandboxLifecycle" = 'ready'
                 AND "status" = 'idle'
                 AND "warmStatus" <> 'provisioning'
@@ -2638,6 +2642,9 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           return { kind: "not_found" };
         }
         const agent = asAgent(current);
+        if (agent.pinnedSandboxId) {
+          return { kind: "stale_version" };
+        }
         if (
           agent.sandboxLifecycle === "ready" &&
           agent.warmStatus === "provisioning"
@@ -4833,6 +4840,9 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           return { kind: "not_found" };
         }
         const agent = asAgent(current);
+        if (agent.pinnedSandboxId) {
+          return { kind: "stale_version" };
+        }
         if (
           agent.sandboxLifecycle === "provisioning" &&
           agent.sandboxUpdatedAt > input.provisioningStaleBefore
@@ -5065,7 +5075,8 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
               )
               SELECT *
               FROM "mapped"
-              WHERE "sandboxLifecycle" IN ('ready', 'resizing')
+              WHERE "pinnedSandboxId" IS NULL
+                AND "sandboxLifecycle" IN ('ready', 'resizing')
                 AND "status" = 'idle'
                 AND "warmStatus" <> 'provisioning'
                 AND NOT EXISTS (
@@ -5695,6 +5706,36 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           throw new Error("Locked Runner agent changed before update.");
         }
         return { kind: "updated", value: asAgent(updated) };
+      }),
+
+    // The agent lock also protects bindExistingSandbox. Retain it through
+    // bounded provider preparation so a concurrent bind cannot pass mid-reuse.
+    withUnpinnedDaytonaSandboxReuse: (
+      principal: RunnerPrincipal,
+      agent: RunnerAgentRecord,
+      prepare: () => Promise<void>
+    ): Promise<boolean> =>
+      database.transaction(async (transaction) => {
+        const [current] = await transaction.execute(
+          statement(
+            "lock-unpinned-sandbox-for-reuse",
+            { agentId: agent.id, tenant: principal.tenant },
+            sql`SELECT id FROM "RunnerAgent"
+              WHERE id = ${agent.id}
+                AND tenant = ${principal.tenant}
+                AND "version" = ${agent.version}
+                AND "sandboxGeneration" = ${agent.sandboxGeneration}
+                AND "daytonaSandboxId" = ${agent.daytonaSandboxId}
+                AND "pinnedSandboxId" IS NULL
+                AND "sandboxLifecycle" = 'ready'
+              FOR UPDATE`
+          )
+        );
+        if (!current) {
+          return false;
+        }
+        await prepare();
+        return true;
       }),
   };
 }

@@ -847,6 +847,10 @@ async function startOrRecoverSandbox(
 }
 
 type DaytonaSandboxPersistence = Readonly<{
+  reuseExisting?: (
+    agent: RunnerAgentRecord,
+    prepare: () => Promise<void>
+  ) => Promise<boolean>;
   attach: (
     reserved: RunnerAgentRecord,
     sandboxId: string
@@ -913,6 +917,12 @@ function subscriberSandboxPersistence(
           Date.now() - SANDBOX_PROVISIONING_TIMEOUT_MS
         ),
       }),
+    reuseExisting: (agent, prepare) =>
+      dependencies.store.withUnpinnedDaytonaSandboxReuse(
+        principal,
+        agent,
+        prepare
+      ),
   };
 }
 
@@ -1370,8 +1380,20 @@ async function ensureDaytonaSandboxWithPersistence(
   if (!sandboxConfigurationMatches(sandbox, configuration)) {
     return refuseMismatchedSandboxReuse(configuration, dependencies);
   }
-  await startOrRecoverSandbox(sandbox, dependencies.lifecycle);
-  await adoptDaytonaSandboxPolicy(sandbox, configuration, dependencies);
+  const prepare = async () => {
+    await startOrRecoverSandbox(sandbox, dependencies.lifecycle);
+    await adoptDaytonaSandboxPolicy(sandbox, configuration, dependencies);
+  };
+  if (persistence.reuseExisting) {
+    if (!(await persistence.reuseExisting(agent, prepare))) {
+      throw new DaytonaSandboxLifecycleError(
+        "Daytona sandbox changed before preparation.",
+        { retryable: true }
+      );
+    }
+  } else {
+    await prepare();
+  }
   return { agent, sandbox };
 }
 
@@ -1650,6 +1672,9 @@ export async function warmDaytonaSandbox(
   | { kind: "unavailable"; source: "database" }
   | { kind: "failed"; error: DaytonaProviderErrorKind }
 > {
+  if (agent.pinnedSandboxId) {
+    return { kind: "stale_version" };
+  }
   let ensured: { agent: RunnerAgentRecord; sandbox: Sandbox };
   try {
     ensured = await ensureDaytonaSandbox(

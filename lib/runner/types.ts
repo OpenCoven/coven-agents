@@ -126,6 +126,7 @@ export type RunnerAgentRecord = {
   lastRunAt: Date | null;
   model: string;
   name: string;
+  pinnedSandboxId?: string;
   runtime: RunnerRuntime;
   sandboxGeneration: number;
   sandboxLifecycle: RunnerSandboxLifecycle;

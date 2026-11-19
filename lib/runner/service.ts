@@ -732,7 +732,7 @@ export function createRunnerService(
         return { kind: "unavailable", source: "database" };
       }
       const [target] = [...agents].sort(newerAgent);
-      if (!target) {
+      if (!target || target.pinnedSandboxId) {
         return { kind: "none" };
       }
       if (!isRunnableHarness(target.runtime)) {

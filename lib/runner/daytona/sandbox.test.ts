@@ -159,7 +159,17 @@ function sandbox(
 }
 
 function store(methods: Record<string, unknown>): RunnerStore {
-  return methods as RunnerStore;
+  return {
+    withUnpinnedDaytonaSandboxReuse: async (
+      _agentOwner: RunnerPrincipal,
+      _agent: RunnerAgentRecord,
+      prepare: () => Promise<void>
+    ) => {
+      await prepare();
+      return true;
+    },
+    ...methods,
+  } as RunnerStore;
 }
 
 function settlesWithin<T>(promise: Promise<T>, milliseconds = 100): Promise<T> {
@@ -180,6 +190,49 @@ function settlesWithin<T>(promise: Promise<T>, milliseconds = 100): Promise<T> {
     );
   });
 }
+
+test("pinned prewarm never resolves or changes the provider sandbox", async () => {
+  const result = await warmDaytonaSandbox(
+    principal,
+    agent({
+      daytonaSandboxId: "stored",
+      pinnedSandboxId: "stored",
+      sandboxLifecycle: "ready",
+    }),
+    config,
+    {
+      daytona: {
+        create: async () => assert.fail("must not create"),
+        get: async () => assert.fail("must not look up a pinned sandbox"),
+      },
+      probe: async () => assert.fail("must not probe"),
+      store: store({}),
+    }
+  );
+  assert.deepEqual(result, { kind: "stale_version" });
+});
+
+test("a binding installed after a prewarm read prevents provider changes", async () => {
+  const stopped = sandbox(SandboxState.STOPPED, {
+    start: async () => assert.fail("must not start a newly pinned sandbox"),
+  });
+  const result = await warmDaytonaSandbox(
+    principal,
+    agent({ daytonaSandboxId: "stored", sandboxLifecycle: "ready" }),
+    config,
+    {
+      daytona: {
+        create: async () => assert.fail("must not create"),
+        get: async () => stopped,
+      },
+      probe: async () => assert.fail("must not probe"),
+      store: store({
+        withUnpinnedDaytonaSandboxReuse: async () => false,
+      }),
+    }
+  );
+  assert.deepEqual(result, { error: "retryable", kind: "failed" });
+});
 
 test("stored provider IDs are resolved and stopped or archived sandboxes start", async () => {
   await Promise.all(

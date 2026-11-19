@@ -327,6 +327,43 @@ test("guarded bind pins future starts and exposes execution evidence only after 
       "bound"
     );
     assert.equal(reads, 1);
+    const pinned = await store.getAgent(principal, agentId);
+    assert.ok(pinned);
+    assert.equal(pinned.pinnedSandboxId, binding.expectedSandboxId);
+    const fence = {
+      agentId,
+      expectedGeneration: pinned.sandboxGeneration,
+      expectedVersion: pinned.version,
+    };
+    const operator = { kind: "runner-operator" } as const;
+    assert.equal(
+      await store.withUnpinnedDaytonaSandboxReuse(principal, pinned, denied),
+      false
+    );
+    assert.deepEqual(await store.beginDaytonaSandboxWarm(principal, fence), {
+      kind: "stale_version",
+    });
+    assert.deepEqual(
+      await store.reserveDaytonaSandbox(principal, {
+        ...fence,
+        expectedSandboxId: pinned.daytonaSandboxId,
+        provisioningStaleBefore: new Date(),
+      }),
+      { kind: "stale_version" }
+    );
+    assert.deepEqual(
+      await store.beginDaytonaSandboxResize(operator, {
+        ...fence,
+        sandboxId: binding.expectedSandboxId,
+        tenant: principal.tenant,
+      }),
+      { kind: "stale_version" }
+    );
+    assert.ok(
+      !(await store.scanDaytonaSandboxRepairCandidates(operator, 100)).some(
+        (candidate) => candidate.mapping.id === agentId
+      )
+    );
     const id = randomUUID();
     const result = await store.startRun(principal, {
       agentId,
@@ -349,7 +386,17 @@ test("guarded bind pins future starts and exposes execution evidence only after 
       await store.bindExistingSandbox(principal, agentId, binding, denied),
       "fence_outstanding"
     );
-    await client`update "RunnerRun" set "startedAt"=now(),"completedAt"=now(),status='completed',"dispatchState"='terminal' where id=${id}`;
+    const claimed = await store.claimNextDispatch(operator, {
+      leaseExpiresAt: new Date(Date.now() + 60_000),
+      leaseToken: randomUUID(),
+    });
+    assert.ok(claimed);
+    assert.equal(claimed.run.id, id);
+    assert.equal(
+      (await store.markDispatchRunningForDispatch(operator, claimed.authority))
+        .kind,
+      "updated"
+    );
     const snapshot = await store.getRun(principal, id);
     assert.equal(snapshot?.executedSandbox?.generation, 0);
     assert.match(
