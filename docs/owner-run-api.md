@@ -36,7 +36,7 @@ run_id = UUID(started["run"]["id"])
 print(call(f"/api/runs/{run_id}")["run"]["status"])
 ```
 
-GET `/api/runs/{runId}/events` with the events scope to stream SSE. Reconnect with the last observed numeric event ID in `Last-Event-ID`. POST to `/api/runs/{runId}/stop` with the stop scope to request cancellation. GET `/api/runs/{runId}` with the read scope for terminal state. Inspection uses POST `/api/agents/{agentId}/sandbox/inspection` with its own scope and the expected sandbox ID and generation. Use the same operation ID when retrying the same start. Returning a pre-existing snapshot on replay requires the originating credential and read scope.
+GET `/api/runs/{runId}/events` with the events scope to stream SSE. Reconnect with the last observed numeric event ID in `Last-Event-ID`. POST to `/api/runs/{runId}/stop` with the stop scope to request cancellation. A stop-only credential receives an empty 202 while cancellation is in progress or an empty 204 after it completes. A credential with both stop and read scope receives the run snapshot. GET `/api/runs/{runId}` with the read scope for terminal state. Inspection uses POST `/api/agents/{agentId}/sandbox/inspection` with its own scope and the expected sandbox ID and generation. Use the same operation ID when retrying the same start. Returning a pre-existing snapshot on replay requires the originating credential and read scope.
 
 ## Migrations and rollback
 
