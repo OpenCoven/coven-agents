@@ -10,6 +10,10 @@ The scoped owner and inspection merge is `d1df95c2e202576ff396f786edffd90ece4f30
 
 Guarded binding and execution evidence merged at `1496f0bbb09ac43de596e90baca1ef835caf648b`. The merge tree matches the qualified tree that passed 3,227 unit, 24 disposable PostgreSQL, and 35 hermetic browser cases. The exact merged checkout passed static checks, typecheck, and the focused binding and prewarm tests. Live Castles and Daytona acceptance remains pending. [Guarded binding evidence](https://github.com/OpenCoven/coven-agents/issues/298#issuecomment-7000529257)
 
+## Billing ledger checkpoint
+
+The account-keyed pack ledger landed at `1a2f4479a4eacd0b2376630eb168aa9770b55e6e`. Its merge tree passed 3,240 unit, 35 disposable PostgreSQL, and 35 hermetic browser tests. The database suite verified a fresh install, an upgrade from runner migration 0047, cap changes, key rotation, and refusal of unresolved paid history. The browser suite passed after a fresh Next.js cache retry. Production migration and live acceptance remain separate. [Cap-change evidence](https://github.com/OpenCoven/coven-agents/issues/225#issuecomment-7005167520) · [Key-rotation evidence](https://github.com/OpenCoven/coven-agents/issues/226#issuecomment-7005167860)
+
 ## Historical release evidence
 
 This matrix records implemented source and retained evidence as of 2026-09-09
