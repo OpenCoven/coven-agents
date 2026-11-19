@@ -7,7 +7,7 @@ For a local client, the following Python example prompts for the secret without 
 ```python
 from getpass import getpass
 import json
-from urllib.request import Request, urlopen
+from urllib.request import build_opener, HTTPRedirectHandler, Request
 from uuid import UUID, uuid4
 
 origin = input("Application HTTPS origin: ").strip().rstrip("/")
@@ -16,13 +16,19 @@ if not origin.startswith("https://"):
     raise ValueError("HTTPS is required")
 secret = getpass("Owner credential: ")
 
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+opener = build_opener(NoRedirect())
+
 def call(path, body=None):
     headers = {"Authorization": "Bearer " + secret}
     data = None
     if body is not None:
         headers["Content-Type"] = "application/json"
         data = json.dumps(body).encode()
-    with urlopen(Request(origin + path, data=data, headers=headers), timeout=30) as response:
+    with opener.open(Request(origin + path, data=data, headers=headers), timeout=30) as response:
         return json.load(response)
 
 started = call(f"/api/agents/{agent}/runs", {"operationId": str(uuid4()), "task": "Report the workspace status."})
