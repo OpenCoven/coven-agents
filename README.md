@@ -9,6 +9,8 @@ Read the accepted [Product authority boundary](docs/architecture/adr-001-product
 and [Daytona execution boundary](docs/architecture/adr-002-daytona-execution-boundary.md)
 before changing identity, credentials, execution, or persistence.
 
+For contributor and coding-agent setup, see [CLAUDE.md](CLAUDE.md). It covers isolated worktrees, Git hook verification, signed commits, and local checks.
+
 ## Execution and security
 
 Browser execution requests use relative same-origin `/api` routes and the

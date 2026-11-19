@@ -1,5 +1,7 @@
 #!/usr/bin/env tsx
 import { execFile } from "node:child_process";
+import { accessSync, constants } from "node:fs";
+import { resolve } from "node:path";
 import { promisify } from "node:util";
 import {
   branchDeleteFlag,
@@ -315,9 +317,10 @@ async function configValue(key: string): Promise<string> {
 }
 
 async function doctor(): Promise<number> {
-  const [signingKey, format] = await Promise.all([
+  const [signingKey, format, hooksPath] = await Promise.all([
     configValue("user.signingkey"),
     configValue("gpg.format"),
+    configValue("core.hooksPath"),
   ]);
   const problems: string[] = [];
 
@@ -328,8 +331,35 @@ async function doctor(): Promise<number> {
     problems.push("gpg.format is not set (expected: ssh, openpgp, or x509)");
   }
 
+  if (process.env.HUSKY === "0") {
+    problems.push("Husky is disabled by HUSKY=0");
+  }
+  if (resolve(hooksPath) === resolve(".husky/_")) {
+    try {
+      accessSync(resolve(hooksPath, "h"), constants.R_OK);
+    } catch {
+      problems.push("Missing Husky dispatcher (run corepack pnpm exec husky)");
+    }
+    for (const hook of ["pre-commit", "commit-msg", "pre-push"]) {
+      try {
+        accessSync(resolve(hooksPath, hook), constants.X_OK);
+      } catch {
+        problems.push(
+          `Missing executable ${hook} hook (run corepack pnpm exec husky)`
+        );
+      }
+      try {
+        accessSync(resolve(".husky", hook), constants.R_OK);
+      } catch {
+        problems.push(`Missing tracked hook script .husky/${hook}`);
+      }
+    }
+  } else {
+    problems.push("Husky is not active (run corepack pnpm exec husky)");
+  }
+
   if (problems.length > 0) {
-    console.error("\nCommit signing is NOT configured:\n");
+    console.error("\nCommit safeguards need setup:\n");
     for (const problem of problems) {
       console.error(`  - ${problem}`);
     }
@@ -338,7 +368,7 @@ async function doctor(): Promise<number> {
   }
 
   console.log(
-    `Signing configured: ${format} key ${signingKey.slice(0, 32)}...`
+    `Signing configured (${format}). Husky hook entry points are executable.`
   );
   return 0;
 }

@@ -80,7 +80,11 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       - name: Generate a per-run auth secret
-        run: echo "AUTH_SECRET=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
+        run: |
+          set -eu
+          generated_auth_secret=$(openssl rand -base64 32)
+          printf '::add-mask::%s\n' "$generated_auth_secret"
+          printf 'AUTH_SECRET=%s\n' "$generated_auth_secret" >> "$GITHUB_ENV"
 
       - name: Run database migrations
         run: pnpm db:migrate
