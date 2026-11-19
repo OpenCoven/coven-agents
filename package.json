@@ -122,8 +122,8 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.6.5",
-    "@github/copilot": "1.0.105",
+    "@biomejs/biome": "2.5.15",
+    "@github/copilot": "1.0.83",
     "@playwright/test": "^1.65.0",
     "@tailwindcss/postcss": "^4.3.4",
     "@tailwindcss/typography": "^0.5.20",
@@ -162,7 +162,7 @@
       "mermaid": ">=11.16.1",
       "nanoid": ">=3.3.18",
       "postcss": "^8.5.23",
-      "prosemirror-transform": "^1.12.0",
+      "prosemirror-transform": "1.12.5",
       "sharp": ">=0.35.0",
       "undici": ">=5.29.0",
       "uuid": ">=11.1.1"

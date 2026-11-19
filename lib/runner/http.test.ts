@@ -1492,6 +1492,7 @@ test("backpressured SSE retains later work in its original request context", asy
   };
   let clock = 0;
   let reconciled = 0;
+  let reads = 0;
   const fixture = handlers({
     after: (task) => {
       assert.equal(context.getStore(), "original-request");
@@ -1510,11 +1511,14 @@ test("backpressured SSE retains later work in its original request context", asy
     liveTailMs: 5000,
     now: () => clock,
     service: service({
-      readRunEvents: async (_principal, _runId, cursor) => ({
-        events: cursor === 0 ? [first] : [],
-        kind: "found",
-        terminal: reconciled >= 2,
-      }),
+      readRunEvents: (_principal, _runId, cursor) => {
+        reads += 1;
+        return Promise.resolve({
+          events: cursor === 0 ? [first] : [],
+          kind: "found",
+          terminal: reconciled >= 2,
+        });
+      },
       reconcileAndDispatch: () => {
         assert.equal(context.getStore(), "original-request");
         reconciled += 1;
@@ -1528,9 +1532,12 @@ test("backpressured SSE retains later work in its original request context", asy
       RUN_ID
     )
   );
-  // Let the first event fill the stream's queue before a different context
-  // drains it and triggers the next pull, as an HTTP response writer does.
+  // Only the handler's own first-page read, which keeps a missing run a 404,
+  // happens before a consumer pulls: the stream is demand-driven and reads
+  // nothing ahead. Drain it from a different async context, as an HTTP
+  // response writer does.
   await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(reads, 1);
   assert.equal(context.getStore(), undefined);
   clock = 5000;
   assert.match(await response.text(), /id: 1/u);
