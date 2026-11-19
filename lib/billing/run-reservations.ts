@@ -5,9 +5,11 @@ import {
   and,
   count,
   eq,
+  exists,
   gt,
   gte,
   inArray,
+  isNull,
   lt,
   lte,
   notExists,
@@ -19,6 +21,7 @@ import type { databaseFor } from "@/lib/db/access";
 import {
   minutePack,
   type RunReservation,
+  runPackDraw,
   runReservation,
   runUsage,
 } from "@/lib/db/schema";
@@ -72,6 +75,7 @@ export interface RunReservationTransaction {
     periodMonth?: Date;
     tenant?: string;
     tenantHash?: string;
+    userId?: string;
   }) => Promise<number>;
   compensateConsumed: (
     runId: string,
@@ -82,6 +86,11 @@ export interface RunReservationTransaction {
   findByRunId: (runId: string) => Promise<RunReservationRecord | null>;
   hasUsageRunId: (runId: string) => Promise<boolean>;
   insert: (reservation: RunReservationRecord) => Promise<void>;
+  insertPackDraw: (input: {
+    runId: string;
+    userId: string;
+    reservedMinutes: number;
+  }) => Promise<void>;
   markConsumed: (
     runId: string,
     tenant: string,
@@ -91,15 +100,11 @@ export interface RunReservationTransaction {
     runId: string,
     releasedAt: Date
   ) => Promise<RunReservationRecord | null>;
-  /**
-   * Minutes past periods used beyond the bucket, summed per period. Those
-   * minutes were drawn from packs, so they reduce what packs still hold.
-   */
-  priorPeriodOverflow: (input: {
-    cap: number;
+  packUsage: (input: {
+    now: Date;
     periodMonth: Date;
-    tenantHash: string;
-  }) => Promise<number>;
+    userId: string;
+  }) => Promise<{ held: number; period: number }>;
   /** Every pack minute the account has ever bought. */
   purchasedPackMinutes: (userId: string) => Promise<number>;
   releaseExpired: (now: Date) => Promise<void>;
@@ -131,7 +136,28 @@ export function drizzleRunReservationDatabase(
                 ),
               ];
 
-              if (input.tenantHash !== undefined) {
+              if (input.userId !== undefined) {
+                conditions.push(
+                  or(
+                    eq(runReservation.userId, input.userId),
+                    exists(
+                      tx
+                        .select({ runId: runPackDraw.runId })
+                        .from(runPackDraw)
+                        .where(
+                          and(
+                            eq(runPackDraw.runId, runReservation.runId),
+                            eq(runPackDraw.userId, input.userId)
+                          )
+                        )
+                    ),
+                    and(
+                      isNull(runReservation.userId),
+                      eq(runReservation.tenantHash, input.tenantHash ?? "")
+                    )
+                  )
+                );
+              } else if (input.tenantHash !== undefined) {
                 conditions.push(
                   eq(runReservation.tenantHash, input.tenantHash)
                 );
@@ -258,6 +284,11 @@ export function drizzleRunReservationDatabase(
             insert: async (reservation) => {
               await tx.insert(runReservation).values(reservation);
             },
+            insertPackDraw: async (input) => {
+              await tx
+                .insert(runPackDraw)
+                .values({ ...input, minutes: input.reservedMinutes });
+            },
             markConsumed: async (runId, tenant, consumedAt) => {
               const [updated] = await tx
                 .update(runReservation)
@@ -315,33 +346,35 @@ export function drizzleRunReservationDatabase(
                 .limit(1);
               return reservation ?? null;
             },
-            priorPeriodOverflow: async (input) => {
-              const periods = tx
-                .select({
-                  periodMonth: runReservation.periodMonth,
-                  units: sql<number>`sum(${runReservation.costUnits})`.as(
-                    "units"
-                  ),
-                })
-                .from(runReservation)
-                .where(
-                  and(
-                    eq(runReservation.tenantHash, input.tenantHash),
-                    eq(runReservation.state, "consumed"),
-                    lt(runReservation.periodMonth, input.periodMonth)
-                  )
-                )
-                .groupBy(runReservation.periodMonth)
-                .as("periods");
+            packUsage: async (input) => {
               const [row] = await tx
                 .select({
-                  overflow:
-                    sql<number>`coalesce(sum(greatest(0, ${periods.units} - ${input.cap})), 0)`.mapWith(
+                  held: sql<number>`coalesce(sum(${runPackDraw.minutes}), 0)`.mapWith(
+                    Number
+                  ),
+                  period:
+                    sql<number>`coalesce(sum(case when ${eq(runReservation.periodMonth, input.periodMonth)} then ${runPackDraw.minutes} else 0 end), 0)`.mapWith(
                       Number
                     ),
                 })
-                .from(periods);
-              return row?.overflow ?? 0;
+                .from(runPackDraw)
+                .innerJoin(
+                  runReservation,
+                  eq(runPackDraw.runId, runReservation.runId)
+                )
+                .where(
+                  and(
+                    eq(runPackDraw.userId, input.userId),
+                    or(
+                      eq(runReservation.state, "consumed"),
+                      and(
+                        eq(runReservation.state, "reserved"),
+                        gt(runReservation.expiresAt, input.now)
+                      )
+                    )
+                  )
+                );
+              return row ?? { held: 0, period: 0 };
             },
             purchasedPackMinutes: async (userId) => {
               const [row] = await tx
@@ -407,6 +440,7 @@ export async function reserveRun(
 
   const periodDay = dayKey(now);
   const tenantHash = tenantHashForReservation(input.tenant, input.keySecret);
+  const userId = userIdForTenant(input.tenant);
 
   return await withSerializableRetry(database, async (tx) => {
     await tx.releaseExpired(now);
@@ -439,16 +473,20 @@ export async function reserveRun(
       periodMonth: input.periodStart,
       tenant: input.tenant,
       tenantHash,
+      userId: userId ?? undefined,
     });
     const packMinutes = await availablePackMinutes(tx, {
-      cap: tenantMonthlyCap,
+      now,
       periodMonth: input.periodStart,
-      tenant: input.tenant,
-      tenantHash,
+      userId,
     });
-    if (tenantMonthlyUnits + costUnits > tenantMonthlyCap + packMinutes) {
+    const bucketRemaining = Math.max(
+      0,
+      tenantMonthlyCap - (tenantMonthlyUnits - packMinutes.period)
+    );
+    if (costUnits > bucketRemaining + packMinutes.available) {
       return {
-        cap: tenantMonthlyCap + packMinutes,
+        cap: tenantMonthlyUnits + bucketRemaining + packMinutes.available,
         kind: "refused",
         reason: "tenant_monthly_cap",
         used: tenantMonthlyUnits,
@@ -465,6 +503,7 @@ export async function reserveRun(
       costUnits,
       durationSeconds: null,
       expiresAt: new Date(now.getTime() + reservationTtlMs),
+      monthlyCap: tenantMonthlyCap,
       periodDay,
       periodMonth: input.periodStart,
       releasedAt: null,
@@ -474,8 +513,16 @@ export async function reserveRun(
       settledAt: null,
       state: "reserved",
       tenantHash,
+      userId,
     };
     await tx.insert(reservation);
+    if (userId) {
+      await tx.insertPackDraw({
+        reservedMinutes: Math.max(0, costUnits - bucketRemaining),
+        runId: input.runId,
+        userId,
+      });
+    }
 
     return { kind: "reserved", reservation };
   });
@@ -575,7 +622,7 @@ export async function reservationUsage(
   globalAdmissionClosed: boolean;
   tenantDailyRemaining: number;
   tenantMonthlyRemaining: number;
-  /** Pack minutes still unspent, already included in the monthly remainder. */
+  /** Pack allowance after other periods; current-period draws count in the monthly remainder. */
   tenantPackMinutes: number;
 }> {
   const now = input.now ?? new Date();
@@ -587,6 +634,7 @@ export async function reservationUsage(
 
   const periodDay = dayKey(now);
   const tenantHash = tenantHashForReservation(input.tenant, input.keySecret);
+  const userId = userIdForTenant(input.tenant);
 
   return await withSerializableRetry(database, async (tx) => {
     await tx.releaseExpired(now);
@@ -607,13 +655,13 @@ export async function reservationUsage(
         periodMonth: input.periodStart,
         tenant: input.tenant,
         tenantHash,
+        userId: userId ?? undefined,
       }),
       tx.activeUnits({ now, periodDay }),
       availablePackMinutes(tx, {
-        cap: tenantMonthlyCap,
+        now,
         periodMonth: input.periodStart,
-        tenant: input.tenant,
-        tenantHash,
+        userId,
       }),
     ]);
 
@@ -622,9 +670,12 @@ export async function reservationUsage(
       tenantDailyRemaining: Math.max(0, tenantDailyCap - tenantDailyUnits),
       tenantMonthlyRemaining: Math.max(
         0,
-        tenantMonthlyCap + packMinutes - tenantMonthlyUnits
+        Math.max(
+          0,
+          tenantMonthlyCap - (tenantMonthlyUnits - packMinutes.period)
+        ) + packMinutes.available
       ),
-      tenantPackMinutes: packMinutes,
+      tenantPackMinutes: packMinutes.periodAllowance,
     };
   });
 }
@@ -680,26 +731,27 @@ export function settledRunMinutes(input: {
  * alone bounds it.
  */
 async function availablePackMinutes(
-  tx: Pick<
-    RunReservationTransaction,
-    "priorPeriodOverflow" | "purchasedPackMinutes"
-  >,
-  input: { cap: number; periodMonth: Date; tenant: string; tenantHash: string }
-): Promise<number> {
-  const userId = userIdForTenant(input.tenant);
-  if (!userId) {
-    return 0;
+  tx: Pick<RunReservationTransaction, "packUsage" | "purchasedPackMinutes">,
+  input: { now: Date; periodMonth: Date; userId: string | null }
+): Promise<{ available: number; period: number; periodAllowance: number }> {
+  if (!input.userId) {
+    return { available: 0, period: 0, periodAllowance: 0 };
   }
-  const purchased = await tx.purchasedPackMinutes(userId);
-  if (purchased <= 0) {
-    return 0;
-  }
-  const priorPeriodOverflow = await tx.priorPeriodOverflow({
-    cap: input.cap,
-    periodMonth: input.periodMonth,
-    tenantHash: input.tenantHash,
-  });
-  return remainingPackMinutes({ priorPeriodOverflow, purchased });
+  const purchased = await tx.purchasedPackMinutes(input.userId);
+  const draws = await tx.packUsage({ ...input, userId: input.userId });
+  return {
+    available: remainingPackMinutes({
+      priorPeriodOverflow: draws.held,
+      purchased,
+    }),
+    period: draws.period,
+    // Preserve the usage API's period allowance; current-period allocations
+    // are already reflected in tenantMonthlyRemaining and must not count twice.
+    periodAllowance: remainingPackMinutes({
+      priorPeriodOverflow: draws.held - draws.period,
+      purchased,
+    }),
+  };
 }
 
 export function tenantHashForReservation(

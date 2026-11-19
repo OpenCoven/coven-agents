@@ -1,7 +1,7 @@
 import "server-only";
 
 import { inspect } from "node:util";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import {
   consumeRunReservation,
   drizzleRunReservationDatabase,
@@ -15,6 +15,7 @@ import {
   type CredentialLease,
   credentialLease,
   type RunReservation,
+  runPackDraw,
   runReservation,
   runUsage,
 } from "@/lib/db/schema";
@@ -202,6 +203,14 @@ export function drizzleRunnerCredentialCleanupDatabase(
                   )
                 )
                 .returning();
+              if (settled) {
+                await transaction
+                  .update(runPackDraw)
+                  .set({
+                    minutes: sql`greatest(0, ${settled.costUnits} - (${settled.reservedUnits} - ${runPackDraw.reservedMinutes}))`,
+                  })
+                  .where(eq(runPackDraw.runId, runId));
+              }
               return settled ?? null;
             },
           }),

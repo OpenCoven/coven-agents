@@ -337,6 +337,20 @@
       "when": 1795063695092,
       "tag": "0047_guarded_sandbox_pin",
       "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1795065345336,
+      "tag": "0048_reservation_pack_ledger",
+      "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1795065346049,
+      "tag": "0049_explicit_pack_draws",
+      "breakpoints": true
     }
   ]
 }

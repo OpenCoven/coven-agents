@@ -371,6 +371,12 @@ export const runReservation = pgTable(
     costUnits: integer("costUnits").notNull(),
     durationSeconds: integer("durationSeconds"),
     expiresAt: timestamp("expiresAt").notNull(),
+    /**
+     * The monthly bucket admission judged this run against, retained for audit.
+     * Pack accounting uses RunPackDraw, never this cap or a later policy.
+     * Null on rows admitted before the cap was recorded.
+     */
+    monthlyCap: integer("monthlyCap"),
     periodDay: date("periodDay").notNull(),
     periodMonth: timestamp("periodMonth").notNull(),
     releasedAt: timestamp("releasedAt"),
@@ -385,6 +391,14 @@ export const runReservation = pgTable(
       .notNull()
       .default("reserved"),
     tenantHash: varchar("tenantHash", { length: 64 }).notNull(),
+    /**
+     * The account whose packs this run may draw on. Packs are bought per
+     * account, so consumption is keyed the same way; `tenantHash` is an HMAC
+     * that changes with the abuse key and only bounds abuse buckets. Null
+     * for demo tenants, which own no account, and on rows admitted before
+     * the account was recorded.
+     */
+    userId: uuid("userId").references(() => user.id, { onDelete: "set null" }),
   },
   (table) => [
     index("RunReservation_tenant_day_state_idx").on(
@@ -397,6 +411,15 @@ export const runReservation = pgTable(
       table.tenantHash,
       table.periodMonth,
       table.state
+    ),
+    index("RunReservation_user_period_state_idx").on(
+      table.userId,
+      table.periodMonth,
+      table.state
+    ),
+    check(
+      "RunReservation_monthlyCap_positive",
+      sql`${table.monthlyCap} is null or ${table.monthlyCap} > 0`
     ),
     index("RunReservation_reserved_expiry_idx")
       .on(table.expiresAt)
@@ -426,6 +449,32 @@ export const runReservation = pgTable(
 );
 
 export type RunReservation = InferSelectModel<typeof runReservation>;
+
+/** An account-keyed pack allocation, held by a reservation and charged on consumption. */
+export const runPackDraw = pgTable(
+  "RunPackDraw",
+  {
+    minutes: integer("minutes").notNull(),
+    reservedMinutes: integer("reservedMinutes").notNull(),
+    runId: varchar("runId", { length: 64 })
+      .primaryKey()
+      .references(() => runReservation.runId, { onDelete: "cascade" }),
+    userId: uuid("userId")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+  },
+  (table) => [
+    index("RunPackDraw_user_idx").on(table.userId),
+    check(
+      "RunPackDraw_minutes_valid",
+      sql`${table.minutes} >= 0 and ${table.minutes} <= ${table.reservedMinutes}`
+    ),
+    check(
+      "RunPackDraw_reservedMinutes_valid",
+      sql`${table.reservedMinutes} >= 0`
+    ),
+  ]
+);
 
 /**
  * One paid top-up of minutes.
