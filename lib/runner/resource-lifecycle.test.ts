@@ -266,6 +266,14 @@ resourceLifecycleContract("Daytona-shaped fake", () => {
       scanDaytonaSandboxRecoveries: async () => [],
       scanDaytonaSandboxRepairCandidates: async () => [],
       scanDaytonaWarmRecoveries: async () => [],
+      withUnpinnedDaytonaSandboxReuse: async (
+        _principal: RunnerPrincipal,
+        _agent: RunnerAgentRecord,
+        prepare: () => Promise<void>
+      ) => {
+        await prepare();
+        return true;
+      },
     } as never,
   });
 });
