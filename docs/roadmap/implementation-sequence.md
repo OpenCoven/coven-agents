@@ -1,5 +1,9 @@
 # Implementation Sequence
 
+## Current delivery checkpoint
+
+The baseline gate repair shipped in [PR #302](https://github.com/OpenCoven/coven-agents/pull/302). Next, finish the contributor setup and Git hook review in #310, then reconcile the Castles contract and scoped owner credential in #311. Record the accepted contract SHA for Castles before closing #296. Keep guarded external binding and redacted execution evidence visible under #298. The runner and billing branches share migration slots. Agree on the landing order and verify the regenerated chain on fresh and previously migrated disposable databases before delivering #276.
+
 This sequence describes public outcome ordering. Private planning remains the
 task-level authority and must not be reconstructed from this document.
 
