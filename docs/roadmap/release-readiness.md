@@ -279,9 +279,7 @@ participant is a real account with a real tenant whose minutes come from a
 grant rather than from Stripe, so `subscribedUntil` is never written and
 reconciliation never sees a subscription date with no subscription behind it.
 
-Six variables govern it. `BETA_CAMPAIGN_ENABLED` must be exactly `on`; any
-other value, and any missing or malformed number, disables the whole campaign
-rather than substituting a default.
+Set `BETA_CAMPAIGN_ENABLED=invite-only` for a bounded complimentary pilot. Set `BETA_ALLOWLIST` to the verified addresses of the invited GitHub accounts. The access gate and the enrollment callback both check that list. An empty list admits nobody. The existing `on` setting opens enrollment to all eligible GitHub accounts. Missing or malformed campaign limits disable grants.
 
 | Variable | Bound |
 | --- | --- |
@@ -297,10 +295,7 @@ Worst-case exposure is `BETA_CAMPAIGN_MAX_ACCOUNTS` multiplied by
 behind. Reason about that product, not the per-account grant alone, when
 approving the cap.
 
-The same switch opens the beta gate, deliberately. Splitting the audience
-decision across two flags lets them disagree, and this pair would disagree
-expensively: a campaign granting minutes behind a closed allowlist hands people
-free run time and then bounces them at the door.
+The campaign caps count accounts and execution minutes. A four-run ceiling across the whole pilot requires a separate admission count. The daily minute budget cannot establish that ceiling, and individual grant expiry runs from each enrollment. Verify the common pilot end time and run ceiling before opening the pilot.
 
 Before enabling:
 

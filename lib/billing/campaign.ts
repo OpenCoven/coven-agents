@@ -1,3 +1,5 @@
+import { isAllowedIdentity, readBetaGate } from "../beta";
+
 /**
  * The open beta campaign: a bounded grant of run minutes to anyone who signs
  * in with GitHub.
@@ -105,8 +107,28 @@ function positiveInteger(value: string | undefined): number | null {
  * enrollment, not admit everyone. `validateCampaignConfig` is what makes that
  * typo loud at boot instead of merely safe.
  */
+export function campaignEnabled(env: CampaignEnvironment): boolean {
+  return (
+    env.BETA_CAMPAIGN_ENABLED === "on" ||
+    env.BETA_CAMPAIGN_ENABLED === "invite-only"
+  );
+}
+
+export function campaignEnrollmentPolicy(
+  env: CampaignEnvironment,
+  verifiedEmail: string
+): CampaignPolicy {
+  if (
+    env.BETA_CAMPAIGN_ENABLED === "invite-only" &&
+    !isAllowedIdentity(readBetaGate(env), verifiedEmail)
+  ) {
+    return DISABLED;
+  }
+  return readCampaignPolicy(env);
+}
+
 export function readCampaignPolicy(env: CampaignEnvironment): CampaignPolicy {
-  if (env.BETA_CAMPAIGN_ENABLED !== "on") {
+  if (!campaignEnabled(env)) {
     return DISABLED;
   }
 
@@ -152,7 +174,7 @@ export function readCampaignPolicy(env: CampaignEnvironment): CampaignPolicy {
  * account would see "20 minutes" next to a button that never works.
  */
 export function validateCampaignConfig(env: CampaignEnvironment): void {
-  if (env.BETA_CAMPAIGN_ENABLED !== "on") {
+  if (!campaignEnabled(env)) {
     return;
   }
 

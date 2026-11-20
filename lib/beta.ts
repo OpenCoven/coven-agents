@@ -96,7 +96,8 @@ export function readBetaGate(env: {
       .split(",")
       .map(normalizeEmail)
       .filter(Boolean),
-    enabled: env.BETA_MODE === "on",
+    enabled:
+      env.BETA_MODE === "on" || env.BETA_CAMPAIGN_ENABLED === "invite-only",
     open: env.BETA_CAMPAIGN_ENABLED === "on",
   };
 }

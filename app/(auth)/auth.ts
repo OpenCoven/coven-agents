@@ -13,7 +13,7 @@ import {
   authVersionMatches,
   validAuthVersion,
 } from "@/lib/auth/session-revocation";
-import { readCampaignPolicy } from "@/lib/billing/campaign";
+import { campaignEnrollmentPolicy } from "@/lib/billing/campaign";
 import {
   enrollCampaignParticipant,
   findOrCreateFederatedUser,
@@ -130,7 +130,7 @@ export const {
           {
             accessToken: account.access_token,
             now,
-            policy: readCampaignPolicy(process.env),
+            policy: campaignEnrollmentPolicy(process.env, email),
             user: row,
           },
           {

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   CAMPAIGN_PERIOD_EPOCH,
+  campaignEnrollmentPolicy,
   campaignExpiryFrom,
   campaignGrantActiveAt,
   githubAccountOldEnough,
@@ -167,4 +168,29 @@ test("the campaign period epoch is a fixed instant", () => {
   // Moving this orphans every reservation already filed under the old value,
   // which reads as a full refund of everyone's minutes.
   assert.equal(CAMPAIGN_PERIOD_EPOCH.toISOString(), "2026-01-01T00:00:00.000Z");
+});
+
+test("invite-only grants require a listed verified address and retain their budget", () => {
+  const env = {
+    ...CONFIGURED,
+    BETA_ALLOWLIST: "one@example.invalid,two@example.invalid",
+    BETA_CAMPAIGN_ENABLED: "invite-only",
+    BETA_CAMPAIGN_MINUTES: "10",
+    BETA_CAMPAIGN_RUN_MINUTES: "5",
+  };
+  const invited = campaignEnrollmentPolicy(env, "TWO@example.invalid");
+  assert.equal(invited.enabled, true);
+  assert.equal(invited.minutes, 10);
+  assert.equal(invited.runMinutes, 5);
+  assert.equal(
+    campaignEnrollmentPolicy(env, "three@example.invalid").enabled,
+    false
+  );
+  assert.equal(
+    campaignEnrollmentPolicy(
+      { ...env, BETA_ALLOWLIST: "" },
+      "one@example.invalid"
+    ).enabled,
+    false
+  );
 });
