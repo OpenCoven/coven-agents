@@ -19,8 +19,7 @@ receipt and shared diagnostic deadline.
 It distinguishes those completed boundaries and the successful
 Production-config operator checks from pending persistent Daytona lifecycle,
 subscriber certification, observation-window, and full product release
-approval. Private planning reconciliation remains pending and is not inferred
-from repository or Project evidence.
+approval.
 
 ## Implemented surfaces
 
@@ -147,8 +146,7 @@ refusal, and no claim of subscriber or provider lifecycle certification.
 - GitHub Actions remain intentionally disabled, so local gates are the only
   repository verification boundary.
 - Git-triggered Vercel deployments remain intentionally disabled.
-- Private planning reconciliation must be performed by an authorized
-  maintainer and is not asserted here.
+- GitHub issues track open delivery work. This audit records repository evidence and does not certify issue acceptance.
 
 ## Verification commands
 

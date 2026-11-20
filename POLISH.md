@@ -56,9 +56,7 @@ information.
 
 ## Historical deferred observations
 
-These bullets record what the polishing pass did not change. They are not
-current task commitments; private Beads/DoltHub remains authoritative for any
-follow-up.
+These bullets record what the polishing pass did not change. Use GitHub issues to track any follow-up accepted for delivery.
 
 - Mobile architecture (tab bar, sheets, drawer navigation): a design project
   of its own; the console is desktop-first today and pretending otherwise in
