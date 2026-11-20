@@ -1,28 +1,12 @@
 # Delivery Governance
 
-This document defines how delivery state moves between the private planning
-authority, repository evidence, and release decisions. It does not reproduce
-private task text.
-
 ## Authority hierarchy
 
-When records disagree, the higher source in this list wins:
+1. GitHub issues own repository task status, dependencies, priority, assignment, and acceptance. Use native blocked-by and sub-issue links. Keep private material out of public issues.
+2. Pull requests and landed commits record implementation, review, and verification evidence. A merge alone leaves issue acceptance and production approval pending.
+3. [The roadmap](../../ROADMAP.md) and [its supporting docs](./) record public goals, gates, and verified outcomes. Resolve discrepancies with the issue owner and the relevant evidence.
 
-1. **Private Beads/DoltHub is the task authority.** It owns task status,
-   dependencies, priority, assignment, and acceptance.
-2. **OpenCoven Project #10 is generated.** It is a private, field-oriented
-   projection of Beads for coordination. Project edits never override Beads.
-3. **[`ROADMAP.md`](../../ROADMAP.md) and [`docs/roadmap`](./) are public
-   aggregates and outcomes.** They record waves, gates, counts, current
-   repository evidence, and operating policy without copying private task
-   descriptions or acceptance criteria.
-4. **GitHub issues and pull requests are delivery artifacts.** They provide
-   discussion, review, merged-code, and deployment evidence. They do not become
-   task authority merely because they are newer or public.
-
-`main` remains the source of truth for merged repository content. A merge is
-delivery evidence, not automatic proof that the authoritative task is accepted
-or that every projection has reconciled.
+`main` is the source of truth for merged repository content.
 
 ## One task, branch, and worktree
 
@@ -37,13 +21,13 @@ worktree:
 
 If related work must split, create separately authorized tasks and independent
 branches/worktrees. Do not use one branch to hide dependency or ownership
-changes that belong in Beads.
+changes that belong in the delivery issue.
 
 ## Delivery lifecycle
 
 ### Start
 
-1. Confirm the task and dependencies in Beads when authority is available.
+1. Confirm the task and dependencies in GitHub issues.
 2. Create or select the task's branch and worktree.
 3. Confirm the worktree is clean and that no other task owns the same files.
 4. Record the intended verification and release evidence before implementation.
@@ -59,54 +43,20 @@ changes that belong in Beads.
 
 ### Post-merge reconciliation
 
-An authorized maintainer reconciles in this order:
-
-1. Pull the private Beads authority, record the accepted delivery and dependency
-   changes, then commit and push the private database.
-2. Preview and apply the one-way Beads-to-Project projection. Apply a second
-   time, then finish with a preview that reports zero creates, updates, and
-   orphans and the full managed inventory unchanged.
-3. Reconcile the delivery issue and merged pull request. Close an issue only
-   when the authoritative task is accepted; preserve the pull request as
-   evidence.
-4. Refresh the generated aggregate in `ROADMAP.md`, run its stale check, and
-   commit the refresh if it changed.
-5. Update the verification matrix or release-readiness record when the merge
-   changes a capability, procedure, environment, blocker, rollback condition,
-   or retained artifact.
-
-The Project, issue, and roadmap steps never run ahead of Beads. The sync
-validates source, schema, inventory, and privacy rules before beginning writes
-and is idempotent and retryable, but its batched GraphQL apply is **not atomic**.
-A later mutation failure may leave earlier Project mutations persisted. Stop
-downstream issue and roadmap reconciliation, repair the cause, and rerun preview
-and apply until the final no-op gate passes. Sync never deletes or archives
-Project items, and it leaves orphans untouched for review.
+1. Verify the landed revision and record the merged pull request and relevant test receipts on the delivery issue.
+2. Record unmet acceptance criteria and their owners. Close the issue only when every required criterion has evidence and closure is authorized.
+3. Update the public roadmap, verification matrix, or release-readiness record when the merge changes an outcome, procedure, environment, blocker, rollback condition, or retained artifact.
 
 ## Roadmap refresh triggers
 
-Run `pnpm roadmap:status check` and refresh when authorized after any of these
-events:
-
-- an authoritative task changes status, wave, dependency, priority, owner, or
-  blocked state;
-- a delivery pull request merges, reverts, or rolls back;
-- a shipped issue is opened, closed, or found inconsistent with Beads;
-- a promotion, demotion, go/no-go, or release decision is being made;
-- verification evidence expires or a touched path invalidates it;
-- `pnpm roadmap:status check` reports a stale aggregate; or
-- unavailable planning authority becomes available again; or
-- GitHub Actions or other required CI is separately approved and restored.
-
-Do not hand-edit the generated status block. A current Project projection does
-not prove Beads is current when the private authority cannot be read.
+Review the roadmap when delivery issues change materially, work merges or is reverted, verification evidence expires, or a promotion or release decision is made. Resolve stale claims against issue state and exact landed evidence.
 
 ## Planning document registry
 
 [`docs/roadmap/README.md`](README.md) is the canonical index for tracked
 planning documents. It classifies living guidance, non-authoritative proposals,
 historical evidence, decision logs, and superseded specifications without
-changing the authority hierarchy.
+changing issue status.
 
 Add or update a registry row in the same change that creates, reclassifies,
 supersedes, or removes a planning document. Historical and superseded rows must
@@ -122,10 +72,7 @@ querying or reproducing private task content.
 
 A phase, wave, capability, or release may be promoted only when:
 
-- the authoritative planning workspace is available, current, and backed up;
-- Beads, its generated Project view, and delivered issue state are reconciled;
-- a second Beads-to-Project apply and final preview prove a no-op with zero
-  creates, updates, and orphans and the full managed inventory unchanged;
+- relevant issues and dependencies are current and linked to landed evidence;
 - no unresolved P0 or blocking dependency applies;
 - there are no `AT RISK` worktrees;
 - the secondary-worktree count is within the repository soft cap;
@@ -133,7 +80,7 @@ A phase, wave, capability, or release may be promoted only when:
   artifacts are current;
 - all five required local gates pass on the promoted commit;
 - every required verification row is `Verified` or `Certified`;
-- the roadmap aggregate is current;
+- the roadmap is current;
 - rollback ownership and triggers are recorded; and
 - release-affecting data has a tested recovery path or an explicit no-go.
 
@@ -141,13 +88,7 @@ A phase, wave, capability, or release may be promoted only when:
 release-equivalent environment. Unit, integration, source inspection, or an
 undated manual claim cannot satisfy that state.
 
-Demote immediately when a required gate regresses, the final planning sync is
-not a no-op, the secondary-worktree count exceeds the soft cap, dependencies or
-generated artifacts become stale, evidence no longer applies to the current
-commit or environment, a required row becomes `Blocked`, a rollback occurs, an
-`AT RISK` worktree appears, the roadmap becomes stale, or Beads and Project can
-no longer be shown to agree. Demotion updates current status; it does not
-rewrite historical evidence.
+Demote immediately when a required gate regresses, the secondary-worktree count exceeds the soft cap, dependencies or generated artifacts become stale, evidence no longer applies to the current commit or environment, a required row becomes `Blocked`, a rollback occurs, an `AT RISK` worktree appears, or an unmet blocking issue invalidates readiness. Record the change without rewriting historical evidence.
 
 ## Historical specifications
 
@@ -209,46 +150,28 @@ pnpm build
 | Every task start | Delivery owner | Confirm authority, branch, worktree, scope, and evidence plan. |
 | Before every idle period or handoff | Delivery owner | Commit when appropriate and push the branch; never leave unique work only on one machine. |
 | Every review and merge | Reviewer and delivery owner | Bind evidence to the tested commit and identify any invalidated verification row. |
-| After every merge | Authorized maintainer | Reconcile Beads, Project, issue/PR state, roadmap aggregate, and affected evidence documents in authority order. |
+| After every merge | Authorized maintainer | Verify the landed revision and update the delivery issue, roadmap, and affected evidence documents. |
 | Weekly and before promotion | Maintainer and reviewer | Check roadmap freshness, verification age, blockers, dependency drift, and worktree hygiene. |
 | Every release | Release operator and reviewer | Execute [`release-readiness.md`](release-readiness.md), record go/no-go, and retain smoke and rollback evidence. |
 
 The maintainer owns authority mutations, promotion, production release, and
 rollback. The delivery owner owns the task branch and implementation evidence.
-The reviewer independently checks the claim. Automation may validate or
-project state, but it may not decide acceptance.
+The reviewer independently checks the claim. Automation may validate evidence. The maintainer decides acceptance.
 
-## Unavailable authority
+## Unavailable issue state
 
-Planning operations fail closed when Beads/DoltHub is unavailable:
-
-- do not infer task status, dependencies, priority, or acceptance from Project,
-  issues, pull requests, or `ROADMAP.md`;
-- do not mutate Project, close delivery issues, promote a wave, or claim an
-  idempotent sync;
-- leave the last checked-in aggregate unchanged and record the access failure
-  as a blocker;
-- continue only work whose authorization and scope were already established
-  and that does not require unavailable private acceptance details; and
-- reconcile every projection before the next promotion or release after access
-  returns.
-
-The current access state and its release effect are recorded in
-[`current-state.md`](current-state.md) and
-[`release-readiness.md`](release-readiness.md).
+When issue state cannot be verified, continue already authorized work and retain local evidence. Wait for verified issue state and approval before changing acceptance or promoting a release.
 
 ## No destructive automation
 
 Automation must preview before mutation, fail on ambiguity, and preserve data:
 
-- no automatic Beads deletion, Project archive, issue closure, branch deletion,
+- no automatic issue closure, branch deletion,
   worktree removal, history rewrite, force push, database rollback, or evidence
   purge;
-- partial Project mutations are recovered by repairing the cause and rerunning
-  the idempotent sync, not by automatic rollback, deletion, or archive;
 - orphaned or conflicting records remain untouched for authorized review;
 - cleanup tools may act only when they prove work is safely merged or pushed;
 - migration, rollback, retention, and deletion actions require a named human
   operator and recovery evidence; and
-- authentication, schema, inventory, privacy, or partial-write failures stop
+- authentication, schema, inventory, or privacy failures stop
   rather than guess.

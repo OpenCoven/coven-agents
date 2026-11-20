@@ -42,14 +42,9 @@ The fully gated PR #134 head and its squash-merge commit both have tree
 `a8bb0a82efb6ffb7f754d03519f0d381e72fb88e`. These artifacts and results prove
 repository delivery only.
 
-## Pending taxonomy follow-up
+## Taxonomy follow-up
 
-The repository keeps the runner, workstream, and seed identifiers already used
-by the authoritative private planning source and its generated Project view.
-Taxonomy modernization requires a private-source-first, coordinated migration
-across Beads, Project #10, and repository validation. That work is outside this
-repository-only cleanup and remains pending; this record neither accesses nor
-reproduces private records.
+The cutover retained the runner and workstream identifiers in use at the time. Record any future taxonomy change in a delivery issue and update the affected repository validation alongside it.
 
 ## Verified repository evidence
 

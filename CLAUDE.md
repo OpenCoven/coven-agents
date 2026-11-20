@@ -107,35 +107,11 @@ Commit anything *after* the merge, though, and the tip no longer matches what
 `gh` merged — `reap` protects it and `pnpm hygiene` reports it AT RISK until
 you push it.
 
-## Planning authority
+## Planning and delivery
 
-Private Beads/DoltHub is the task-level authority. OpenCoven Project #10 is its
-generated private view; `ROADMAP.md` and `docs/roadmap/` contain public
-aggregates, outcomes, and evidence; issues and pull requests are delivery
-artifacts. A newer projection or artifact never overrides Beads.
+Use GitHub issues for repository tasks, ownership, dependencies, and acceptance criteria. Use pull requests and landed commits for delivery evidence. [Delivery governance](docs/roadmap/delivery-governance.md) defines when maintainers update issues and the public roadmap.
 
-Never copy private task titles, descriptions, acceptance criteria, or private
-metadata into tracked files, issues, pull requests, commit messages, command
-output, or logs.
-
-After a merge, authorized maintainers update and push Beads privately, then run:
-
-```bash
-pnpm beads:sync preview
-pnpm beads:sync apply
-pnpm beads:sync apply
-pnpm beads:sync preview
-pnpm roadmap:status apply
-pnpm roadmap:status check
-```
-
-These commands require authorized private Beads and Project access. Sync
-validates source, schema, inventory, and privacy rules before writes and is
-idempotent and retryable, but batched GraphQL apply is **not atomic**. Earlier
-Project mutations may persist if a later mutation fails. Stop downstream issue
-and roadmap reconciliation, repair the cause, and rerun preview/apply until the
-final preview is a no-op. Sync never deletes or archives Project items and
-leaves orphans untouched.
+Keep private task details and metadata out of tracked files, public issues, pull requests, commit messages, and logs.
 
 <!-- BEGIN:nextjs-agent-rules -->
 

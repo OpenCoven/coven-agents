@@ -48,10 +48,7 @@ test("the current-state snapshot covers merged product and planning surfaces", (
     );
   }
 
-  assert.match(
-    currentState,
-    /private planning\s+reconciliation remains\s+pending/iu
-  );
+  assert.match(currentState, /GitHub issues track open delivery work/u);
   assert.match(currentState, /\$30\/month/u);
   assert.match(currentState, /\$25\/month/u);
 });
@@ -765,7 +762,7 @@ test("release readiness separates infrastructure cutover from product approval",
   );
   assert.match(
     readiness,
-    /private Beads-to-Project reconciliation has completed with\s+a final no-op preview/u
+    /a release-blocking issue is unresolved or lacks verified acceptance evidence/u
   );
   assert.match(readiness, /## Coordinated team execution/u);
   assert.match(readiness, /GitHub-capable steps fail closed/u);
@@ -783,10 +780,15 @@ test("release readiness separates infrastructure cutover from product approval",
   assert.match(attestation, /does not certify persistent sandbox lifecycle/iu);
 });
 
-test("the implementation sequence records its authority freshness boundary", () => {
+test("the implementation sequence points to delivery issues for task acceptance", () => {
   const sequence = read("docs/roadmap/implementation-sequence.md");
 
-  assert.match(sequence, /Authority freshness/u);
-  assert.match(sequence, /not reordered on 2026-08-31/u);
-  assert.match(sequence, /private planning authority was unavailable/u);
+  assert.match(
+    sequence,
+    /Check the delivery issues for task status and acceptance criteria/u
+  );
+  assert.match(
+    sequence,
+    /Link landed changes and their evidence from the delivery issue/u
+  );
 });

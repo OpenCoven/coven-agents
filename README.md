@@ -149,7 +149,7 @@ sequencing, release gates, and capability status live in
 [planning document registry](docs/roadmap/README.md) classifies living plans,
 proposals, historical evidence, decision logs, and superseded specifications.
 The published [Wave 1 delivery report](docs/roadmap/wave-1-delivery.md) records
-public delivery artifacts without replacing the private planning authority.
+delivery evidence. GitHub issues track repository tasks and acceptance.
 
 Run the repository gates:
 
