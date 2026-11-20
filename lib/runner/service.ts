@@ -171,7 +171,8 @@ export type RunnerStartResult =
         | "admission_unavailable"
         | "busy"
         | "lifecycle_conflict"
-        | "operation_conflict";
+        | "operation_conflict"
+        | "sandbox_trust_conflict";
       kind: "refused";
       retryable: boolean;
     }>
@@ -499,13 +500,16 @@ export function createRunnerService(
   const admit =
     dependencies.admit ??
     ((input) =>
-      admitRunnerRun(input, {
-        limits: dependencies.admissionLimits,
-        reportFailure: dependencies.reportAdmissionFailure,
-        store: dependencies.store as unknown as Parameters<
-          typeof admitRunnerRun
-        >[1]["store"],
-      }));
+      admitRunnerRun(
+        { ...input, useOwnerExecutionPolicy: true },
+        {
+          limits: dependencies.admissionLimits,
+          reportFailure: dependencies.reportAdmissionFailure,
+          store: dependencies.store as unknown as Parameters<
+            typeof admitRunnerRun
+          >[1]["store"],
+        }
+      ));
 
   async function getAgent(
     principal: RunnerPrincipal,
@@ -838,18 +842,22 @@ export function createRunnerService(
       if (!validId(id)) {
         throw configuredError("run creation");
       }
+      const executionPermission = agent.ownerWorkspaceRead
+        ? "workspace_read"
+        : "unrestricted";
       let admitted: AdmitRunnerRunResult;
       try {
         admitted = await admit({
           agentId,
           authVersion,
+          ...(agent.ownerWorkspaceRead ? { executionPermission } : {}),
           id,
           operationId: parsed.data.operationId,
           principal,
           requestHash: hashRunRequest(
             agentId,
             parsed.data.task,
-            "unrestricted",
+            executionPermission,
             parsed.data.sandboxBinding ?? null
           ),
           ...(parsed.data.sandboxBinding
@@ -911,7 +919,7 @@ export function createRunnerService(
               };
             case "sandbox_trust_conflict":
               return {
-                code: "lifecycle_conflict",
+                code: "sandbox_trust_conflict",
                 kind: "refused",
                 retryable: false,
               };

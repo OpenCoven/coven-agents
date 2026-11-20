@@ -4,6 +4,7 @@ import {
   AGENT_RUNNER_API_VERSION,
   type RunSnapshot,
 } from "@opencoven/agent-contracts";
+import { buildInvocation } from "@opencoven/harness";
 import { cancelRunnerRun, reconcileAndDispatch } from "./attempt-reconcile";
 import { createRunnerService } from "./service";
 import type {
@@ -647,6 +648,14 @@ test("start maps admission conflict, capacity, and unavailable results without p
         code: "admission_unavailable",
         kind: "refused",
         retryable: true,
+      },
+    },
+    {
+      code: "sandbox_trust_conflict",
+      expected: {
+        code: "sandbox_trust_conflict",
+        kind: "refused",
+        retryable: false,
       },
     },
     {
@@ -1414,4 +1423,71 @@ test("start rejects a malformed sandbox binding before any lookup", async () => 
     { kind: "invalid" },
   ]);
   assert.equal(lookups, 0);
+});
+
+test("owner runs on read-only agents build a restricted Copilot invocation", async () => {
+  const configuredAgent = { ...agent(), ownerWorkspaceRead: true };
+  const invocations: ReturnType<typeof buildInvocation>[] = [];
+  const service = createRunnerService({
+    admit: (input) => {
+      invocations.push(
+        buildInvocation({
+          attemptDir: "/tmp/owner-run-attempt",
+          configDir: "/tmp/owner-run-config",
+          cwd: "/workspace",
+          harness: configuredAgent.runtime,
+          instructions: configuredAgent.instructions,
+          model: configuredAgent.model,
+          permissionMode: input.executionPermission,
+          task: input.task,
+        })
+      );
+      return Promise.resolve({ kind: "created", run: run() });
+    },
+    createId: () => RUN_ID,
+    store: baseStore({ getAgent: async () => configuredAgent }),
+  });
+
+  const widening = await service.startRun(PRINCIPAL, 7, AGENT_ID, {
+    executionPermission: "unrestricted",
+    operationId: OPERATION_ID,
+    task: "Inspect the workspace.",
+  } as Parameters<typeof service.startRun>[3]);
+  assert.equal(widening.kind, "invalid");
+  assert.equal(invocations.length, 0);
+
+  const result = await service.startRun(PRINCIPAL, 7, AGENT_ID, {
+    operationId: OPERATION_ID,
+    task: "Inspect the workspace.",
+  });
+
+  assert.equal(result.kind, "accepted");
+  const [invocation] = invocations;
+  assert.ok(invocation);
+  assert.equal(invocation.args.includes("--yolo"), false);
+  const toolFlag = invocation.args.indexOf("--available-tools");
+  assert.ok(toolFlag >= 0);
+  const allowedTools = invocation.args[toolFlag + 1]?.split(",");
+  assert.deepEqual(allowedTools, ["view", "rg", "glob"]);
+
+  // Recording fixture: model tool dispatch from the actual invocation allowlist.
+  const files = new Map([["/workspace/report.txt", "original"]]);
+  const commands: string[] = [];
+  const taskActions = [
+    { path: "/workspace/report.txt", tool: "apply_patch" },
+    { path: "/outside/report.txt", tool: "apply_patch" },
+    { path: "echo fixture", tool: "shell" },
+  ];
+  assert.equal(files.get("/workspace/report.txt"), "original");
+  for (const action of taskActions) {
+    if (allowedTools?.includes(action.tool)) {
+      if (action.tool === "shell") {
+        commands.push(action.path);
+      } else {
+        files.set(action.path, "changed");
+      }
+    }
+  }
+  assert.deepEqual([...files], [["/workspace/report.txt", "original"]]);
+  assert.deepEqual(commands, []);
 });
