@@ -295,7 +295,7 @@ Worst-case exposure is `BETA_CAMPAIGN_MAX_ACCOUNTS` multiplied by
 behind. Reason about that product, not the per-account grant alone, when
 approving the cap.
 
-The campaign caps count accounts and execution minutes. A four-run ceiling across the whole pilot requires a separate admission count. The daily minute budget cannot establish that ceiling, and individual grant expiry runs from each enrollment. Verify the common pilot end time and run ceiling before opening the pilot.
+The campaign caps count accounts and execution minutes. A four-run ceiling across the whole pilot requires a separate admission count. The daily minute budget cannot establish that ceiling, and is independent of grant expiry. For invite-only mode, set `BETA_CAMPAIGN_ENDS_AT` to the common UTC deadline in ISO format with milliseconds. Enrollment starts the configured number of grant days before that deadline, and every new grant expires by the deadline. Verify the run ceiling before opening the pilot.
 
 Before enabling:
 

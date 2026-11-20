@@ -175,6 +175,7 @@ test("invite-only grants require a listed verified address and retain their budg
     ...CONFIGURED,
     BETA_ALLOWLIST: "one@example.invalid,two@example.invalid",
     BETA_CAMPAIGN_ENABLED: "invite-only",
+    BETA_CAMPAIGN_ENDS_AT: "2026-11-22T00:00:00.000Z",
     BETA_CAMPAIGN_MINUTES: "10",
     BETA_CAMPAIGN_RUN_MINUTES: "5",
   };
@@ -192,5 +193,27 @@ test("invite-only grants require a listed verified address and retain their budg
       "one@example.invalid"
     ).enabled,
     false
+  );
+});
+
+test("invite-only enrollment requires a valid common deadline and clips late grants", () => {
+  const env = {
+    ...CONFIGURED,
+    BETA_CAMPAIGN_ENABLED: "invite-only",
+    BETA_CAMPAIGN_GRANT_DAYS: "1",
+  };
+  for (const value of [undefined, "invalid", "2026-02-31T00:00:00.000Z"]) {
+    const config = { ...env, BETA_CAMPAIGN_ENDS_AT: value };
+    assert.equal(readCampaignPolicy(config).enabled, false);
+    assert.throws(
+      () => validateCampaignConfig(config),
+      /BETA_CAMPAIGN_ENDS_AT/
+    );
+  }
+  const end = "2026-11-22T00:00:00.000Z";
+  const policy = readCampaignPolicy({ ...env, BETA_CAMPAIGN_ENDS_AT: end });
+  assert.equal(
+    campaignExpiryFrom(policy, new Date("2026-11-21T23:55:00Z")).toISOString(),
+    end
   );
 });
