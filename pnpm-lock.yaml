@@ -253,11 +253,11 @@ importers:
         version: 4.6.7
     devDependencies:
       '@biomejs/biome':
-        specifier: 2.6.8
-        version: 2.6.8
+        specifier: 2.5.15
+        version: 2.5.15
       '@github/copilot':
-        specifier: 1.0.112
-        version: 1.0.112
+        specifier: 1.0.83
+        version: 1.0.83
       '@playwright/test':
         specifier: ^1.65.1
         version: 1.65.1
@@ -314,7 +314,7 @@ importers:
         version: typescript@5.8.2
       ultracite:
         specifier: ^7.12.2
-        version: 7.12.2(@biomejs/biome@2.6.8)
+        version: 7.12.2(@biomejs/biome@2.5.15)
 
   packages/agent-contracts:
     dependencies:
@@ -513,71 +513,59 @@ packages:
     resolution: {integrity: sha512-Vj1jF3cPfxg7OAfoI7QnVKLoILlm2JF9pnVHrX8qx7AHMiYWT+NDAA7jChlNgRS4WTLc/fD1lXLmPixluj+3Gg==}
     engines: {node: '>=6.9.0'}
 
-  '@biomejs/biome@2.6.8':
-    resolution: {integrity: sha512-kqZUFvX6/aYQOmzfRN5ANcfNS9wLH4aHLWWP/dQKyhRZVoA6rdWszA7DGugFcxPbMiznUyVYyukVl+ExZN4PQA==}
+  '@biomejs/biome@2.5.15':
+    resolution: {integrity: sha512-WZTW4slm/pdkh92K6t/3aEN++44JD1PQ7squ7RCMLI1flHGl43DVOIGXvCjHiZgBMO1V4uYxoFNtqrIA4qGuIQ==}
     engines: {node: '>=14.21.3'}
     hasBin: true
 
-  '@biomejs/cli-android-arm64@2.6.8':
-    resolution: {integrity: sha512-X4JKPLK85kfUTwuuaORFplnBfGjKkp62PsFhhcL7F/Tpltc7pyUofjlkkMnlZZLWsifFl7LNB8ngVrwJg1uo1Q==}
-    engines: {node: '>=14.21.3'}
-    cpu: [arm64]
-    os: [android]
-
-  '@biomejs/cli-android-x64@2.6.8':
-    resolution: {integrity: sha512-C3Hk485vl+deEj53K08+SYYelPIPkdSZL3qHuD31Xi+qydVa4q2ze+aCYo1k3iJGWtvWtjHaGkDh7S2sX6wk8w==}
-    engines: {node: '>=14.21.3'}
-    cpu: [x64]
-    os: [android]
-
-  '@biomejs/cli-darwin-arm64@2.6.8':
-    resolution: {integrity: sha512-DHyj+JnRHcn4YdvpiqgTFZMYKSPELMCfFpNNlEuu1L8DKTGXhzW7raIwdsbo2Ie9nCljQLAQkVWQk/mwM0ueiA==}
+  '@biomejs/cli-darwin-arm64@2.5.15':
+    resolution: {integrity: sha512-BZVzFhJ/mUvTLMYbc9x6el0o2Uv5zP7bACYyhFb6fSc1giroXm7PL0a5KqMJ9F+/BnkYRjagD/ROSDVOZ6eapg==}
     engines: {node: '>=14.21.3'}
     cpu: [arm64]
     os: [darwin]
 
-  '@biomejs/cli-darwin-x64@2.6.8':
-    resolution: {integrity: sha512-QWWUPjlA0RnkkgYnFLUHZu+RrDc0FdK0A+wEPA+dENQJwsuSHMH89lspnAw2QUWWc9VHyfluGx1Xmp6Y2GZi8Q==}
+  '@biomejs/cli-darwin-x64@2.5.15':
+    resolution: {integrity: sha512-V5Kw63V+fVGNFhFrizDxMbGXAzZCh8kYzJpy3GI6gTapWDg7bZK9oYC9CbVgQSEdTnupz0U5Efz8Ev+5vdBBXw==}
     engines: {node: '>=14.21.3'}
     cpu: [x64]
     os: [darwin]
 
-  '@biomejs/cli-linux-arm64-musl@2.6.8':
-    resolution: {integrity: sha512-WB9PhOitX+bRc0G3+GNJGlvbKoWn3JoB9z4E04JQizIC9aPCQyIvwvWG7QZHxw6k20Fi+dHLmZ2fSEmBa9HqiA==}
+  '@biomejs/cli-linux-arm64-musl@2.5.15':
+    resolution: {integrity: sha512-tGzZUTcJCV7tj5Adh/Gn6nR4MycqA3iohq2LEcrarAgRBkU0h0OKd2UzCRkOsOYOuUGaUJb4YmqRqyy2feGGSw==}
     engines: {node: '>=14.21.3'}
     cpu: [arm64]
     os: [linux]
     libc: [musl]
 
-  '@biomejs/cli-linux-arm64@2.6.8':
-    resolution: {integrity: sha512-0Bjim8lKwnrvXUHoI4k3Tb51BjoiLEwDnovCI8nSzkk6wj3dShiuAjrx6+X0Hjf4ejR1sRZgTQiSDHlpy9vB7w==}
+  '@biomejs/cli-linux-arm64@2.5.15':
+    resolution: {integrity: sha512-XaG7P7eeSLYETD3K9grfB0mQmpLQZjygdbsxekWBJAg4am79fGAtRpfRyNnTvXB2fZFNnJZG3nXm7HBat0+VUw==}
     engines: {node: '>=14.21.3'}
     cpu: [arm64]
     os: [linux]
     libc: [glibc]
 
-  '@biomejs/cli-linux-x64-musl@2.6.8':
-    resolution: {integrity: sha512-64Yzo+J4fEk7Kf9SMnVdVxC+Y2A2e/L86QTP9JjGQ57lsddyELLpbBcNMxSJggre2T1AvISwwSrOApkBAHDqNA==}
+  '@biomejs/cli-linux-x64-musl@2.5.15':
+    resolution: {integrity: sha512-IlxUcyxilVGPsE008x13pWdkTbU3nQpP2i9b5UrbOYj6goBkKsRX1XB7yJLcV+O1H9LBchIIm4adOaVLZBX0ZQ==}
     engines: {node: '>=14.21.3'}
     cpu: [x64]
     os: [linux]
     libc: [musl]
 
-  '@biomejs/cli-linux-x64@2.6.8':
-    resolution: {integrity: sha512-XIk3pLQT56I6Tti+u0DF8FtSNXjCMTPbxVTzfJ9cS2t1ImVKvrqV5b52GuEaJg6/wuiXvz0sjfb5saB4TPRjzA==}
+  '@biomejs/cli-linux-x64@2.5.15':
+    resolution: {integrity: sha512-xE4iEW/3LqlYj9GFgGrFsFSH51dEEpUbYWBfeOv0q87WkUDxK2o/HhreSb7qMJqck70RVM6Lg96hgedcAYcOkA==}
     engines: {node: '>=14.21.3'}
     cpu: [x64]
     os: [linux]
     libc: [glibc]
 
-  '@biomejs/cli-win32-arm64@2.6.8':
-    resolution: {integrity: sha512-ezjCEZzHIWE2pdh83a7zLVcAAcDaERcTcvfA7uWlxqz/1CuDxgtfO19pDg9B6YY4wKYIDvYBw2QCMnqIshSwmw==}
+  '@biomejs/cli-win32-arm64@2.5.15':
+    resolution: {integrity: sha512-2kPKzhNlm8C+Ru3GcO0Me2ODkCBLrVOUNuyi84RJyWDVKAA4+Kjj3jMjL938lF6BRfvltC4vB2nPY9SvN51Ovg==}
     engines: {node: '>=14.21.3'}
     cpu: [arm64]
     os: [win32]
 
-  '@biomejs/cli-win32-x64@2.6.8':
-    resolution: {integrity: sha512-cD6HvGczZUiAYsY8s2TxxXj2AHFzEdMomvVJfEjzOjBM45nGqIDfBpbtvwGQzDCN8X2yKKk9u1jnDZisT2nxIg==}
+  '@biomejs/cli-win32-x64@2.5.15':
+    resolution: {integrity: sha512-yAzh4UqEImV6Hcy0zjUqNfJAsUhoD64FBQCdTG8Md/Z2wQeVP/ZmJ3XRYAs1g8J9fjTFyl2fCtc5FB5til47+g==}
     engines: {node: '>=14.21.3'}
     cpu: [x64]
     os: [win32]
@@ -848,60 +836,60 @@ packages:
   '@floating-ui/utils@0.2.12':
     resolution: {integrity: sha512-HpCo8tmWzLVad5s2d19EhAz5zqrrQ6s69qd6moPMQvkOuSwDT1YgRfWSVuc4ennqrgv3OHppiOGMQ7oC13yIww==}
 
-  '@github/copilot-darwin-arm64@1.0.112':
-    resolution: {integrity: sha512-KhEgTlMtHkDWaBWwHGS+17wlsJLOt+rEC4Y5JLQ5QE+nVIgyA8QpEmrf4RuJWs1i9JLLYldtpk8dTyD+LIbM2Q==}
+  '@github/copilot-darwin-arm64@1.0.83':
+    resolution: {integrity: sha512-gv+SZRhxlQCmKOlzCCP6B2SOAaAPPc+VYGd6iC9va06wXNlmigYSCBhQeOSQoSeZ0mK2KR7RTM+AbiXLytBUfA==}
     cpu: [arm64]
     os: [darwin]
     hasBin: true
 
-  '@github/copilot-darwin-x64@1.0.112':
-    resolution: {integrity: sha512-e+GtWjgen/DyUIFPzT+EHQBG+ck2NW5ouSDYOM4vY6flLbGrchcOfqz6O9E5z3JXvns2EQtZ9W5byFiFbq4XcA==}
+  '@github/copilot-darwin-x64@1.0.83':
+    resolution: {integrity: sha512-f3oQxclEd/HUunTIMTriRIm883ONYPVOETGlEYF6fYWVkllPINMXnlKpM/b6h7fJEjZy8JFDhqqoZ60ezRNuUQ==}
     cpu: [x64]
     os: [darwin]
     hasBin: true
 
-  '@github/copilot-linux-arm64@1.0.112':
-    resolution: {integrity: sha512-cy6L7HS8A0GcHkrLpDdzS6y5bw/k1gQkCZyf7mxr3jScfXW32D7Cr1aKFomZwNODhIE8CWukBftQAg75UB6Whw==}
+  '@github/copilot-linux-arm64@1.0.83':
+    resolution: {integrity: sha512-pgVS60eX1mVJ8MFo9SDsalM2X5Eaywq6/rWJg6roHEY4GHNuIx3rHFIdnoQfbcIHcuGYpHuQ/wBbWiSgMKdNEQ==}
     cpu: [arm64]
     os: [linux]
     libc: [glibc]
     hasBin: true
 
-  '@github/copilot-linux-x64@1.0.112':
-    resolution: {integrity: sha512-uvlB+3hFwrcg2Il+i/amD9jlrDqN1nG0MKRAsXkTCXaVNuW38QS1LLbzN2jNj6CVfuU/dGtulqU93qJzbcJXBQ==}
+  '@github/copilot-linux-x64@1.0.83':
+    resolution: {integrity: sha512-G4pe5/4axjULMFpJBU7ran69++7RIn5wlFn8XMhXaFECB18cPVOfU7B9xgoCFbHGFAT4kATl45Fa9dtshKUNmg==}
     cpu: [x64]
     os: [linux]
     libc: [glibc]
     hasBin: true
 
-  '@github/copilot-linuxmusl-arm64@1.0.112':
-    resolution: {integrity: sha512-DTJvDhxN96Wz7N0GbcRIhpX85O9jlVk7rY+TIyDCJXb7wqdfmfpReZzAMd+ZUgBshx0ST9RCVw61qC9GKetL2A==}
+  '@github/copilot-linuxmusl-arm64@1.0.83':
+    resolution: {integrity: sha512-CkRdANpMLQUIw+qqhg4wtoxeAUDYtdxS3kMuDc23L/tl4zdTYSVPtzDAjXouXNTJTTsjzDeR6k4tP6cIyymPzQ==}
     cpu: [arm64]
     os: [linux]
     libc: [musl]
     hasBin: true
 
-  '@github/copilot-linuxmusl-x64@1.0.112':
-    resolution: {integrity: sha512-DG3M098j7SOcFYu/GfI4IqlGuNFr00y8xkD13m0kN7EyKcVmh1mCMjTpNShFSRK5Yb9/hwtLMpQrOS/Cx9YB3A==}
+  '@github/copilot-linuxmusl-x64@1.0.83':
+    resolution: {integrity: sha512-riB8hgJuFJYk6xAZjdQ01K8NclTE7xh8DQkmaI+1c7aMK4VqxW1TMYkWNRxWXotZyeFRv2+LqfBXYJvvITuKjw==}
     cpu: [x64]
     os: [linux]
     libc: [musl]
     hasBin: true
 
-  '@github/copilot-win32-arm64@1.0.112':
-    resolution: {integrity: sha512-S3p5aKbtFmn4B1WTqWswJAgHMqBBvka8nMzx3lhhESm3YtWmI3i4RGWCxzDnaVTtg+Cx1Y6HfNZ/olmSO4lhmA==}
+  '@github/copilot-win32-arm64@1.0.83':
+    resolution: {integrity: sha512-uzgmjDwjf3iVfzwrHJF8BOb39hewXpC60v/pm/Mvbd2LPqm38bq3Ky10fC50M+jpOu6t/YGW8qYtioEQQusHVQ==}
     cpu: [arm64]
     os: [win32]
     hasBin: true
 
-  '@github/copilot-win32-x64@1.0.112':
-    resolution: {integrity: sha512-zmWIkGjes2PkBb02+mvC0ZVCeEmVWsTSNac82ffhk7kR7/CicWg5IlhixcgiTc+5TFZSTpVUMHxK9fW0A+l/qQ==}
+  '@github/copilot-win32-x64@1.0.83':
+    resolution: {integrity: sha512-pau+THyevc9oTmtQNyWF2RSIM4aMo9DNO1gE8Fkg9OqCExmuoKTtYOnfxJHcCB2X1HHsGOrChq0+eRgiDAumoA==}
     cpu: [x64]
     os: [win32]
     hasBin: true
 
-  '@github/copilot@1.0.112':
-    resolution: {integrity: sha512-OieokPh6qDlniqP4LqTSSuw+y87b3g0CPgFOVB3w6U523aEAfruniP/DWca7IaFq5FMtgwTi6JdfOBCBEtNsew==}
+  '@github/copilot@1.0.83':
+    resolution: {integrity: sha512-M8uZI0V0dahYV1KZij3nGDxaXEGG7I7YUZzQPI7NEZkL/83Nl/tNTbPdxKtdWZbOmWoXsPKXty/eEYoj6RHDhA==}
     hasBin: true
 
   '@grpc/grpc-js@1.14.7':
@@ -5398,47 +5386,39 @@ snapshots:
       '@babel/helper-string-parser': 7.29.7
       '@babel/helper-validator-identifier': 7.29.7
 
-  '@biomejs/biome@2.6.8':
+  '@biomejs/biome@2.5.15':
     optionalDependencies:
-      '@biomejs/cli-android-arm64': 2.6.8
-      '@biomejs/cli-android-x64': 2.6.8
-      '@biomejs/cli-darwin-arm64': 2.6.8
-      '@biomejs/cli-darwin-x64': 2.6.8
-      '@biomejs/cli-linux-arm64': 2.6.8
-      '@biomejs/cli-linux-arm64-musl': 2.6.8
-      '@biomejs/cli-linux-x64': 2.6.8
-      '@biomejs/cli-linux-x64-musl': 2.6.8
-      '@biomejs/cli-win32-arm64': 2.6.8
-      '@biomejs/cli-win32-x64': 2.6.8
+      '@biomejs/cli-darwin-arm64': 2.5.15
+      '@biomejs/cli-darwin-x64': 2.5.15
+      '@biomejs/cli-linux-arm64': 2.5.15
+      '@biomejs/cli-linux-arm64-musl': 2.5.15
+      '@biomejs/cli-linux-x64': 2.5.15
+      '@biomejs/cli-linux-x64-musl': 2.5.15
+      '@biomejs/cli-win32-arm64': 2.5.15
+      '@biomejs/cli-win32-x64': 2.5.15
 
-  '@biomejs/cli-android-arm64@2.6.8':
+  '@biomejs/cli-darwin-arm64@2.5.15':
     optional: true
 
-  '@biomejs/cli-android-x64@2.6.8':
+  '@biomejs/cli-darwin-x64@2.5.15':
     optional: true
 
-  '@biomejs/cli-darwin-arm64@2.6.8':
+  '@biomejs/cli-linux-arm64-musl@2.5.15':
     optional: true
 
-  '@biomejs/cli-darwin-x64@2.6.8':
+  '@biomejs/cli-linux-arm64@2.5.15':
     optional: true
 
-  '@biomejs/cli-linux-arm64-musl@2.6.8':
+  '@biomejs/cli-linux-x64-musl@2.5.15':
     optional: true
 
-  '@biomejs/cli-linux-arm64@2.6.8':
+  '@biomejs/cli-linux-x64@2.5.15':
     optional: true
 
-  '@biomejs/cli-linux-x64-musl@2.6.8':
+  '@biomejs/cli-win32-arm64@2.5.15':
     optional: true
 
-  '@biomejs/cli-linux-x64@2.6.8':
-    optional: true
-
-  '@biomejs/cli-win32-arm64@2.6.8':
-    optional: true
-
-  '@biomejs/cli-win32-x64@2.6.8':
+  '@biomejs/cli-win32-x64@2.5.15':
     optional: true
 
   '@braintree/sanitize-url@7.1.2': {}
@@ -5707,42 +5687,42 @@ snapshots:
 
   '@floating-ui/utils@0.2.12': {}
 
-  '@github/copilot-darwin-arm64@1.0.112':
+  '@github/copilot-darwin-arm64@1.0.83':
     optional: true
 
-  '@github/copilot-darwin-x64@1.0.112':
+  '@github/copilot-darwin-x64@1.0.83':
     optional: true
 
-  '@github/copilot-linux-arm64@1.0.112':
+  '@github/copilot-linux-arm64@1.0.83':
     optional: true
 
-  '@github/copilot-linux-x64@1.0.112':
+  '@github/copilot-linux-x64@1.0.83':
     optional: true
 
-  '@github/copilot-linuxmusl-arm64@1.0.112':
+  '@github/copilot-linuxmusl-arm64@1.0.83':
     optional: true
 
-  '@github/copilot-linuxmusl-x64@1.0.112':
+  '@github/copilot-linuxmusl-x64@1.0.83':
     optional: true
 
-  '@github/copilot-win32-arm64@1.0.112':
+  '@github/copilot-win32-arm64@1.0.83':
     optional: true
 
-  '@github/copilot-win32-x64@1.0.112':
+  '@github/copilot-win32-x64@1.0.83':
     optional: true
 
-  '@github/copilot@1.0.112':
+  '@github/copilot@1.0.83':
     dependencies:
       detect-libc: 2.1.2
     optionalDependencies:
-      '@github/copilot-darwin-arm64': 1.0.112
-      '@github/copilot-darwin-x64': 1.0.112
-      '@github/copilot-linux-arm64': 1.0.112
-      '@github/copilot-linux-x64': 1.0.112
-      '@github/copilot-linuxmusl-arm64': 1.0.112
-      '@github/copilot-linuxmusl-x64': 1.0.112
-      '@github/copilot-win32-arm64': 1.0.112
-      '@github/copilot-win32-x64': 1.0.112
+      '@github/copilot-darwin-arm64': 1.0.83
+      '@github/copilot-darwin-x64': 1.0.83
+      '@github/copilot-linux-arm64': 1.0.83
+      '@github/copilot-linux-x64': 1.0.83
+      '@github/copilot-linuxmusl-arm64': 1.0.83
+      '@github/copilot-linuxmusl-x64': 1.0.83
+      '@github/copilot-win32-arm64': 1.0.83
+      '@github/copilot-win32-x64': 1.0.83
 
   '@grpc/grpc-js@1.14.7':
     dependencies:
@@ -10053,7 +10033,7 @@ snapshots:
 
   ufo@1.6.4: {}
 
-  ultracite@7.12.2(@biomejs/biome@2.6.8):
+  ultracite@7.12.2(@biomejs/biome@2.5.15):
     dependencies:
       '@clack/prompts': 1.8.1
       cli-truncate: 6.1.1
@@ -10073,7 +10053,7 @@ snapshots:
       yaml: 2.9.1
       zod: 4.6.7
     optionalDependencies:
-      '@biomejs/biome': 2.6.8
+      '@biomejs/biome': 2.5.15
 
   undici-types@7.24.6: {}
 

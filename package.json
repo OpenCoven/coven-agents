@@ -123,8 +123,8 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.6.8",
-    "@github/copilot": "1.0.112",
+    "@biomejs/biome": "2.5.15",
+    "@github/copilot": "1.0.83",
     "@playwright/test": "^1.65.1",
     "@tailwindcss/postcss": "^4.3.5",
     "@tailwindcss/typography": "^0.5.20",
