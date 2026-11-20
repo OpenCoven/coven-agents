@@ -651,6 +651,14 @@ test("start maps admission conflict, capacity, and unavailable results without p
       },
     },
     {
+      code: "sandbox_trust_conflict",
+      expected: {
+        code: "sandbox_trust_conflict",
+        kind: "refused",
+        retryable: false,
+      },
+    },
+    {
       code: "sandbox_unavailable",
       expected: {
         code: "lifecycle_conflict",

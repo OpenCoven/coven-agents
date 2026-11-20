@@ -171,7 +171,8 @@ export type RunnerStartResult =
         | "admission_unavailable"
         | "busy"
         | "lifecycle_conflict"
-        | "operation_conflict";
+        | "operation_conflict"
+        | "sandbox_trust_conflict";
       kind: "refused";
       retryable: boolean;
     }>
@@ -918,7 +919,7 @@ export function createRunnerService(
               };
             case "sandbox_trust_conflict":
               return {
-                code: "lifecycle_conflict",
+                code: "sandbox_trust_conflict",
                 kind: "refused",
                 retryable: false,
               };

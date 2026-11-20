@@ -499,7 +499,8 @@ async function stopTerminalAttempt(
 
 function terminalEvidence(
   snapshot: RunnerAttemptLogSnapshot,
-  credential: EvidenceRedactionInput
+  credential: EvidenceRedactionInput,
+  permission: RunnerRunRecord["executionPermission"]
 ): Readonly<{
   commandEvidence: CommandEvidence[];
   error: RunError | null;
@@ -508,6 +509,13 @@ function terminalEvidence(
 }> {
   return {
     commandEvidence: snapshot.summary.toolCalls
+      // Reads remain in the event stream; they are not executed commands.
+      // Keep unexpected tools (including failures) visible rather than hiding a breach.
+      .filter(
+        (call) =>
+          permission !== "workspace_read" ||
+          !["view", "rg", "glob"].includes(call.tool)
+      )
       .slice(0, AGENT_RUNNER_LIMITS.maxCommandResults)
       .map((call) => ({
         command: sanitizeRunText(call.tool, credential),
@@ -739,7 +747,11 @@ async function reconcileAttachedProcess(
         projectHarnessRunEvent(event, 0, evidenceRedactions, toolNames)
       )
       .filter((event): event is RunnerPersistedEvent => event !== null);
-    const evidence = terminalEvidence(snapshot, evidenceRedactions);
+    const evidence = terminalEvidence(
+      snapshot,
+      evidenceRedactions,
+      liveRun.executionPermission
+    );
     const appended = await dependencies.store.appendDispatchEventBatch(
       dependencies.operator,
       authority,
