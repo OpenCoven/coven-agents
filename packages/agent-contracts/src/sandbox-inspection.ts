@@ -18,6 +18,7 @@ export const sandboxInspectionRequestSchema = z
       .min(1)
       .max(128)
       .regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]*$/u),
+    includeProviderMetadata: z.literal(true).optional(),
   })
   .strict();
 export type SandboxInspectionRequest = z.infer<
@@ -121,6 +122,21 @@ const observedSchema = z
     networkAllowListConfigured: z.boolean(),
     networkBlockAll: z.boolean().nullable(),
     outboundProxyConfigured: z.boolean(),
+    providerMetadata: z
+      .object({
+        autoDestroyAtConfigured: z.boolean().nullable(),
+        linkedSandbox: z.boolean().nullable(),
+        platform: z
+          .object({
+            architecture: z.string().min(1).max(64).nullable(),
+            os: z.string().min(1).max(64).nullable(),
+          })
+          .strict(),
+        volumes: z.number().int().min(0).max(1024).nullable(),
+        warmPool: z.boolean().nullable(),
+      })
+      .strict()
+      .optional(),
     public: z.boolean(),
     snapshot: z.string().min(1).max(256).nullable(),
     state: sandboxInspectionStateSchema,
