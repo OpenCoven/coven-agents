@@ -2034,6 +2034,18 @@ export const runnerRunEvent = pgTable(
 
 export type RunnerRunEvent = InferSelectModel<typeof runnerRunEvent>;
 
+/** One durable admission count per isolated pilot window, independent of run deletion. */
+export const pilotAdmissionWindow = pgTable(
+  "PilotAdmissionWindow",
+  {
+    admitted: integer("admitted").notNull().default(0),
+    endsAt: timestamp("endsAt", { withTimezone: true }).primaryKey(),
+  },
+  (table) => [
+    check("PilotAdmissionWindow_count", sql`${table.admitted} BETWEEN 0 AND 4`),
+  ]
+);
+
 export const runnerScheduler = pgTable(
   "RunnerScheduler",
   {

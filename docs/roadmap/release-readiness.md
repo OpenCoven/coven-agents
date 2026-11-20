@@ -295,7 +295,7 @@ Worst-case exposure is `BETA_CAMPAIGN_MAX_ACCOUNTS` multiplied by
 behind. Reason about that product, not the per-account grant alone, when
 approving the cap.
 
-The campaign caps count accounts and execution minutes. A four-run ceiling across the whole pilot requires a separate admission count. The daily minute budget cannot establish that ceiling, and is independent of grant expiry. For invite-only mode, set `BETA_CAMPAIGN_ENDS_AT` to the common UTC deadline in ISO format with milliseconds. Enrollment starts the configured number of grant days before that deadline, and every new grant expires by the deadline. Verify the run ceiling before opening the pilot.
+For invite-only mode, set `BETA_CAMPAIGN_GRANT_DAYS=1` and `BETA_CAMPAIGN_ENDS_AT` to the approved common UTC deadline in ISO format with milliseconds. A dedicated pilot deployment accepts at most four new runner starts during the 24 hours ending at that deadline. The database records these admissions in the same transaction as run creation. Duplicate operation replay preserves its previous result, and deleting a run does not restore an admission slot. The limit applies across tenants and agents on this deployment. Treat the configured deadline as the identity of the pilot window. Changing it creates a different window and requires a new operator decision. The execution-minute and per-account grant limits also apply.
 
 Before enabling:
 

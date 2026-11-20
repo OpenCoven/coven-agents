@@ -216,3 +216,70 @@ test("a cross-tenant bound start inserts no run and a provider refusal issues no
     }
   }
 });
+
+test("pilot admission counts distinct accepted starts across tenants under contention and survives deletion", {
+  skip: !databaseUrl,
+}, async () => {
+  assert.ok(databaseUrl);
+  const sql = postgres(databaseUrl, { max: 8, onnotice: () => undefined });
+  const store = createRunnerStore(drizzleRunnerStoreDatabase(drizzle(sql)));
+  const endsAt = new Date(Date.now() + 3_600_000).toISOString();
+  const oldMode = process.env.BETA_CAMPAIGN_ENABLED;
+  const oldDeadline = process.env.BETA_CAMPAIGN_ENDS_AT;
+  process.env.BETA_CAMPAIGN_ENABLED = "invite-only";
+  process.env.BETA_CAMPAIGN_ENDS_AT = endsAt;
+  const ids = [randomUUID(), randomUUID()];
+  const start = (index: number, operationId: string) =>
+    store.startRun(
+      {
+        kind: "subscriber",
+        tenant: `pilot_${index}`,
+        userId: ids[index],
+      },
+      {
+        agentId: ids[index],
+        authVersion: 1,
+        id: randomUUID(),
+        operationId,
+        requestHash: "a".repeat(64),
+        task: "Inspect",
+      }
+    );
+  try {
+    await Promise.all(
+      ids.map(
+        (id, index) =>
+          sql`INSERT INTO "RunnerAgent" ("id","tenant","instructions","model","name","runtime") VALUES (${id},${`pilot_${index}`},'Inspect','auto','pilot','copilot')`
+      )
+    );
+    const replayId = randomUUID();
+    const initial = await start(0, replayId);
+    assert.equal(initial.kind, "created");
+    const results = await Promise.all(
+      Array.from({ length: 8 }, (_, i) => start(i % 2, randomUUID()))
+    );
+    assert.equal(results.filter((r) => r.kind === "created").length, 3);
+    assert.equal(results.filter((r) => r.kind === "refused").length, 5);
+    assert.equal((await start(0, replayId)).kind, "duplicate");
+    await sql`DELETE FROM "RunnerRun" WHERE "id"=${initial.run.id}`;
+    assert.equal((await start(0, randomUUID())).kind, "refused");
+    const [row] =
+      await sql`SELECT admitted FROM "PilotAdmissionWindow" WHERE "endsAt"=${endsAt}`;
+    assert.equal(row.admitted, 4);
+  } finally {
+    if (oldMode === undefined) {
+      delete process.env.BETA_CAMPAIGN_ENABLED;
+    } else {
+      process.env.BETA_CAMPAIGN_ENABLED = oldMode;
+    }
+    if (oldDeadline === undefined) {
+      delete process.env.BETA_CAMPAIGN_ENDS_AT;
+    } else {
+      process.env.BETA_CAMPAIGN_ENDS_AT = oldDeadline;
+    }
+    await sql`DELETE FROM "RunnerRun" WHERE "agentId" IN ${sql(ids)}`;
+    await sql`DELETE FROM "RunnerAgent" WHERE "id" IN ${sql(ids)}`;
+    await sql`DELETE FROM "PilotAdmissionWindow" WHERE "endsAt"=${endsAt}`;
+    await sql.end();
+  }
+});
