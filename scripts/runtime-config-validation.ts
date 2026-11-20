@@ -3,7 +3,10 @@ import {
   validateAbuseConfig,
 } from "../lib/abuse/config";
 import { approvedApplicationOrigin } from "../lib/auth/application-origin";
-import { validateCampaignConfig } from "../lib/billing/campaign";
+import {
+  campaignEnabled,
+  validateCampaignConfig,
+} from "../lib/billing/campaign";
 import { validateSubscriptionCheckoutEnvironment } from "../lib/billing/config-core";
 import { credentialKekRingFromEnvironment } from "../lib/credentials/key-ring";
 import { validateGitHubEnvironment } from "../lib/github/config";
@@ -81,7 +84,7 @@ function validateReleaseAudience(
     if (env.BETA_MODE !== "off") {
       throw new Error("Public release requires BETA_MODE=off.");
     }
-    if (env.BETA_CAMPAIGN_ENABLED === "on") {
+    if (campaignEnabled(env)) {
       throw new Error(
         "Public release requires BETA_CAMPAIGN_ENABLED=off: the campaign hands " +
           "free run minutes to every new account, which is a beta acquisition " +

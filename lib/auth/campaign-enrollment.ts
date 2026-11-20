@@ -70,6 +70,13 @@ export async function enrollInCampaignIfEligible(
   if (!input.policy.enabled) {
     return { kind: "disabled" };
   }
+  if (input.policy.pilotEndsAtMs !== undefined) {
+    const endsAt = input.policy.pilotEndsAtMs;
+    const startsAt = endsAt - input.policy.grantDays * 86_400_000;
+    if (input.now.getTime() < startsAt || input.now.getTime() >= endsAt) {
+      return { kind: "disabled" };
+    }
+  }
   if (input.user.campaignGrantedAt) {
     return { kind: "already_enrolled", user: input.user };
   }

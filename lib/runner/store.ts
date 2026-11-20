@@ -466,6 +466,21 @@ function admissionLimits(
   return limits;
 }
 
+async function recordPilotAdmission(
+  transaction: RunnerStoreTransaction,
+  endsAt: string
+): Promise<void> {
+  await transaction.execute(
+    statement(
+      "count-pilot-admission",
+      {},
+      sql`
+    UPDATE "PilotAdmissionWindow" SET "admitted" = "admitted" + 1
+    WHERE "endsAt" = ${endsAt}::timestamptz`
+    )
+  );
+}
+
 async function lockRunnerScheduler(
   transaction: RunnerStoreTransaction
 ): Promise<RunnerSchedulerRecord> {
@@ -5448,6 +5463,41 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           }
           admission = { limits, scheduler };
         }
+        let pilotEnd: string | undefined;
+        if (process.env.BETA_CAMPAIGN_ENABLED === "invite-only") {
+          const raw = process.env.BETA_CAMPAIGN_ENDS_AT ?? "";
+          const endMs = Date.parse(raw);
+          if (
+            !Number.isFinite(endMs) ||
+            new Date(endMs).toISOString() !== raw
+          ) {
+            return { kind: "refused", reason: "global_busy" };
+          }
+          pilotEnd = raw;
+          await transaction.execute(
+            statement(
+              "ensure-pilot-window",
+              {},
+              sql`
+            INSERT INTO "PilotAdmissionWindow" ("endsAt") VALUES (${pilotEnd}::timestamptz)
+            ON CONFLICT ("endsAt") DO NOTHING`
+            )
+          );
+          const [slot] = await transaction.execute(
+            statement(
+              "lock-pilot-window",
+              {},
+              sql`
+            SELECT "admitted" FROM "PilotAdmissionWindow"
+            WHERE "endsAt" = ${pilotEnd}::timestamptz AND "admitted" < 4
+              AND clock_timestamp() >= "endsAt" - interval '24 hours'
+              AND clock_timestamp() < "endsAt" FOR UPDATE`
+            )
+          );
+          if (!slot) {
+            return { kind: "refused", reason: "global_busy" };
+          }
+        }
         const agentSnapshot = input.agentSnapshot ?? {
           instructions: column<string>(agent, "instructions"),
           model: column<string>(agent, "model"),
@@ -5596,6 +5646,9 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
               admission.scheduler,
               claimed.tenant
             );
+            if (pilotEnd) {
+              await recordPilotAdmission(transaction, pilotEnd);
+            }
             return {
               claimed: {
                 authority: dispatchAuthority(claimed),
@@ -5604,6 +5657,9 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
               kind: "claimed",
               run: runSnapshot(claimed),
             };
+          }
+          if (pilotEnd) {
+            await recordPilotAdmission(transaction, pilotEnd);
           }
           return { kind: "created", run: runSnapshot(acceptedRun) };
         }

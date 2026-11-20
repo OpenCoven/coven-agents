@@ -1,3 +1,5 @@
+import { isAllowedIdentity, readBetaGate } from "../beta";
+
 /**
  * The open beta campaign: a bounded grant of run minutes to anyone who signs
  * in with GitHub.
@@ -40,6 +42,7 @@ export type CampaignEnvironment = Partial<
   Record<string, string | undefined>;
 
 export type CampaignPolicy = Readonly<{
+  pilotEndsAtMs?: number;
   enabled: boolean;
   grantDays: number;
   maxAccounts: number;
@@ -105,8 +108,47 @@ function positiveInteger(value: string | undefined): number | null {
  * enrollment, not admit everyone. `validateCampaignConfig` is what makes that
  * typo loud at boot instead of merely safe.
  */
+export function campaignEnabled(env: CampaignEnvironment): boolean {
+  return (
+    env.BETA_CAMPAIGN_ENABLED === "on" ||
+    env.BETA_CAMPAIGN_ENABLED === "invite-only"
+  );
+}
+
+export function campaignEnrollmentPolicy(
+  env: CampaignEnvironment,
+  verifiedEmail: string
+): CampaignPolicy {
+  if (
+    env.BETA_CAMPAIGN_ENABLED === "invite-only" &&
+    !isAllowedIdentity(readBetaGate(env), verifiedEmail)
+  ) {
+    return DISABLED;
+  }
+  return readCampaignPolicy(env);
+}
+
+function pilotDeadline(env: CampaignEnvironment): number | undefined {
+  const raw = env.BETA_CAMPAIGN_ENDS_AT ?? "";
+  const ms = Date.parse(raw);
+  return Number.isFinite(ms) && new Date(ms).toISOString() === raw
+    ? ms
+    : undefined;
+}
+
 export function readCampaignPolicy(env: CampaignEnvironment): CampaignPolicy {
-  if (env.BETA_CAMPAIGN_ENABLED !== "on") {
+  if (!campaignEnabled(env)) {
+    return DISABLED;
+  }
+
+  const pilotEndsAtMs =
+    env.BETA_CAMPAIGN_ENABLED === "invite-only"
+      ? pilotDeadline(env)
+      : undefined;
+  if (
+    env.BETA_CAMPAIGN_ENABLED === "invite-only" &&
+    pilotEndsAtMs === undefined
+  ) {
     return DISABLED;
   }
 
@@ -130,6 +172,7 @@ export function readCampaignPolicy(env: CampaignEnvironment): CampaignPolicy {
   }
 
   return Object.freeze({
+    ...(pilotEndsAtMs === undefined ? {} : { pilotEndsAtMs }),
     enabled: true,
     grantDays,
     maxAccounts,
@@ -152,10 +195,18 @@ export function readCampaignPolicy(env: CampaignEnvironment): CampaignPolicy {
  * account would see "20 minutes" next to a button that never works.
  */
 export function validateCampaignConfig(env: CampaignEnvironment): void {
-  if (env.BETA_CAMPAIGN_ENABLED !== "on") {
+  if (!campaignEnabled(env)) {
     return;
   }
 
+  if (
+    env.BETA_CAMPAIGN_ENABLED === "invite-only" &&
+    pilotDeadline(env) === undefined
+  ) {
+    throw new Error(
+      "BETA_CAMPAIGN_ENDS_AT must be a UTC ISO timestamp with milliseconds for an invite-only campaign."
+    );
+  }
   for (const name of CAMPAIGN_NUMBERS) {
     if (positiveInteger(env[name]) === null) {
       throw new Error(
@@ -178,7 +229,12 @@ export function validateCampaignConfig(env: CampaignEnvironment): void {
  * When a grant issued now should stop being spendable.
  */
 export function campaignExpiryFrom(policy: CampaignPolicy, now: Date): Date {
-  return new Date(now.getTime() + policy.grantDays * MILLISECONDS_PER_DAY);
+  return new Date(
+    Math.min(
+      now.getTime() + policy.grantDays * MILLISECONDS_PER_DAY,
+      policy.pilotEndsAtMs ?? Number.POSITIVE_INFINITY
+    )
+  );
 }
 
 /**

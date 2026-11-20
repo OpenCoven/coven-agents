@@ -186,3 +186,24 @@ test("a failing GitHub call or database never breaks the sign-in", async () => {
     assert.equal(outcome.kind, "unavailable");
   }
 });
+
+test("the shared invite window includes its opening instant and excludes its deadline", async () => {
+  const end = NOW.getTime() + 86_400_000;
+  const policy = { ...POLICY, grantDays: 1, pilotEndsAtMs: end };
+  await Promise.all(
+    [NOW.getTime() - 1, NOW.getTime(), end - 1, end].map(async (instant) => {
+      const deps = dependencies();
+      const result = await enrollInCampaignIfEligible(
+        { accessToken: undefined, now: new Date(instant), policy, user: FRESH },
+        deps
+      );
+      if (instant >= NOW.getTime() && instant < end) {
+        assert.equal(result.kind, "enrolled");
+        assert.equal(result.user.campaignExpiresAt?.getTime(), end);
+      } else {
+        assert.equal(result.kind, "disabled");
+        assert.deepEqual(deps.enrolled, []);
+      }
+    })
+  );
+});

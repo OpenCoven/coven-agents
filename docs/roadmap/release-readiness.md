@@ -279,9 +279,7 @@ participant is a real account with a real tenant whose minutes come from a
 grant rather than from Stripe, so `subscribedUntil` is never written and
 reconciliation never sees a subscription date with no subscription behind it.
 
-Six variables govern it. `BETA_CAMPAIGN_ENABLED` must be exactly `on`; any
-other value, and any missing or malformed number, disables the whole campaign
-rather than substituting a default.
+Set `BETA_CAMPAIGN_ENABLED=invite-only` for a bounded complimentary pilot. Set `BETA_ALLOWLIST` to the verified addresses of the invited GitHub accounts. The access gate and the enrollment callback both check that list. An empty list admits nobody. The existing `on` setting opens enrollment to all eligible GitHub accounts. Missing or malformed campaign limits disable grants.
 
 | Variable | Bound |
 | --- | --- |
@@ -297,10 +295,7 @@ Worst-case exposure is `BETA_CAMPAIGN_MAX_ACCOUNTS` multiplied by
 behind. Reason about that product, not the per-account grant alone, when
 approving the cap.
 
-The same switch opens the beta gate, deliberately. Splitting the audience
-decision across two flags lets them disagree, and this pair would disagree
-expensively: a campaign granting minutes behind a closed allowlist hands people
-free run time and then bounces them at the door.
+For invite-only mode, set `BETA_CAMPAIGN_GRANT_DAYS=1` and `BETA_CAMPAIGN_ENDS_AT` to the approved common UTC deadline in ISO format with milliseconds. A dedicated pilot deployment accepts at most four new runner starts during the 24 hours ending at that deadline. The database records these admissions in the same transaction as run creation. Duplicate operation replay preserves its previous result, and deleting a run does not restore an admission slot. The limit applies across tenants and agents on this deployment. Treat the configured deadline as the identity of the pilot window. Changing it creates a different window and requires a new operator decision. The execution-minute and per-account grant limits also apply.
 
 Before enabling:
 

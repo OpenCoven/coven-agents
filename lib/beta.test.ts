@@ -317,3 +317,13 @@ test("only the five machine operations route a bearer past browser middleware", 
     assert.equal(isOwnerCredentialRoute(`/api/${path}`, method), false);
   }
 });
+
+test("invite-only campaign enforces the verified address list even without BETA_MODE", () => {
+  const gate = readBetaGate({
+    BETA_ALLOWLIST: "a@example.invalid,b@example.invalid",
+    BETA_CAMPAIGN_ENABLED: "invite-only",
+  });
+  assert.equal(betaVerdict(gate, "/agents", "A@example.invalid"), "allow");
+  assert.equal(betaVerdict(gate, "/agents", "third@example.invalid"), "deny");
+  assert.equal(betaVerdict(gate, "/agents", null), "deny");
+});
