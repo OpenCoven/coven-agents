@@ -29,6 +29,7 @@ import { Composer } from "@/components/console/composer";
 import { CreateAgent } from "@/components/console/create-agent";
 import { FamiliarPicker } from "@/components/console/familiar-picker";
 import { FamiliarPortrait } from "@/components/console/familiar-portrait";
+import { LiveViewPanel } from "@/components/console/live-view";
 import {
   Btn,
   Eyebrow,
@@ -39,7 +40,7 @@ import { ProfileSelector } from "@/components/console/profile-selector";
 import { ReportReader } from "@/components/console/report-reader";
 import {
   LiveActivityStatus,
-  ThreadBlockView,
+  ThreadEntry,
 } from "@/components/console/run-thread";
 import { RuntimeInspector } from "@/components/console/runtime-inspector";
 import { Settings } from "@/components/console/settings";
@@ -218,6 +219,7 @@ export function RunConsole({
     STEPS_TIMELINE_WIDTHS.default
   );
   const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [liveViewOpen, setLiveViewOpen] = useState(false);
   const [reportReader, setReportReader] = useState<{
     content: string;
     title: string;
@@ -1889,6 +1891,35 @@ export function RunConsole({
                       </Btn>
                     ) : null}
 
+                    {selectedRun && running ? (
+                      <button
+                        aria-expanded={liveViewOpen}
+                        className="oc-tint oc-live-view__toggle"
+                        data-open={liveViewOpen || undefined}
+                        onClick={() => setLiveViewOpen((value) => !value)}
+                        style={{
+                          background: liveViewOpen
+                            ? "var(--bg-raised)"
+                            : "transparent",
+                          border: hairline,
+                          borderRadius: "var(--radius-control)",
+                          color: "var(--text-secondary)",
+                          cursor: "pointer",
+                          font: "500 11px/1 var(--font-ui)",
+                          height: 28,
+                          padding: "0 11px",
+                        }}
+                        title="Watch the sandbox desktop while the agent works"
+                        type="button"
+                      >
+                        <span
+                          aria-hidden="true"
+                          className="oc-live-view__dot"
+                        />
+                        Live view
+                      </button>
+                    ) : null}
+
                     <button
                       aria-expanded={inspectorOpen}
                       className="oc-tint"
@@ -2125,6 +2156,16 @@ export function RunConsole({
                     />
                   ) : (
                     <>
+                      {liveViewOpen ? (
+                        <LiveViewPanel
+                          client={client}
+                          key={selectedRun.snapshot.id}
+                          now={now}
+                          onClose={() => setLiveViewOpen(false)}
+                          runId={selectedRun.snapshot.id}
+                          running={running}
+                        />
+                      ) : null}
                       <div
                         aria-label="Run record"
                         aria-live="polite"
@@ -2153,43 +2194,38 @@ export function RunConsole({
                           style={{
                             display: "flex",
                             flexDirection: "column",
-                            gap: 13,
                             margin: "0 auto",
-                            maxWidth: 820,
-                            paddingLeft: 22,
+                            maxWidth: 880,
                           }}
                         >
                           {projection.blocks.map((block) => (
-                            <div
-                              className="oc-block"
-                              id={`block-${block.id}`}
+                            <ThreadEntry
+                              block={block}
+                              handlers={{
+                                copiedReceipt,
+                                onAmend: () => {
+                                  setDraft(selectedRun.snapshot.task);
+                                  setView("composer");
+                                },
+                                onCopyReceipt: () => {
+                                  copyReceipt().catch(() => undefined);
+                                },
+                                onFollowUp: () =>
+                                  openComposer(selectedRun.agentId),
+                                onRetry: () => {
+                                  setDraft(selectedRun.snapshot.task);
+                                  setView("composer");
+                                },
+                              }}
                               key={block.id}
-                            >
-                              <ThreadBlockView
-                                block={block}
-                                handlers={{
-                                  copiedReceipt,
-                                  onAmend: () => {
-                                    setDraft(selectedRun.snapshot.task);
-                                    setView("composer");
-                                  },
-                                  onCopyReceipt: () => {
-                                    copyReceipt().catch(() => undefined);
-                                  },
-                                  onFollowUp: () =>
-                                    openComposer(selectedRun.agentId),
-                                  onRetry: () => {
-                                    setDraft(selectedRun.snapshot.task);
-                                    setView("composer");
-                                  },
-                                }}
-                              />
-                            </div>
+                            />
                           ))}
                           {projection.activity ? (
-                            <LiveActivityStatus
-                              activity={projection.activity}
-                            />
+                            <div className="oc-thread__tail">
+                              <LiveActivityStatus
+                                activity={projection.activity}
+                              />
+                            </div>
                           ) : null}
                           <div style={{ height: 8 }} />
                         </div>

@@ -1,7 +1,15 @@
 # Implementation Sequence
 
-This sequence describes public outcome ordering. Private planning remains the
-task-level authority and must not be reconstructed from this document.
+## Current delivery checkpoint
+
+The baseline gate repair shipped in #302. The later dependency regression was repaired in [#319](https://github.com/OpenCoven/coven-agents/pull/319). Scoped owner credentials and inspection shipped in #311, and guarded binding and redacted run evidence shipped in #312. Issues #296, #297, and #298 are complete at the repository contract boundary. Keep the verified merge SHAs in the Castles consumer pins. The contributor setup and Git hook update carries the reviewed changes from #310 and the guide from #305. The account-keyed billing ledger landed in #317 with migrations 0048 and 0049 after runner migration 0047. Issues #225 and #226 are complete at the repository boundary. Production migration remains separately gated. Keep dependency updates in their own qualification lane.
+
+- #299 is assigned to BunsDev. Next, carry server-enforced read-only permission through owner admission and prove a permitted read and denied mutation in the recording executor.
+- #300 is open. The maintainer selected snapshot verification only. The lifecycle owner still needs to expose and qualify the versioned read-only result, including the observed harness version, and verify the exact pin and mismatch refusal. [Bootstrap decision](https://github.com/OpenCoven/coven-agents/issues/300#issuecomment-6791981973) · [Castles acceptance](https://github.com/OpenCoven/coven-castles/issues/3)
+
+The web subscriber release still requires candidate-specific evidence. Track tenant and credential isolation in [#47](https://github.com/OpenCoven/coven-agents/issues/47), admission and revocation in [#49](https://github.com/OpenCoven/coven-agents/issues/49), live provider containment in [#262](https://github.com/OpenCoven/coven-agents/issues/262), and paid sales in [#263](https://github.com/OpenCoven/coven-agents/issues/263). The [subscriber rollout checklist](https://github.com/OpenCoven/coven-agents/issues/51) ties these results to one release candidate.
+
+This sequence describes public outcome ordering. Check the delivery issues for task status and acceptance criteria.
 
 ## Authority reminder
 
@@ -9,14 +17,6 @@ Coven Agents owns product accounts, subscriptions, encrypted tenant harness
 credentials, Daytona execution, PostgreSQL run state, and bounded evidence.
 Other OpenCoven authorities remain external and are consumed through versioned
 references and adapters.
-
-## Authority freshness
-
-The public outcome order below was reviewed but not reordered on 2026-08-31
-because private planning authority was unavailable. Repository evidence and
-operating policy may be corrected independently, but task status, dependency
-order, priority, assignment, and promotion remain unchanged until an authorized
-Beads-to-Project reconciliation ends with a final no-op preview.
 
 ## Promotion model
 
@@ -32,10 +32,9 @@ An outcome advances only when:
 
 ### Planning authority
 
-- Authorized maintainers validate the private source before changing the
-  generated project view or public aggregates.
-- Preview/apply cycles must finish with a no-op preview.
-- Public artifacts contain outcomes and evidence, never private task text.
+- Verify issue owners, blockers, and acceptance before advancing delivery.
+- Link landed changes and their evidence from the delivery issue.
+- Keep private task details out of public artifacts.
 
 ### Repository integrity
 

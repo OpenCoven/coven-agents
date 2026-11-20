@@ -1,0 +1,2 @@
+ALTER TABLE "RunnerRun" DROP CONSTRAINT "RunnerRun_sandboxBinding_valid";--> statement-breakpoint
+ALTER TABLE "RunnerRun" ADD CONSTRAINT "RunnerRun_sandboxBinding_valid" CHECK (("RunnerRun"."boundSandboxId" is null and "RunnerRun"."boundSandboxGeneration" is null) or ("RunnerRun"."boundSandboxId" is not null and "RunnerRun"."boundSandboxGeneration" is not null and "RunnerRun"."boundSandboxId" ~ '^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$' and "RunnerRun"."boundSandboxGeneration" >= 0));

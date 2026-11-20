@@ -6,6 +6,7 @@ import type {
   SubscriberAccessDecision,
 } from "@/lib/auth/subscriber-access";
 import type { SubscriberSession } from "@/lib/session";
+import type { OwnerCredentialRequest } from "./owner-credential";
 import type { RunnerPrincipal } from "./types";
 
 export type RunnerSecretEnvironment = Readonly<{
@@ -31,7 +32,28 @@ export type RunnerSecretAuthorization =
   | Readonly<{ kind: "allowed" }>
   | Readonly<{ kind: "unauthorized" | "unavailable" }>;
 
+export type RunnerBearerOwnerAuthentication =
+  | Readonly<{
+      kind: "authenticated";
+      session: SessionLike;
+      credentialId: string;
+    }>
+  | Readonly<{ kind: "unauthorized" | "unavailable" }>;
+
+export type RunnerBearerOwnerAuthorization =
+  | RunnerSubscriberAuthorization
+  | Readonly<{ kind: "unavailable" }>;
+
 export type RunnerAuth = Readonly<{
+  /**
+   * Authorizes a non-browser owner from a bearer identity token. Absent on a
+   * deployment that has not configured one; callers must treat that as
+   * unavailable and never fall back to a cookie or an operator secret.
+   */
+  authorizeBearerOwner?: (
+    request: Request,
+    grant?: OwnerCredentialRequest
+  ) => Promise<RunnerBearerOwnerAuthorization>;
   authorizeDiagnostic: (request: Request) => RunnerSecretAuthorization;
   authorizeReconcile: (request: Request) => RunnerSecretAuthorization;
   authorizeSubscriber: () => Promise<RunnerSubscriberAuthorization>;
@@ -39,6 +61,10 @@ export type RunnerAuth = Readonly<{
 
 export type RunnerAuthDependencies = Readonly<{
   authenticate: () => Promise<SessionLike>;
+  authenticateBearerOwner?: (
+    request: Request,
+    grant?: OwnerCredentialRequest
+  ) => Promise<RunnerBearerOwnerAuthentication>;
   authorizeSubscriberAccess: (
     session: SessionLike
   ) => Promise<SubscriberAccessDecision>;
@@ -159,7 +185,74 @@ export function createRunnerAuth(
 ): RunnerAuth {
   const environment = dependencies.environment ?? process.env;
 
+  /**
+   * The same application-owned decision for both credentials: a subscriber
+   * session type, a current account version, and a live entitlement. On the
+   * bearer path the version is read from the same row it is compared with,
+   * so that check always passes and cannot revoke a bearer token; only the
+   * token's short expiry does (owner audience undecided, #297).
+   */
+  const authorizeSession = async (
+    session: SessionLike
+  ): Promise<RunnerSubscriberAuthorization> => {
+    if (!session?.user?.id) {
+      return { kind: "unauthorized" };
+    }
+
+    let access: SubscriberAccessDecision;
+    try {
+      access = await dependencies.authorizeSubscriberAccess(session);
+    } catch {
+      // A failed authority revalidation is never authorization to use a
+      // tenant. Model it as the existing fail-closed subscription denial.
+      return { kind: "subscription_required" };
+    }
+    if (access.kind !== "allowed") {
+      return access;
+    }
+
+    return {
+      authVersion: access.authVersion,
+      kind: "allowed",
+      principal: {
+        kind: "subscriber",
+        tenant: access.session.tenant,
+        userId: access.userId,
+      },
+      session: access.session,
+      userId: access.userId,
+    };
+  };
+
   return {
+    authorizeBearerOwner: async (request, grant) => {
+      if (!dependencies.authenticateBearerOwner) {
+        return { kind: "unavailable" };
+      }
+      let owner: RunnerBearerOwnerAuthentication;
+      try {
+        owner = await dependencies.authenticateBearerOwner(request, grant);
+      } catch {
+        return { kind: "unavailable" };
+      }
+      if (owner.kind !== "authenticated") {
+        return owner;
+      }
+      if (!owner.credentialId) {
+        return { kind: "unauthorized" };
+      }
+      const decision = await authorizeSession(owner.session);
+      if (decision.kind !== "allowed") {
+        return decision;
+      }
+      return {
+        ...decision,
+        principal: {
+          ...decision.principal,
+          ownerCredentialId: owner.credentialId,
+        },
+      };
+    },
     authorizeDiagnostic: (request) =>
       authorizeSecret(request, diagnosticSecretFromEnvironment(environment)),
     authorizeReconcile: (request) => {
@@ -178,33 +271,7 @@ export function createRunnerAuth(
       } catch {
         return { kind: "unauthorized" };
       }
-      if (!session?.user?.id) {
-        return { kind: "unauthorized" };
-      }
-
-      let access: SubscriberAccessDecision;
-      try {
-        access = await dependencies.authorizeSubscriberAccess(session);
-      } catch {
-        // A failed authority revalidation is never authorization to use a
-        // tenant. Model it as the existing fail-closed subscription denial.
-        return { kind: "subscription_required" };
-      }
-      if (access.kind !== "allowed") {
-        return access;
-      }
-
-      return {
-        authVersion: access.authVersion,
-        kind: "allowed",
-        principal: {
-          kind: "subscriber",
-          tenant: access.session.tenant,
-          userId: access.userId,
-        },
-        session: access.session,
-        userId: access.userId,
-      };
+      return authorizeSession(session);
     },
   };
 }

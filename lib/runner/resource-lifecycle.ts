@@ -1,6 +1,11 @@
 import "server-only";
 
 import type {
+  RunSandboxBindingRefusalReason,
+  SandboxInspectionRequest,
+  SandboxInspectionResult,
+} from "@opencoven/agent-contracts";
+import type {
   RunnerAgentRecord,
   RunnerDispatchAuthority,
   RunnerPrincipal,
@@ -119,10 +124,27 @@ export function runnerResourceInventoryLimit(limit?: number): number {
  * behind this boundary.
  */
 export type RunnerPersistentResourceLifecycle = Readonly<{
+  bind?: (
+    principal: RunnerPrincipal,
+    agentId: string,
+    binding: SandboxInspectionRequest
+  ) => Promise<
+    "bound" | "not_found" | "unavailable" | RunSandboxBindingRefusalReason
+  >;
   decommission: (
     principal: RunnerPrincipal,
     agentId: string
   ) => Promise<RunnerResourceDecommissionResult>;
+  /**
+   * Read-only inspection of the one resource already recorded for the
+   * caller's agent. It must not create, start, stop, resize, relabel, adopt,
+   * or delete anything, and must not acquire a harness credential.
+   */
+  inspect: (
+    principal: RunnerPrincipal,
+    agentId: string,
+    expected: SandboxInspectionRequest
+  ) => Promise<SandboxInspectionResult>;
   inventory: () => Promise<RunnerResourceInventoryResult>;
   repair: (
     options?: RunnerResourceRepairOptions

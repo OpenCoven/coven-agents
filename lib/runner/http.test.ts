@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { AsyncLocalStorage } from "node:async_hooks";
 import test from "node:test";
 import {
   AGENT_RUNNER_API_VERSION,
@@ -6,6 +7,7 @@ import {
   type AgentDefinition,
   type RunEvent,
   type RunSnapshot,
+  runSandboxBindingRefusalSchema,
 } from "@opencoven/agent-contracts";
 import type {
   AbuseAdmission,
@@ -22,8 +24,14 @@ import type {
   RunnerAuthenticatedSubscriber,
   RunnerSecretAuthorization,
 } from "./auth";
-import { createRunnerHttpHandlers, type RunnerHttpHandlers } from "./http";
+import {
+  createRunnerHttpHandlers,
+  DEFAULT_LIVE_TAIL_MS,
+  liveTailMsFromEnvironment,
+  type RunnerHttpHandlers,
+} from "./http";
 import { type RunnerService, RunnerServiceError } from "./service";
+import { createRunEventStream, DEFAULT_SSE_IDLE_TIMEOUT_MS } from "./sse";
 import type { RunnerClaimedDispatch, RunnerDispatchAuthority } from "./types";
 
 const USER_ID = "9c858901-8a57-4791-81fe-4c455b099bc9";
@@ -180,6 +188,11 @@ function service(overrides: Partial<RunnerService> = {}): RunnerService {
     createAgent: async () => ({ agent: definition(), kind: "created" }),
     deleteAgent: async () => ({ kind: "deleted" }),
     diagnoseSandbox: async () => ({
+      containment: {
+        credentialRemoved: true,
+        detachedDescendantObserved: true,
+        reusePolicy: "sandbox_reset_required",
+      },
       exitCode: 0,
       ok: true,
       output: "coven-agents",
@@ -195,6 +208,11 @@ function service(overrides: Partial<RunnerService> = {}): RunnerService {
     }),
     getAgent: async () => ({ agent: definition(), kind: "found" }),
     getRun: async () => ({ kind: "found", run: run() }),
+    getRunLiveView: async () => ({
+      kind: "unavailable",
+      reason: "not_configured",
+    }),
+    inspectSandbox: async () => ({ outcome: "unauthorized", version: 1 }),
     inventoryResources: async () => ({
       ambiguityReasons: {
         configurationDrift: 0,
@@ -305,7 +323,10 @@ function handlers(
       | null;
     appOrigin?: string | (() => string | null);
     auth?: RunnerAuth;
+    createEventStream?: typeof createRunEventStream;
     idempotencyStore?: IdempotencyStore;
+    liveTailMs?: number;
+    now?: () => number;
     onAbuse?: (input: AbuseEnforcementInput) => void;
     service?: RunnerService;
   } = {}
@@ -339,6 +360,13 @@ function handlers(
       : {}),
     auth: options.auth ?? authorizedAuth(),
     createDiagnosticName: () => DIAGNOSTIC_NAME,
+    ...(options.createEventStream
+      ? { createEventStream: options.createEventStream }
+      : {}),
+    ...(options.liveTailMs === undefined
+      ? {}
+      : { liveTailMs: options.liveTailMs }),
+    ...(options.now ? { now: options.now } : {}),
     createOperatorService: () => {
       operatorRequests += 1;
       return runner;
@@ -451,6 +479,11 @@ function orderedOperatorHandlers(
     diagnoseSandbox: () => {
       events.push("provider");
       return Promise.resolve({
+        containment: {
+          credentialRemoved: true,
+          detachedDescendantObserved: true,
+          reusePolicy: "sandbox_reset_required",
+        },
         exitCode: 0,
         ok: true,
         output: "coven-agents",
@@ -1306,6 +1339,314 @@ test("live event reads start reconciliation before the stream closes", async () 
   await terminalEventResponse.body?.cancel();
 });
 
+test("an open live stream nudges reconciliation at the tail cadence, never overlapping", async () => {
+  let reconciled = 0;
+  let release: (() => void) | undefined;
+  let clock = 0;
+  const reads: ((cursor: number) => Promise<unknown>)[] = [];
+  const fixture = handlers({
+    after: null,
+    createEventStream: ((streamOptions) => {
+      reads.push(streamOptions.read);
+      return new ReadableStream<Uint8Array>();
+    }) as typeof createRunEventStream,
+    liveTailMs: 5000,
+    now: () => clock,
+    service: service({
+      readRunEvents: async () => ({
+        events: [],
+        kind: "found",
+        terminal: false,
+      }),
+      reconcileAndDispatch: () => {
+        reconciled += 1;
+        return new Promise((resolve) => {
+          release = () => resolve(counts());
+        });
+      },
+    }),
+  });
+
+  await fixture.handlers.getRunEvents(
+    new Request(`https://app.test/api/runs/${RUN_ID}/events`),
+    RUN_ID
+  );
+  const [read] = reads;
+  assert.ok(read);
+
+  // Inside the cadence: polling alone never touches the reconciler.
+  clock = 4999;
+  await read(0);
+  assert.equal(reconciled, 0);
+
+  // Past it: exactly one nudge, and further polls while it is in flight do
+  // not stack a second pass on top of it.
+  clock = 5000;
+  await read(0);
+  await read(0);
+  clock = 12_000;
+  await read(0);
+  assert.equal(reconciled, 1);
+
+  release?.();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  clock = 17_000;
+  await read(0);
+  assert.equal(reconciled, 2);
+  release?.();
+});
+
+for (const end of ["idle", "abort", "cancel"] as const) {
+  test(`a live-tail pass remains retained after SSE ${end}`, {
+    timeout: 2000,
+  }, async (context) => {
+    const pending = Promise.withResolvers<ReturnType<typeof counts>>();
+    const started = Promise.withResolvers<void>();
+    const sleeping = Promise.withResolvers<void>();
+    const abort = new AbortController();
+    let clock = 0;
+    let reconciled = 0;
+    let leaseHeld = false;
+    context.after(() => {
+      pending.resolve(counts());
+      sleeping.resolve();
+      abort.abort();
+    });
+    const fixture = handlers({
+      createEventStream: (options) =>
+        createRunEventStream({
+          ...options,
+          now: () => clock,
+          sleep: (milliseconds) => {
+            clock += milliseconds;
+            return end !== "idle" && reconciled > 1
+              ? sleeping.promise
+              : Promise.resolve();
+          },
+        }),
+      liveTailMs: 5000,
+      now: () => clock,
+      service: service({
+        readRunEvents: async () => ({
+          events: [],
+          kind: "found",
+          terminal: false,
+        }),
+        reconcileAndDispatch: () => {
+          reconciled += 1;
+          if (reconciled === 1) {
+            return Promise.resolve(counts());
+          }
+          leaseHeld = true;
+          started.resolve();
+          return pending.promise.finally(() => {
+            leaseHeld = false;
+          });
+        },
+      }),
+    });
+    const response = await fixture.handlers.getRunEvents(
+      new Request(`https://app.test/api/runs/${RUN_ID}/events`, {
+        signal: abort.signal,
+      }),
+      RUN_ID
+    );
+    assert.equal(response.status, 200);
+    assert.ok(response.body);
+    const reader = response.body.getReader();
+    const next = reader.read();
+    await started.promise;
+    if (end === "abort") {
+      abort.abort();
+    } else if (end === "cancel") {
+      await reader.cancel();
+    }
+    assert.equal((await next).done, true);
+    if (end === "idle") {
+      assert.equal(clock, DEFAULT_SSE_IDLE_TIMEOUT_MS);
+    }
+    assert.equal(reconciled, 2);
+    assert.equal(leaseHeld, true);
+    assert.equal(fixture.after.length, 2);
+    let drained = false;
+    const retained = Promise.all(
+      fixture.after.map((callback) => callback())
+    ).then(() => {
+      drained = true;
+    });
+    await Promise.resolve();
+    assert.equal(drained, false);
+    pending.resolve(counts());
+    await retained;
+    assert.equal(leaseHeld, false);
+  });
+}
+
+test("backpressured SSE retains later work in its original request context", async () => {
+  const context = new AsyncLocalStorage<string>();
+  const retained: Promise<unknown>[] = [];
+  const first: RunEvent = {
+    at: "2026-08-28T15:00:00.000Z",
+    id: 1,
+    operationId: OPERATION_ID,
+    runId: RUN_ID,
+    type: "accepted",
+  };
+  let clock = 0;
+  let reconciled = 0;
+  let reads = 0;
+  const fixture = handlers({
+    after: (task) => {
+      assert.equal(context.getStore(), "original-request");
+      assert.ok(task instanceof Promise);
+      retained.push(task);
+    },
+    createEventStream: (options) =>
+      createRunEventStream({
+        ...options,
+        now: () => clock,
+        sleep: (milliseconds) => {
+          clock += milliseconds;
+          return Promise.resolve();
+        },
+      }),
+    liveTailMs: 5000,
+    now: () => clock,
+    service: service({
+      readRunEvents: (_principal, _runId, cursor) => {
+        reads += 1;
+        return Promise.resolve({
+          events: cursor === 0 ? [first] : [],
+          kind: "found",
+          terminal: reconciled >= 2,
+        });
+      },
+      reconcileAndDispatch: () => {
+        assert.equal(context.getStore(), "original-request");
+        reconciled += 1;
+        return Promise.resolve(counts());
+      },
+    }),
+  });
+  const response = await context.run("original-request", () =>
+    fixture.handlers.getRunEvents(
+      new Request(`https://app.test/api/runs/${RUN_ID}/events`),
+      RUN_ID
+    )
+  );
+  // Only the handler's own first-page read, which keeps a missing run a 404,
+  // happens before a consumer pulls: the stream is demand-driven and reads
+  // nothing ahead. Drain it from a different async context, as an HTTP
+  // response writer does.
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(reads, 1);
+  assert.equal(context.getStore(), undefined);
+  clock = 5000;
+  assert.match(await response.text(), /id: 1/u);
+  assert.equal(reconciled, 2);
+  assert.equal(retained.length, 2);
+  assert.equal(fixture.logs.length, 0);
+  await Promise.all(retained);
+});
+
+test("a rejected live-tail registration does not start unretained work or break polling", async () => {
+  let clock = 0;
+  let reconciled = 0;
+  let registrations = 0;
+  let poll: Parameters<typeof createRunEventStream>[0]["read"] | undefined;
+  const fixture = handlers({
+    after: () => {
+      registrations += 1;
+      if (registrations > 1) {
+        throw new Error("do-not-log-provider-detail");
+      }
+    },
+    createEventStream: (options) => {
+      poll = options.read;
+      return new ReadableStream<Uint8Array>();
+    },
+    liveTailMs: 5000,
+    now: () => clock,
+    service: service({
+      readRunEvents: async () => ({
+        events: [],
+        kind: "found",
+        terminal: false,
+      }),
+      reconcileAndDispatch: () => {
+        reconciled += 1;
+        return Promise.resolve(counts());
+      },
+    }),
+  });
+  const response = await fixture.handlers.getRunEvents(
+    new Request(`https://app.test/api/runs/${RUN_ID}/events`),
+    RUN_ID
+  );
+  assert.equal(response.status, 200);
+  assert.ok(poll);
+  clock = 5000;
+  assert.deepEqual(await poll(0), { events: [], terminal: false });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(registrations, 2);
+  assert.equal(reconciled, 1);
+  assert.equal(fixture.logs.length, 1);
+  assert.equal(
+    JSON.stringify(fixture.logs).includes("do-not-log-provider-detail"),
+    false
+  );
+  clock = 10_000;
+  await poll(0);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(registrations, 3);
+  assert.equal(reconciled, 1);
+  await response.body?.cancel();
+});
+
+test("a stream with the live tail disabled never nudges reconciliation", async () => {
+  let reconciled = 0;
+  let clock = 0;
+  const reads: ((cursor: number) => Promise<unknown>)[] = [];
+  const fixture = handlers({
+    after: null,
+    createEventStream: ((streamOptions) => {
+      reads.push(streamOptions.read);
+      return new ReadableStream<Uint8Array>();
+    }) as typeof createRunEventStream,
+    liveTailMs: 0,
+    now: () => clock,
+    service: service({
+      readRunEvents: async () => ({
+        events: [],
+        kind: "found",
+        terminal: false,
+      }),
+      reconcileAndDispatch: () => {
+        reconciled += 1;
+        return Promise.resolve(counts());
+      },
+    }),
+  });
+
+  await fixture.handlers.getRunEvents(
+    new Request(`https://app.test/api/runs/${RUN_ID}/events`),
+    RUN_ID
+  );
+  clock = 600_000;
+  await reads[0]?.(0);
+  assert.equal(reconciled, 0);
+});
+
+test("the live tail cadence is read from the environment within bounds", () => {
+  const env = (value?: string) =>
+    ({ RUNNER_LIVE_TAIL_MS: value }) as unknown as NodeJS.ProcessEnv;
+  assert.equal(liveTailMsFromEnvironment(env()), DEFAULT_LIVE_TAIL_MS);
+  assert.equal(liveTailMsFromEnvironment(env("0")), 0);
+  assert.equal(liveTailMsFromEnvironment(env(" 15000 ")), 15_000);
+  assert.throws(() => liveTailMsFromEnvironment(env("500")));
+  assert.throws(() => liveTailMsFromEnvironment(env("abc")));
+});
+
 test("agent and run IDs reject malformed values without reaching service methods", async () => {
   let reads = 0;
   const fixture = handlers({
@@ -1930,6 +2271,48 @@ test("SSE validates cursors, resumes without duplicates, and uses exact headers"
   assert.equal((body.match(/id: 2/g) ?? []).length, 1);
 });
 
+test("only the browser owner can send one valid sandbox binding to the service", async () => {
+  const calls: unknown[][] = [];
+  const fixture = handlers({
+    service: service({
+      bindSandbox: (...args) => {
+        calls.push(args);
+        return Promise.resolve("bound");
+      },
+    }),
+  });
+  const binding = { expectedGeneration: 2, expectedSandboxId: "sandbox-bound" };
+  const bindRequest = (body: object, headers?: HeadersInit) =>
+    new Request("https://app.test/bind", {
+      body: JSON.stringify(body),
+      headers,
+      method: "POST",
+    });
+  const bearer = bindRequest(binding, { authorization: "Bearer fixture" });
+  assert.equal(
+    (await fixture.handlers.bindSandbox(bearer, AGENT_ID)).status,
+    401
+  );
+  assert.equal(bearer.bodyUsed, false);
+  assert.equal(
+    (
+      await fixture.handlers.bindSandbox(
+        bindRequest({ ...binding, name: "bad" }),
+        AGENT_ID
+      )
+    ).status,
+    400
+  );
+  assert.equal(fixture.serviceRequests(), 0);
+  const bound = await fixture.handlers.bindSandbox(
+    bindRequest(binding),
+    AGENT_ID
+  );
+  assert.equal(bound.status, 200);
+  assert.deepEqual(await bound.json(), { ok: true });
+  assert.deepEqual(calls, [[subscriber.principal, AGENT_ID, binding]]);
+});
+
 test("stop accepts an empty body, returns its snapshot, and defers reconciliation", async () => {
   let reconciled = 0;
   const fixture = handlers({
@@ -1954,6 +2337,54 @@ test("stop accepts an empty body, returns its snapshot, and defers reconciliatio
   assert.equal(fixture.after.length, 1);
   await fixture.after[0]();
   assert.equal(reconciled, 1);
+});
+
+test("machine cancellation returns a snapshot only with run read scope", async () => {
+  const machine: RunnerAuthenticatedSubscriber = {
+    ...subscriber,
+    principal: { ...subscriber.principal, ownerCredentialId: OPERATION_ID },
+  };
+  await Promise.all(
+    (["stopped", "in_progress"] as const).flatMap((kind) =>
+      [false, true].map(async (canRead) => {
+        const fixture = handlers({
+          auth: {
+            ...authorizedAuth(),
+            authorizeBearerOwner: async (_request, grant) =>
+              grant?.scope === "run:stop" ||
+              (canRead && grant?.scope === "run:read")
+                ? machine
+                : { kind: "unauthorized" },
+          },
+          service: service({
+            stopRun: async () => ({
+              kind,
+              run: run(),
+              scheduleReconciliation: true,
+            }),
+          }),
+        });
+        const response = await fixture.handlers.stopRun(
+          new Request("https://app.test/cancel", {
+            headers: { authorization: "Bearer fixture" },
+            method: "POST",
+          }),
+          RUN_ID
+        );
+        assert.equal(fixture.after.length, 1);
+        assert.equal(
+          response.status,
+          kind === "in_progress" ? 202 : canRead ? 200 : 204
+        );
+        if (canRead) {
+          assert.equal((await response.json()).run.id, RUN_ID);
+        } else {
+          assert.equal(await response.text(), "");
+          assert.equal(response.headers.get("cache-control"), "no-store");
+        }
+      })
+    )
+  );
 });
 
 test("stop maps accepted, stale, cleanup, and unavailable outcomes explicitly", async () => {
@@ -2115,6 +2546,11 @@ test("diagnostics and reconciliation use only their operator service and safe ou
 
   assert.equal(diagnostic.status, 200);
   assert.deepEqual(await diagnostic.json(), {
+    containment: {
+      credentialRemoved: true,
+      detachedDescendantObserved: true,
+      reusePolicy: "sandbox_reset_required",
+    },
     exitCode: 0,
     ok: true,
     output: "coven-agents",
@@ -2812,4 +3248,85 @@ test("unrecognized provider failures are absent from runner envelopes and logs",
     { name: "unknown" },
     { name: "unknown" },
   ]);
+});
+
+test("run start passes a sandbox binding through and reports its refusal reason", async () => {
+  const received: unknown[] = [];
+  const fixture = handlers({
+    service: service({
+      startRun: (
+        _principal: unknown,
+        _authVersion: unknown,
+        _agentId: unknown,
+        input: unknown
+      ) => {
+        received.push(input);
+        return Promise.resolve({
+          code: "sandbox_binding_refused" as const,
+          kind: "refused" as const,
+          reason: "provider_not_found" as const,
+          retryable: false as const,
+        });
+      },
+    } as never),
+  });
+  const sandboxBinding = {
+    expectedGeneration: 3,
+    expectedSandboxId: "sandbox-recorded-1",
+  };
+  const response = await fixture.handlers.startAgentRun(
+    new Request(`https://app.test/api/agents/${AGENT_ID}/runs`, {
+      body: JSON.stringify({
+        operationId: OPERATION_ID,
+        sandboxBinding,
+        task: "Do the thing.",
+      }),
+      method: "POST",
+    }),
+    AGENT_ID
+  );
+
+  assert.deepEqual(received, [
+    { operationId: OPERATION_ID, sandboxBinding, task: "Do the thing." },
+  ]);
+  assert.equal(response.status, 409);
+  const body = (await response.json()) as { error: unknown };
+  assert.deepEqual(body.error, {
+    code: "sandbox_binding_refused",
+    details: "provider_not_found",
+    message:
+      "The run's sandbox binding did not match the agent's recorded sandbox; nothing was created or changed.",
+    retryable: false,
+  });
+  assert.equal(
+    runSandboxBindingRefusalSchema.safeParse(body.error).success,
+    true
+  );
+  // A refusal schedules no dispatch or reconciliation.
+  assert.equal(fixture.after.length, 0);
+});
+
+test("run start rejects a malformed sandbox binding as an invalid request", async () => {
+  const fixture = handlers({
+    service: service({
+      startRun: () => Promise.reject(new Error("must not reach the service")),
+    }),
+  });
+  const response = await fixture.handlers.startAgentRun(
+    new Request(`https://app.test/api/agents/${AGENT_ID}/runs`, {
+      body: JSON.stringify({
+        operationId: OPERATION_ID,
+        sandboxBinding: { expectedSandboxId: "sandbox", name: "by-name" },
+        task: "Do the thing.",
+      }),
+      method: "POST",
+    }),
+    AGENT_ID
+  );
+
+  assert.equal(response.status, 400);
+  assert.equal(
+    ((await response.json()) as { error: { code: string } }).error.code,
+    "invalid_request"
+  );
 });

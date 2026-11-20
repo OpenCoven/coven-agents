@@ -1,9 +1,9 @@
-# Daytona Cutover Attestation and Runbook
+# Daytona cutover attestation and runbook
 
 - Status: Daytona production control plane verified and superseded execution
   resources retired; full subscriber lifecycle exercise remains approval-gated
 - Prepared: 2026-08-29
-- Updated: 2026-09-02
+- Updated: 2026-09-09
 - Scope: same-origin browser access, Daytona lifecycle, durable recovery, and
   provider-resource disposition
 
@@ -35,19 +35,16 @@ credentials, private planning content, or unsanitized provider payloads.
 | [PR #186](https://github.com/OpenCoven/coven-agents/pull/186) | `4bf89dc98667efa1c46b5131e10d4b14bf5f86c3` | 2026-09-01 |
 | [PR #198](https://github.com/OpenCoven/coven-agents/pull/198) | `80d787e2d2288141cd5fbcd5b9417edda74888f9` | 2026-09-02 |
 | [PR #200](https://github.com/OpenCoven/coven-agents/pull/200) | `dbe5ebbf70c5b943561612512fc03e5ae4542b3b` | 2026-09-02 |
+| [PR #266](https://github.com/OpenCoven/coven-agents/pull/266) | `c6a1d467a4dbf8f35898bb6c5a1a6088f2948cb9` | 2026-09-09 |
+| [PR #267](https://github.com/OpenCoven/coven-agents/pull/267) | `93b4784b8622cf371e63347f034df3cdd8aac70d` | 2026-09-09 |
 
 The fully gated PR #134 head and its squash-merge commit both have tree
 `a8bb0a82efb6ffb7f754d03519f0d381e72fb88e`. These artifacts and results prove
 repository delivery only.
 
-## Pending taxonomy follow-up
+## Taxonomy follow-up
 
-The repository keeps the runner, workstream, and seed identifiers already used
-by the authoritative private planning source and its generated Project view.
-Taxonomy modernization requires a private-source-first, coordinated migration
-across Beads, Project #10, and repository validation. That work is outside this
-repository-only cleanup and remains pending; this record neither accesses nor
-reproduces private records.
+The cutover retained the runner and workstream identifiers in use at the time. Record any future taxonomy change in a delivery issue and update the affected repository validation alongside it.
 
 ## Verified repository evidence
 
@@ -187,6 +184,51 @@ Persistent sandbox lifecycle certified: `no`. Resource disposition certified:
 `no`. Stripe checkout/webhook failure-retry certified: `no`. Observation
 window completed: `no`. Named approvals completed: `no`.
 
+### Production snapshot verification evidence
+
+PR #267 deployed merge commit
+`93b4784b8622cf371e63347f034df3cdd8aac70d` as
+`coven-agents-6gib1jkqo-0xbuns.vercel.app`, aliased to
+`https://agents.opencoven.ai`. The protected
+`POST /api/diagnostics/sandbox` request returned HTTP 200 with:
+
+- `exitCode=0`;
+- `ok=true`;
+- fixed output `coven-agents`;
+- snapshot `coven-agents-copilot-2`;
+- 2 vCPU, 4 GiB memory, and 10 GiB disk; and
+- target `us`.
+
+The diagnostic verified the exact active snapshot before sandbox creation and
+used one 240-second deadline across snapshot lookup, create, execute, and
+cleanup. The operator rotated the diagnostic credential for collection and
+deleted the local copy afterward. No provider identifier, credential, tenant
+identifier, or raw provider output is retained.
+
+This closes the production snapshot-profile evidence gap. It does not certify
+persistent sandbox reuse, detached-descendant termination, or credential
+cleanup across every terminal path.
+
+### Draft containment diagnostic source boundary
+
+Draft [PR #268](https://github.com/OpenCoven/coven-agents/pull/268) adds a
+bounded synthetic containment exercise. It stages and verifies an attempt-A
+mode-`0600` file, launches a `setsid` descendant, requires the child readiness
+marker, deletes the Daytona process session, removes attempt A, stages attempt
+B, observes whether the descendant can read the later marker, and verifies
+removal of every synthetic file.
+
+The receipt exposes only:
+
+- `credentialRemoved`;
+- `detachedDescendantObserved`; and
+- `reusePolicy=sandbox_reset_required`.
+
+This section describes draft source behavior only. Do not mark persistent
+sandbox lifecycle certified until the revision is merged and deployed, the
+exact production receipt is retained, and the approved reset or
+workspace-preserving reuse path is exercised.
+
 ### Production resource-floor repair evidence
 
 The
@@ -231,10 +273,10 @@ Use `pnpm staging:certify` for a new bounded staging evidence collection, with
 an exact HTTPS deployment origin, deployment and source identifiers, one build
 metadata form, a new receipt path, and `--confirm-effects`. The command reads
 the separately configured operator credentials only from its process
-environment; they are never command-line inputs or receipt fields. It follows
-the fixed health, signed-out refusal, diagnostic, reconciliation, inventory,
-and cross-channel credential-isolation sequence and writes a mode-`0600`
-sanitized receipt without overwriting existing evidence.
+environment; they are never command-line inputs or receipt fields. It follows the fixed health, signed-out refusal, snapshot and containment
+diagnostic, reconciliation, inventory, and cross-channel credential-isolation
+sequence. It writes a mode-`0600` sanitized receipt without overwriting existing
+evidence.
 
 This is evidence collection only. It does not certify subscriber lifecycle. It
 does not certify persistent sandbox lifecycle, resource disposition, Stripe

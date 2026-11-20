@@ -1,9 +1,9 @@
 # Daytona Prewarm Proposal
 
 - Status: proposed; not authorized for delivery
-- Decision authority: private Beads/DoltHub
+- Decision authority: repository maintainer, recorded in a GitHub issue when approved.
 - Last reviewed: 2026-08-31
-- Entry gate: an approved private task and measured cold-start evidence
+- Entry gate: an approved GitHub delivery issue and measured cold-start evidence
 - Registry: [planning document registry](../roadmap/README.md)
 
 ## Goal

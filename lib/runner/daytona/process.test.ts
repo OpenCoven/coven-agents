@@ -1,5 +1,6 @@
 // biome-ignore-all lint/suspicious/useAwait: Daytona doubles intentionally preserve SDK promise signatures.
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import test from "node:test";
 import {
   DaytonaGoneError,
@@ -1116,7 +1117,7 @@ test("stages only through per-call env and starts a safe asynchronous session", 
       `COPILOT_GITHUB_TOKEN="$(cat -- '${PATH}')"`,
       "export COPILOT_GITHUB_TOKEN",
       `rm -f -- '${PATH}'`,
-      "unset GH_TOKEN GITHUB_TOKEN CODEX_API_KEY CLAUDE_CODE_OAUTH_TOKEN AI_GATEWAY_API_KEY ANTHROPIC_API_KEY AZURE_OPENAI_API_KEY GOOGLE_API_KEY OPENAI_API_KEY ABUSE_KEY_SECRET AUTH_GITHUB_SECRET AUTH_SECRET BLOB_READ_WRITE_TOKEN CREDENTIAL_KEK CREDENTIAL_KEK_CURRENT_VERSION CREDENTIAL_KEK_V1 CREDENTIAL_KEK_V2 CRON_SECRET DAYTONA_API_KEY OPERATOR_DIAGNOSTIC_TOKEN POSTGRES_URL REDIS_URL RUNNER_MANUAL_RECONCILE_SECRET STRIPE_SECRET_KEY STRIPE_WEBHOOK_SECRET",
+      "unset GH_TOKEN GITHUB_TOKEN CODEX_API_KEY CLAUDE_CODE_OAUTH_TOKEN AI_GATEWAY_API_KEY ANTHROPIC_API_KEY AZURE_OPENAI_API_KEY GOOGLE_API_KEY OPENAI_API_KEY ABUSE_KEY_SECRET AUTH_GITHUB_SECRET AUTH_SECRET BLOB_READ_WRITE_TOKEN CREDENTIAL_KEK CREDENTIAL_KEK_CURRENT_VERSION CREDENTIAL_KEK_V1 CREDENTIAL_KEK_V2 CRON_SECRET DAYTONA_API_KEY OPERATOR_DIAGNOSTIC_TOKEN POSTGRES_URL REDIS_URL RUNNER_MANUAL_RECONCILE_SECRET STRIPE_SECRET_KEY STRIPE_WEBHOOK_SECRET WORKOS_API_KEY WORKOS_COOKIE_PASSWORD",
       "export CI=true",
       "mkdir -p -- '/workspace/repo'",
       "cd -- '/workspace/repo'",
@@ -2628,4 +2629,68 @@ test("a delayed old attempt can only clean its own names after replacement start
     })
   );
   assert.equal(calls.length, beforeDeniedStart);
+});
+
+test("guest launch removes inherited WorkOS control-plane credentials", async () => {
+  const { calls, sandbox } = processDouble();
+  await startDaytonaProcess(startInput(sandbox));
+  const launch = calls.find((call) => call.kind === "start");
+  assert.ok(launch);
+  const unset = launch.command
+    .split("; ")
+    .find((part) => part.startsWith("unset GH_TOKEN "));
+  assert.ok(unset);
+  // Execute only the scrub operation, never the provider command or workspace operations.
+  const output = execFileSync(
+    "/bin/sh",
+    [
+      "-c",
+      `${unset}; printf '%s|%s|%s' "$WORKOS_API_KEY" "$WORKOS_COOKIE_PASSWORD" "$COPILOT_GITHUB_TOKEN"`,
+    ],
+    {
+      encoding: "utf8",
+      env: {
+        COPILOT_GITHUB_TOKEN: "fixture-harness",
+        NODE_ENV: "test",
+        WORKOS_API_KEY: "fixture-api",
+        WORKOS_COOKIE_PASSWORD: "fixture-cookie",
+      },
+    }
+  );
+  assert.equal(output, "||fixture-harness");
+});
+
+test("owner revocation at the provider boundary prevents staging or launch and releases preparation", async () => {
+  await Promise.all(
+    [1, 2].map(async (denyAt) => {
+      const { sandbox, calls } = processDouble();
+      let checks = 0;
+      let released = false;
+      await assert.rejects(
+        startDaytonaProcess({
+          ...startInput(sandbox),
+          authorizeOwnerEffect: async () => {
+            checks += 1;
+            return checks !== denyAt;
+          },
+          releasePreparation: async () => {
+            released = true;
+            return LAUNCH_AUTHORITY;
+          },
+        }),
+        DaytonaProcessError
+      );
+      assert.equal(
+        calls.filter(
+          (call) => call.env && Object.values(call.env).includes(SECRET)
+        ).length,
+        denyAt - 1
+      );
+      assert.equal(
+        calls.some((call) => call.kind === "start"),
+        false
+      );
+      assert.equal(released, true);
+    })
+  );
 });

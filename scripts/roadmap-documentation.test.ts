@@ -11,10 +11,10 @@ function read(path: string): string {
 test("the current-state snapshot covers merged product and planning surfaces", () => {
   const currentState = read("docs/roadmap/current-state.md");
 
-  assert.match(currentState, /Snapshot date: 2026-09-02/u);
+  assert.match(currentState, /Snapshot date: 2026-09-09/u);
   assert.match(
     currentState,
-    /Application baseline: `140bc1a5617c12cb1ad89b1b0a4945d27478564f`/u
+    /Application baseline: `93b4784b8622cf371e63347f034df3cdd8aac70d`/u
   );
 
   for (const evidence of [
@@ -37,6 +37,8 @@ test("the current-state snapshot covers merged product and planning surfaces", (
     "Manual resource repair",
     "lib/runner/daytona/resource-repair.ts",
     "p0-latest-main-candidate-receipt-2026-09-02.json",
+    "coven-agents-copilot-2",
+    "PR #267",
     "Planning documents",
     "scripts/planning-docs-policy.ts",
   ]) {
@@ -46,19 +48,18 @@ test("the current-state snapshot covers merged product and planning surfaces", (
     );
   }
 
-  assert.match(
-    currentState,
-    /private planning\s+reconciliation remains\s+pending/iu
-  );
+  assert.match(currentState, /GitHub issues track open delivery work/u);
+  assert.match(currentState, /\$30\/month/u);
+  assert.match(currentState, /\$25\/month/u);
 });
 
 test("the verification matrix records the newly verified repository boundaries", () => {
   const matrix = read("docs/roadmap/verification-matrix.md");
 
-  assert.match(matrix, /as of 2026-09-02/u);
+  assert.match(matrix, /as of 2026-09-09/u);
   assert.match(
     matrix,
-    /application baseline `140bc1a5617c12cb1ad89b1b0a4945d27478564f`/u
+    /application baseline `93b4784b8622cf371e63347f034df3cdd8aac70d`/u
   );
   assert.match(
     matrix,
@@ -79,6 +80,8 @@ test("the verification matrix records the newly verified repository boundaries",
     assert.match(matrix, new RegExp(`\\| ${capability} \\| \`Verified\``, "u"));
   }
   assert.match(matrix, /\| Daytona resource disposition \| `Blocked` \|/u);
+  assert.match(matrix, /coven-agents-copilot-2/u);
+  assert.match(matrix, /draft \[PR #268\]/u);
 });
 
 test("the latest-main candidate receipt records safe smoke without promotion", () => {
@@ -751,7 +754,7 @@ test("release readiness separates infrastructure cutover from product approval",
 
   assert.match(
     readiness,
-    /Infrastructure cutover is complete; full product release approval is\s+pending\./u
+    /Infrastructure cutover and the exact production snapshot diagnostic are\s+complete; full product release approval is pending\./u
   );
   assert.match(
     readiness,
@@ -759,22 +762,33 @@ test("release readiness separates infrastructure cutover from product approval",
   );
   assert.match(
     readiness,
-    /private Beads-to-Project reconciliation has completed with\s+a final no-op preview/u
+    /a release-blocking issue is unresolved or lacks verified acceptance evidence/u
   );
   assert.match(readiness, /## Coordinated team execution/u);
   assert.match(readiness, /GitHub-capable steps fail closed/u);
   assert.match(readiness, /pnpm staging:certify/u);
   assert.match(readiness, /staging evidence collection only/iu);
   assert.match(readiness, /does not make a final readiness decision/iu);
+  assert.match(readiness, /SUBSCRIPTION_CHECKOUT_ENABLED=off/u);
+  assert.match(readiness, /\$30\/month.*\$25\/month/su);
+  assert.match(readiness, /no active Customer Portal configuration exists/u);
+  assert.match(attestation, /Production snapshot verification evidence/u);
+  assert.match(attestation, /coven-agents-copilot-2/u);
+  assert.match(attestation, /Draft containment diagnostic source boundary/u);
   assert.match(attestation, /pnpm staging:certify/u);
   assert.match(attestation, /does not certify subscriber lifecycle/iu);
   assert.match(attestation, /does not certify persistent sandbox lifecycle/iu);
 });
 
-test("the implementation sequence records its authority freshness boundary", () => {
+test("the implementation sequence points to delivery issues for task acceptance", () => {
   const sequence = read("docs/roadmap/implementation-sequence.md");
 
-  assert.match(sequence, /Authority freshness/u);
-  assert.match(sequence, /not reordered on 2026-08-31/u);
-  assert.match(sequence, /private planning authority was unavailable/u);
+  assert.match(
+    sequence,
+    /Check the delivery issues for task status and acceptance criteria/u
+  );
+  assert.match(
+    sequence,
+    /Link landed changes and their evidence from the delivery issue/u
+  );
 });

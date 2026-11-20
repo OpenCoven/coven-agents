@@ -3,6 +3,7 @@ import {
   type AgentRunnerHealth,
   type CreateAgentInput,
   type RunEvent,
+  type RunLiveView,
   type RunResult,
   type RunSnapshot,
   runSnapshotToResult,
@@ -134,6 +135,10 @@ export class RunnerClient {
 
   getRun(runId: string, signal?: AbortSignal): Promise<RunSnapshot> {
     return this.transport.getRun(runId, signal);
+  }
+
+  getRunLiveView(runId: string, signal?: AbortSignal): Promise<RunLiveView> {
+    return this.transport.getRunLiveView(runId, signal);
   }
 
   streamRunEvents(

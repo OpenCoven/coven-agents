@@ -371,6 +371,12 @@ export const runReservation = pgTable(
     costUnits: integer("costUnits").notNull(),
     durationSeconds: integer("durationSeconds"),
     expiresAt: timestamp("expiresAt").notNull(),
+    /**
+     * The monthly bucket admission judged this run against, retained for audit.
+     * Pack accounting uses RunPackDraw, never this cap or a later policy.
+     * Null on rows admitted before the cap was recorded.
+     */
+    monthlyCap: integer("monthlyCap"),
     periodDay: date("periodDay").notNull(),
     periodMonth: timestamp("periodMonth").notNull(),
     releasedAt: timestamp("releasedAt"),
@@ -385,6 +391,14 @@ export const runReservation = pgTable(
       .notNull()
       .default("reserved"),
     tenantHash: varchar("tenantHash", { length: 64 }).notNull(),
+    /**
+     * The account whose packs this run may draw on. Packs are bought per
+     * account, so consumption is keyed the same way; `tenantHash` is an HMAC
+     * that changes with the abuse key and only bounds abuse buckets. Null
+     * for demo tenants, which own no account, and on rows admitted before
+     * the account was recorded.
+     */
+    userId: uuid("userId").references(() => user.id, { onDelete: "set null" }),
   },
   (table) => [
     index("RunReservation_tenant_day_state_idx").on(
@@ -397,6 +411,15 @@ export const runReservation = pgTable(
       table.tenantHash,
       table.periodMonth,
       table.state
+    ),
+    index("RunReservation_user_period_state_idx").on(
+      table.userId,
+      table.periodMonth,
+      table.state
+    ),
+    check(
+      "RunReservation_monthlyCap_positive",
+      sql`${table.monthlyCap} is null or ${table.monthlyCap} > 0`
     ),
     index("RunReservation_reserved_expiry_idx")
       .on(table.expiresAt)
@@ -426,6 +449,32 @@ export const runReservation = pgTable(
 );
 
 export type RunReservation = InferSelectModel<typeof runReservation>;
+
+/** An account-keyed pack allocation, held by a reservation and charged on consumption. */
+export const runPackDraw = pgTable(
+  "RunPackDraw",
+  {
+    minutes: integer("minutes").notNull(),
+    reservedMinutes: integer("reservedMinutes").notNull(),
+    runId: varchar("runId", { length: 64 })
+      .primaryKey()
+      .references(() => runReservation.runId, { onDelete: "cascade" }),
+    userId: uuid("userId")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+  },
+  (table) => [
+    index("RunPackDraw_user_idx").on(table.userId),
+    check(
+      "RunPackDraw_minutes_valid",
+      sql`${table.minutes} >= 0 and ${table.minutes} <= ${table.reservedMinutes}`
+    ),
+    check(
+      "RunPackDraw_reservedMinutes_valid",
+      sql`${table.reservedMinutes} >= 0`
+    ),
+  ]
+);
 
 /**
  * One paid top-up of minutes.
@@ -727,6 +776,8 @@ export const runnerAgent = pgTable(
       length: AGENT_RUNNER_LIMITS.maxModelLength,
     }).notNull(),
     name: varchar("name", { length: 64 }).notNull(),
+    pinnedSandboxGeneration: integer("pinnedSandboxGeneration"),
+    pinnedSandboxId: varchar("pinnedSandboxId", { length: 128 }),
     runtime: varchar("runtime", {
       enum: ["codex", "claude", "copilot"],
       length: 16,
@@ -776,6 +827,11 @@ export const runnerAgent = pgTable(
     }),
   },
   (table) => [
+    unique("RunnerAgent_pinnedSandboxId_key").on(table.pinnedSandboxId),
+    check(
+      "RunnerAgent_pinnedSandbox_valid",
+      sql`(${table.pinnedSandboxId} IS NULL AND ${table.pinnedSandboxGeneration} IS NULL) OR (${table.pinnedSandboxId} IS NOT NULL AND ${table.pinnedSandboxGeneration} IS NOT NULL AND ${table.pinnedSandboxGeneration} >= 0)`
+    ),
     unique("RunnerAgent_id_tenant_key").on(table.id, table.tenant),
     index("RunnerAgent_tenant_updatedAt_idx").on(table.tenant, table.updatedAt),
     index("RunnerAgent_sandbox_recovery_idx")
@@ -830,6 +886,50 @@ export const runnerAgent = pgTable(
 
 export type RunnerAgent = InferSelectModel<typeof runnerAgent>;
 
+export const runnerOwnerCredential = pgTable(
+  "RunnerOwnerCredential",
+  {
+    agentId: uuid("agentId").notNull(),
+    authVersion: integer("authVersion").notNull(),
+    digest: varchar("digest", { length: 64 }).notNull().unique(),
+    expiresAt: timestamp("expiresAt", { withTimezone: true }).notNull(),
+    id: uuid("id").primaryKey().defaultRandom(),
+    issuedAt: timestamp("issuedAt", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revokedAt", { withTimezone: true }),
+    scopes: text("scopes").array().notNull(),
+    tenant: varchar("tenant", { length: 64 }).notNull(),
+    userId: uuid("userId")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.agentId, table.tenant],
+      foreignColumns: [runnerAgent.id, runnerAgent.tenant],
+    }).onDelete("cascade"),
+    check(
+      "RunnerOwnerCredential_owner",
+      sql`${table.tenant} = 'u_' || replace(${table.userId}::text, '-', '')`
+    ),
+    check(
+      "RunnerOwnerCredential_digest",
+      sql`${table.digest} ~ '^[0-9a-f]{64}$'`
+    ),
+    check(
+      "RunnerOwnerCredential_lifetime",
+      sql`${table.expiresAt} > ${table.issuedAt} and ${table.expiresAt} <= ${table.issuedAt} + interval '1 hour'`
+    ),
+    check(
+      "RunnerOwnerCredential_scopes",
+      sql`cardinality(${table.scopes}) between 1 and 5 and array_position(${table.scopes}, null) is null and ${table.scopes} <@ array['run:start','run:read','run:events','run:stop','sandbox:inspect']::text[]`
+    ),
+    index("RunnerOwnerCredential_owner_agent_idx").on(
+      table.userId,
+      table.agentId
+    ),
+  ]
+);
+
 export const runnerRun = pgTable(
   "RunnerRun",
   {
@@ -851,6 +951,13 @@ export const runnerRun = pgTable(
       .notNull()
       .default(false),
     authVersion: integer("authVersion"),
+    /**
+     * The sandbox a run was admitted against when its request carried a
+     * binding. Both are set together or not at all. A bound run is dispatched
+     * only to this recorded sandbox and never creates or changes one.
+     */
+    boundSandboxGeneration: integer("boundSandboxGeneration"),
+    boundSandboxId: varchar("boundSandboxId", { length: 128 }),
     cancellationRequestedAt: timestamp("cancellationRequestedAt"),
     commandEvidence: jsonb("commandEvidence")
       .$type<CommandEvidence[]>()
@@ -909,6 +1016,7 @@ export const runnerRun = pgTable(
     logCursor: integer("logCursor").notNull().default(0),
     operationId: uuid("operationId").notNull(),
     output: text("output").notNull().default(""),
+    ownerCredentialId: uuid("ownerCredentialId"),
     queueSequence: integer("queueSequence")
       .generatedAlwaysAsIdentity()
       .notNull(),
@@ -981,6 +1089,10 @@ export const runnerRun = pgTable(
     check(
       "RunnerRun_dispatchState_valid",
       sql`${table.dispatchState} in ('queued', 'dispatching', 'running', 'terminal')`
+    ),
+    check(
+      "RunnerRun_sandboxBinding_valid",
+      sql`(${table.boundSandboxId} is null and ${table.boundSandboxGeneration} is null) or (${table.boundSandboxId} is not null and ${table.boundSandboxGeneration} is not null and ${table.boundSandboxId} ~ '^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$' and ${table.boundSandboxGeneration} >= 0)`
     ),
     check(
       "RunnerRun_executionPermission_valid",

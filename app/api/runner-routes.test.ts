@@ -12,6 +12,7 @@ import {
   type RunSnapshot,
   runErrorEnvelopeSchema,
   runListEnvelopeSchema,
+  runLiveViewEnvelopeSchema,
   runSnapshotEnvelopeSchema,
 } from "@opencoven/agent-contracts";
 import { harnessesEnvelopeSchema } from "@opencoven/harness";
@@ -104,6 +105,11 @@ function service(overrides: Partial<RunnerService> = {}): RunnerService {
     createAgent: async () => ({ agent: definition(), kind: "created" }),
     deleteAgent: async () => ({ kind: "deleted" }),
     diagnoseSandbox: async () => ({
+      containment: {
+        credentialRemoved: true,
+        detachedDescendantObserved: true,
+        reusePolicy: "sandbox_reset_required",
+      },
       exitCode: 0,
       ok: true,
       output: "coven-agents",
@@ -119,6 +125,11 @@ function service(overrides: Partial<RunnerService> = {}): RunnerService {
     }),
     getAgent: async () => ({ agent: definition(), kind: "found" }),
     getRun: async () => ({ kind: "found", run: run() }),
+    getRunLiveView: async () => ({
+      kind: "unavailable",
+      reason: "not_configured",
+    }),
+    inspectSandbox: async () => ({ outcome: "unauthorized", version: 1 }),
     inventoryResources: async () => ({
       ambiguityReasons: {
         configurationDrift: 0,
@@ -342,6 +353,7 @@ async function executeFixture(): Promise<void> {
     agentRuns,
     runRead,
     events,
+    liveView,
     stop,
     prewarm,
     diagnostic,
@@ -356,6 +368,7 @@ async function executeFixture(): Promise<void> {
     import("./agents/[id]/runs/route"),
     import("./runs/[id]/route"),
     import("./runs/[id]/events/route"),
+    import("./runs/[id]/live-view/route"),
     import("./runs/[id]/stop/route"),
     import("./tenant/prewarm/route"),
     import("./diagnostics/sandbox/route"),
@@ -372,6 +385,7 @@ async function executeFixture(): Promise<void> {
     agentRuns,
     runRead,
     events,
+    liveView,
     stop,
     prewarm,
     diagnostic,
@@ -388,6 +402,7 @@ async function executeFixture(): Promise<void> {
   assert.deepEqual(exportedVerbs(agentRuns), ["GET", "POST"]);
   assert.deepEqual(exportedVerbs(runRead), ["GET"]);
   assert.deepEqual(exportedVerbs(events), ["GET"]);
+  assert.deepEqual(exportedVerbs(liveView), ["GET"]);
   assert.deepEqual(exportedVerbs(stop), ["POST"]);
   assert.deepEqual(exportedVerbs(prewarm), ["POST"]);
   assert.deepEqual(exportedVerbs(diagnostic), ["POST"]);
@@ -576,6 +591,17 @@ async function executeFixture(): Promise<void> {
     "text/event-stream; charset=utf-8"
   );
 
+  const liveViewResponse = await liveView.GET(
+    new Request(`https://app.test/api/runs/${RUN_ID}/live-view`),
+    runContext
+  );
+  assert.equal(liveViewResponse.status, 200);
+  assert.equal(liveViewResponse.headers.get("cache-control"), "no-store");
+  assert.deepEqual(
+    runLiveViewEnvelopeSchema.parse(await liveViewResponse.json()).view,
+    { kind: "unavailable", reason: "not_configured" }
+  );
+
   const stopResponse = await stop.POST(
     new Request(`https://app.test/api/runs/${RUN_ID}/stop`, { method: "POST" }),
     runContext
@@ -609,6 +635,11 @@ async function executeFixture(): Promise<void> {
   );
   assert.equal(diagnosticResponse.status, 200);
   assert.deepEqual(await diagnosticResponse.json(), {
+    containment: {
+      credentialRemoved: true,
+      detachedDescendantObserved: true,
+      reusePolicy: "sandbox_reset_required",
+    },
     exitCode: 0,
     ok: true,
     output: "coven-agents",

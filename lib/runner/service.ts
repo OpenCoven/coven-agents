@@ -10,6 +10,8 @@ import {
   type RunSnapshot,
   runEventSchema,
   runSnapshotSchema,
+  type SandboxInspectionRequest,
+  type SandboxInspectionResult,
   startRunInputSchema,
   type WarmState,
   warmStateSchema,
@@ -44,6 +46,7 @@ import type {
   RunnerResourceRepairOptions,
   RunnerResourceRepairResult,
 } from "./resource-lifecycle";
+import type { SandboxBindingRefusalReason } from "./sandbox-binding";
 import type { RunnerStore } from "./store";
 import type {
   RunnerAgentRecord,
@@ -70,6 +73,11 @@ export type RunnerWarmSandboxResult = RunnerResourcePrewarmResult;
 export type RunnerPrewarmOptions = RunnerResourcePrewarmOptions;
 
 export type RunnerDiagnosticResult = Readonly<{
+  containment: Readonly<{
+    credentialRemoved: true;
+    detachedDescendantObserved: boolean;
+    reusePolicy: "sandbox_reset_required";
+  }>;
   exitCode: number;
   ok: boolean;
   output: string;
@@ -102,12 +110,18 @@ export type RunnerServiceDependencies = Readonly<{
     claimed: RunnerClaimedDispatch
   ) => Promise<RunnerDispatchResult>;
   listHarnesses?: () => Promise<readonly HarnessStatus[]>;
+  liveView?: RunnerLiveViewProvider;
   reconcileAndDispatch?: () => Promise<RunnerReconciliationExecutionResult>;
   resourceLifecycle?: Pick<
     RunnerPersistentResourceLifecycle,
     "decommission" | "prewarm"
   > &
-    Partial<Pick<RunnerPersistentResourceLifecycle, "inventory" | "repair">>;
+    Partial<
+      Pick<
+        RunnerPersistentResourceLifecycle,
+        "bind" | "inspect" | "inventory" | "repair"
+      >
+    >;
   reportAdmissionFailure?: (failure: RunnerAdmissionFailure) => void;
   store: RunnerServiceStore;
 }>;
@@ -161,6 +175,12 @@ export type RunnerStartResult =
       kind: "refused";
       retryable: boolean;
     }>
+  | Readonly<{
+      code: "sandbox_binding_refused";
+      kind: "refused";
+      reason: SandboxBindingRefusalReason;
+      retryable: false;
+    }>
   | Readonly<{ kind: "invalid" }>;
 
 export type RunnerScheduledStartResult =
@@ -170,6 +190,32 @@ export type RunnerScheduledStartResult =
 export type RunnerReadRunResult =
   | Readonly<{ kind: "found"; run: RunSnapshot }>
   | Readonly<{ kind: "not_found" }>;
+
+/**
+ * Why a live view is not available right now. Each reason is a distinct
+ * thing the console can say honestly: the feature is off, the run is not
+ * executing, the sandbox is gone, or the sandbox image has no desktop.
+ */
+export type RunnerLiveViewUnavailableReason =
+  | "desktop_unavailable"
+  | "not_configured"
+  | "not_running"
+  | "provider_unavailable"
+  | "sandbox_missing";
+
+export type RunnerLiveViewResult =
+  | Readonly<{ kind: "not_found" }>
+  | Readonly<{ expiresAt: string; kind: "ready"; url: string }>
+  | Readonly<{ kind: "unavailable"; reason: RunnerLiveViewUnavailableReason }>;
+
+/**
+ * Provider hook that turns a running record into a short-lived, signed view
+ * of its sandbox desktop. Absent in compositions without a provider that can
+ * offer one, which the service reports as `not_configured`.
+ */
+export type RunnerLiveViewProvider = (
+  input: Readonly<{ run: RunSnapshot; tenant: string }>
+) => Promise<Exclude<RunnerLiveViewResult, { kind: "not_found" }>>;
 
 export type RunnerEventPageResult =
   | Readonly<{
@@ -255,6 +301,17 @@ export type RunnerService = Readonly<{
     principal: RunnerPrincipal,
     runId: string
   ) => Promise<RunnerReadRunResult>;
+  getRunLiveView: (
+    principal: RunnerPrincipal,
+    runId: string
+  ) => Promise<RunnerLiveViewResult>;
+  /** Read-only: observes the caller's recorded sandbox, mutates nothing. */
+  bindSandbox?: RunnerPersistentResourceLifecycle["bind"];
+  inspectSandbox: (
+    principal: RunnerPrincipal,
+    agentId: string,
+    expected: SandboxInspectionRequest
+  ) => Promise<SandboxInspectionResult>;
   inventoryResources: () => Promise<RunnerInventoryResourcesResult>;
   listAgentRuns: (
     principal: RunnerPrincipal,
@@ -507,6 +564,7 @@ export function createRunnerService(
   }
 
   return {
+    bindSandbox: dependencies.resourceLifecycle?.bind,
     createAgent: async (principal, input, providerIdempotencyKey) => {
       const parsed = parsedDefinition(input);
       if (parsed.kind !== "ok") {
@@ -606,6 +664,36 @@ export function createRunnerService(
         : { kind: "not_found" };
     },
 
+    getRunLiveView: async (principal, runId) => {
+      if (!validId(runId)) {
+        return { kind: "not_found" };
+      }
+      const run = await dependencies.store.getRun(principal, runId);
+      if (!run) {
+        return { kind: "not_found" };
+      }
+      if (run.status !== "running") {
+        return { kind: "unavailable", reason: "not_running" };
+      }
+      if (!dependencies.liveView) {
+        return { kind: "unavailable", reason: "not_configured" };
+      }
+      return dependencies.liveView({ run, tenant: principal.tenant });
+    },
+    inspectSandbox: (principal, agentId, expected) => {
+      if (!validId(agentId)) {
+        return Promise.resolve({ outcome: "unauthorized", version: 1 });
+      }
+      if (!dependencies.resourceLifecycle?.inspect) {
+        throw configuredError("sandbox inspection");
+      }
+      return dependencies.resourceLifecycle.inspect(
+        principal,
+        agentId,
+        expected
+      );
+    },
+
     inventoryResources: () => {
       if (!dependencies.resourceLifecycle?.inventory) {
         throw configuredError("resource inventory");
@@ -644,7 +732,7 @@ export function createRunnerService(
         return { kind: "unavailable", source: "database" };
       }
       const [target] = [...agents].sort(newerAgent);
-      if (!target) {
+      if (!target || target.pinnedSandboxId) {
         return { kind: "none" };
       }
       if (!isRunnableHarness(target.runtime)) {
@@ -758,7 +846,15 @@ export function createRunnerService(
           id,
           operationId: parsed.data.operationId,
           principal,
-          requestHash: hashRunRequest(agentId, parsed.data.task),
+          requestHash: hashRunRequest(
+            agentId,
+            parsed.data.task,
+            "unrestricted",
+            parsed.data.sandboxBinding ?? null
+          ),
+          ...(parsed.data.sandboxBinding
+            ? { sandboxBinding: parsed.data.sandboxBinding }
+            : {}),
           task: parsed.data.task,
         });
       } catch (error) {
@@ -817,6 +913,17 @@ export function createRunnerService(
               return {
                 code: "lifecycle_conflict",
                 kind: "refused",
+                retryable: false,
+              };
+            case "sandbox_binding_refused":
+              // Without a reason the refusal cannot be reported truthfully.
+              if (!admitted.error.sandboxBindingReason) {
+                throw configuredError("sandbox binding refusal");
+              }
+              return {
+                code: "sandbox_binding_refused",
+                kind: "refused",
+                reason: admitted.error.sandboxBindingReason,
                 retryable: false,
               };
             case "global_busy":

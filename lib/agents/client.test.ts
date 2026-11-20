@@ -63,6 +63,10 @@ function fakeTransport(
     deleteAgent: async () => undefined,
     getAgent: async () => agent,
     getRun: async () => snapshot("completed"),
+    getRunLiveView: async () => ({
+      kind: "unavailable",
+      reason: "not_configured",
+    }),
     health: async () => ({
       apiVersion: AGENT_RUNNER_API_VERSION,
       capabilities: [...AGENT_RUNNER_CAPABILITIES],
@@ -101,6 +105,13 @@ test("delegates browser operations to the injected transport", async () => {
     getAgent: (id, signal) => {
       calls.push(`agent:${id}:${String(signal === controller.signal)}`);
       return Promise.resolve(agent);
+    },
+    getRunLiveView: (id, signal) => {
+      calls.push(`live-view:${id}:${String(signal === controller.signal)}`);
+      return Promise.resolve({
+        kind: "unavailable" as const,
+        reason: "not_configured" as const,
+      });
     },
     health: (signal) => {
       calls.push(`health:${String(signal === controller.signal)}`);
@@ -173,6 +184,7 @@ test("delegates browser operations to the injected transport", async () => {
     signal: controller.signal,
   });
   await client.stopRun(RUN_ID, controller.signal);
+  await client.getRunLiveView(RUN_ID, controller.signal);
 
   assert.deepEqual(calls, [
     "health:true",
@@ -186,6 +198,7 @@ test("delegates browser operations to the injected transport", async () => {
     `runs:${AGENT_ID}:true`,
     `events:${RUN_ID}:7:true`,
     `stop:${RUN_ID}:true`,
+    `live-view:${RUN_ID}:true`,
   ]);
 });
 

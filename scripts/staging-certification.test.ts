@@ -145,6 +145,11 @@ function successfulHandlers(): FetchHandler[] {
       status: 307,
     }),
     json({
+      containment: {
+        credentialRemoved: true,
+        detachedDescendantObserved: true,
+        reusePolicy: "sandbox_reset_required",
+      },
       exitCode: 0,
       ok: true,
       output: "coven-agents",
@@ -245,6 +250,11 @@ test("collects bounded staging evidence in deterministic credential-isolated ord
   assert.equal(receipt.capturedAt, fixedNow.toISOString());
   assert.equal(receipt.checks.closedBetaRefusal.outcome, "refused");
   assert.equal(receipt.checks.sandboxDiagnostic.outcome, "passed");
+  assert.deepEqual(receipt.checks.sandboxDiagnostic.containment, {
+    credentialRemoved: true,
+    detachedDescendantObserved: true,
+    reusePolicy: "sandbox_reset_required",
+  });
   assert.deepEqual(receipt.checks.sandboxDiagnostic.snapshot, {
     name: "coven-agents-copilot-2",
     resources: { cpu: 2, disk: 10, memory: 4 },

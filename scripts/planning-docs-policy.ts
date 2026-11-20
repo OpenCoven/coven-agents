@@ -13,7 +13,7 @@ export const PLANNING_LIFECYCLES = [
 ] as const;
 
 export const PLANNING_AUTHORITIES = [
-  "Beads-derived aggregate",
+  "Delivery summary",
   "Non-authoritative proposal",
   "Operating policy",
   "Repository evidence",
@@ -203,7 +203,6 @@ function isRequiredPlanningPath(path: string): boolean {
   return (
     path === "POLISH.md" ||
     path === "ROADMAP.md" ||
-    path === "docs/beads-project-sync.md" ||
     /^docs\/operations\/.+\.md$/u.test(path) ||
     /^docs\/roadmap\/.+\.md$/u.test(path) ||
     /^docs\/proposals\/.+\.md$/u.test(path) ||

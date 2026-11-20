@@ -25,14 +25,22 @@ import { formatDuration, spanBetween } from "@/lib/console/format";
  * showing a plausible figure the receipt cannot support.
  */
 
+/**
+ * Every block carries `atMs`: its position on the run's clock, measured from
+ * the moment the run was created. That origin is deliberate — the gutter then
+ * shows queue time as honestly as it shows execution time, and the reader can
+ * see a run that waited forty seconds before its sandbox came up.
+ */
 export type ThreadBlock =
   | {
+      atMs: number | null;
       context: string[];
       id: string;
       kind: "mission";
       text: string;
     }
   | {
+      atMs: number | null;
       detail: string | null;
       durationMs: number | null;
       id: string;
@@ -41,16 +49,22 @@ export type ThreadBlock =
       status: RunStatus;
     }
   | {
+      atMs: number | null;
       command: string;
       durationMs: number | null;
       exitCode: number | null;
+      /** The leading token, which is how a reader recognises a command. */
+      head: string;
       id: string;
       kind: "command";
       live: boolean;
       stderr: string;
       stdout: string;
+      /** The last meaningful line of output, for the collapsed ledger row. */
+      summary: string;
     }
   | {
+      atMs: number | null;
       durationMs: number | null;
       files: FileEvidence[];
       id: string;
@@ -58,6 +72,7 @@ export type ThreadBlock =
       label: string;
     }
   | {
+      atMs: number | null;
       durationMs: number | null;
       id: string;
       kind: "text";
@@ -65,6 +80,7 @@ export type ThreadBlock =
       text: string;
     }
   | {
+      atMs: number | null;
       code: string;
       details: string | null;
       id: string;
@@ -73,6 +89,7 @@ export type ThreadBlock =
       retryable: boolean;
     }
   | {
+      atMs: number | null;
       claim: string;
       hasAnswer: boolean;
       id: string;
@@ -263,8 +280,13 @@ function collectBlocks(input: ProjectInput): ThreadBlock[] {
   const blocks: ThreadBlock[] = [];
   const { agent, events, run } = input;
 
+  const origin = run?.createdAt ?? events.find((event) => event.at)?.at;
+  const offset = (at: string | null | undefined): number | null =>
+    spanBetween(origin, at);
+
   if (run?.task) {
     blocks.push({
+      atMs: origin ? 0 : null,
       context: [
         sanitizeEvidenceText(agent?.name ?? "agent"),
         agent?.runtime
@@ -303,6 +325,7 @@ function collectBlocks(input: ProjectInput): ThreadBlock[] {
           break;
         }
         blocks.push({
+          atMs: offset(event.at),
           detail:
             event.status === "running"
               ? `${agent?.runtime ?? "harness"} · isolated container`
@@ -326,6 +349,7 @@ function collectBlocks(input: ProjectInput): ThreadBlock[] {
           break;
         }
         blocks.push({
+          atMs: offset(event.at),
           durationMs: gap,
           id: `e${event.id}`,
           kind: "text",
@@ -337,14 +361,17 @@ function collectBlocks(input: ProjectInput): ThreadBlock[] {
 
       case "command":
         blocks.push({
+          atMs: offset(event.evidence.startedAt ?? event.at),
           command: sanitizeEvidenceText(event.evidence.command),
           durationMs: commandDuration(event.evidence) ?? gap,
           exitCode: event.evidence.exitCode,
+          head: commandHead(sanitizeEvidenceText(event.evidence.command)),
           id: `e${event.id}`,
           kind: "command",
           live: event.evidence.exitCode === null,
           stderr: sanitizeEvidenceText(event.evidence.stderr),
           stdout: sanitizeEvidenceText(event.evidence.stdout),
+          summary: sanitizeEvidenceText(commandSummary(event.evidence)),
         });
         break;
 
@@ -361,6 +388,7 @@ function collectBlocks(input: ProjectInput): ThreadBlock[] {
           break;
         }
         blocks.push({
+          atMs: offset(event.at),
           durationMs: gap,
           files: [evidence],
           id: `e${event.id}`,
@@ -372,6 +400,7 @@ function collectBlocks(input: ProjectInput): ThreadBlock[] {
 
       case "failed":
         blocks.push({
+          atMs: offset(event.at),
           code: sanitizeEvidenceText(event.error.code),
           details: event.error.details
             ? sanitizeEvidenceText(event.error.details)
@@ -384,7 +413,9 @@ function collectBlocks(input: ProjectInput): ThreadBlock[] {
         break;
 
       case "completed":
-        blocks.push(evidenceBlock(event.run, agent, `e${event.id}`));
+        blocks.push(
+          evidenceBlock(event.run, agent, `e${event.id}`, offset(event.at))
+        );
         break;
 
       default:
@@ -398,11 +429,12 @@ function collectBlocks(input: ProjectInput): ThreadBlock[] {
   // snapshot rather than left off because an event was missed.
   const hasEvidence = blocks.some((block) => block.kind === "evidence");
   if (run && run.status === "completed" && !hasEvidence) {
-    blocks.push(evidenceBlock(run, agent, "receipt"));
+    blocks.push(evidenceBlock(run, agent, "receipt", offset(run.completedAt)));
   }
 
   if (run?.error && !blocks.some((block) => block.kind === "error")) {
     blocks.push({
+      atMs: offset(run.completedAt),
       code: sanitizeEvidenceText(run.error.code),
       details: run.error.details
         ? sanitizeEvidenceText(run.error.details)
@@ -433,7 +465,8 @@ function collectBlocks(input: ProjectInput): ThreadBlock[] {
 function evidenceBlock(
   run: RunSnapshot,
   agent: AgentDefinition | null,
-  id: string
+  id: string,
+  atMs: number | null
 ): ThreadBlock {
   const verified = run.commandEvidence.filter(
     (evidence) => evidence.exitCode === 0
@@ -446,6 +479,7 @@ function evidenceBlock(
   });
 
   return {
+    atMs,
     claim,
     hasAnswer,
     id,

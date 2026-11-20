@@ -181,6 +181,18 @@ export async function restoreHermeticSubscriberEntitlement(
   }
 }
 
+export async function machineRunEffects(runId: string) {
+  const sql = database();
+  try {
+    const [row] = await sql<
+      { leases: number; attempts: number }[]
+    >`select (select count(*)::int from "CredentialLease" where "runId"=${runId}) as leases,(select count(*)::int from "RunnerRun" where id=${runId} and "daytonaAttemptId" is not null) as attempts`;
+    return row;
+  } finally {
+    await sql.end({ timeout: 2 });
+  }
+}
+
 export async function runCertificationCounts(
   runId: string,
   url = process.env.POSTGRES_URL

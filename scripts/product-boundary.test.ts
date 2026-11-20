@@ -63,8 +63,11 @@ const applicationRouteFiles = [
   "app/(chat)/api/vote/route.ts",
   "app/api/account/avatar/route.ts",
   "app/api/admin/route.ts",
+  "app/api/agents/[id]/owner-credentials/route.ts",
   "app/api/agents/[id]/route.ts",
   "app/api/agents/[id]/runs/route.ts",
+  "app/api/agents/[id]/sandbox/binding/route.ts",
+  "app/api/agents/[id]/sandbox/inspection/route.ts",
   "app/api/agents/route.ts",
   "app/api/analytics/route.ts",
   "app/api/billing/portal/route.ts",
@@ -84,6 +87,7 @@ const applicationRouteFiles = [
   "app/api/internal/stripe-reconcile/route.ts",
   "app/api/minute-packs/checkout/route.ts",
   "app/api/runs/[id]/events/route.ts",
+  "app/api/runs/[id]/live-view/route.ts",
   "app/api/runs/[id]/route.ts",
   "app/api/runs/[id]/stop/route.ts",
   "app/api/skills/[id]/route.ts",
@@ -120,6 +124,10 @@ const contractSourceFiles = [
   "packages/agent-contracts/src/identity.ts",
   "packages/agent-contracts/src/index.test.ts",
   "packages/agent-contracts/src/index.ts",
+  "packages/agent-contracts/src/sandbox-binding.test.ts",
+  "packages/agent-contracts/src/sandbox-binding.ts",
+  "packages/agent-contracts/src/sandbox-inspection.test.ts",
+  "packages/agent-contracts/src/sandbox-inspection.ts",
   "packages/agent-contracts/src/team.test.ts",
 ] as const;
 const credentialSourceFiles = [
@@ -176,6 +184,7 @@ const browserTransportRoutes = [
   "/api/health",
   `/api/runs/${runIdSourceExpression}`,
   `/api/runs/${runIdSourceExpression}/events`,
+  `/api/runs/${runIdSourceExpression}/live-view`,
   `/api/runs/${runIdSourceExpression}/stop`,
   "/api/tenant/prewarm",
 ] as const;
@@ -251,11 +260,16 @@ const environmentKeys = [
   "RUN_ADMISSION_MODE",
   "RUN_ADMISSION_TENANT_ACTIVE_MAX",
   "RUN_ADMISSION_TENANT_QUEUE_MAX",
+  "RUNNER_ATTEMPT_LEASE_MS",
+  "RUNNER_LIVE_TAIL_MS",
+  "RUNNER_LIVE_VIEW",
   "RUNNER_MANUAL_RECONCILE_SECRET",
   "STRIPE_PRICE_ID",
   "STRIPE_SECRET_KEY",
   "STRIPE_WEBHOOK_SECRET",
   "SUBSCRIPTION_CHECKOUT_ENABLED",
+  "WORKOS_API_KEY",
+  "WORKOS_CLIENT_ID",
 ] as const;
 const productionDependencies = [
   "@ai-sdk/otel",
@@ -295,6 +309,7 @@ const productionDependencies = [
   "drizzle-orm",
   "fast-deep-equal",
   "framer-motion",
+  "jose",
   "katex",
   "lucide-react",
   "motion",
@@ -357,8 +372,6 @@ const developmentDependencies = [
 ] as const;
 const scriptNames = [
   "account",
-  "beads:seed",
-  "beads:sync",
   "build",
   "check",
   "credentials:rewrap",
@@ -380,7 +393,6 @@ const scriptNames = [
   "planning:check",
   "prepare",
   "readiness:check",
-  "roadmap:status",
   "secret:scan",
   "secret:scan:all",
   "secret:scan:history",
@@ -544,7 +556,7 @@ test("the cutover attestation separates repository and production evidence", () 
   const attestation = readFileSync(cutoverAttestationUrl, "utf8");
 
   for (const heading of [
-    "# Daytona Cutover Attestation and Runbook",
+    "# Daytona cutover attestation and runbook",
     "## Verified repository evidence",
     "## Production cutover and retirement evidence",
     "## Production evidence and remaining release exercises",
@@ -705,7 +717,7 @@ test("the historical tombstone maps every removed document to specific current g
     ],
     [
       "docs/superpowers/plans/2026-08-23-beads-project-board.md",
-      ["../beads-project-sync.md", "../roadmap/delivery-governance.md"],
+      ["../roadmap/delivery-governance.md"],
     ],
     [
       "docs/superpowers/plans/2026-08-24-demo-replay.md",
@@ -766,7 +778,7 @@ test("the historical tombstone maps every removed document to specific current g
     ],
     [
       "docs/superpowers/specs/2026-08-23-beads-project-board-design.md",
-      ["../beads-project-sync.md", "../roadmap/delivery-governance.md"],
+      ["../roadmap/delivery-governance.md"],
     ],
     [
       "docs/superpowers/specs/2026-08-24-demo-replay-design.md",

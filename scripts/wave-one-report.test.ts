@@ -17,9 +17,9 @@ test("the Wave 1 report records delivery evidence and residual risks", () => {
   );
   assert.match(
     report,
-    /The checked-in public roadmap snapshot reports public wave status/u
+    /At the time of delivery, the private planning reconciliation was pending/u
   );
-  assert.match(report, /private reconciliation remains pending/u);
+  assert.match(report, /\[delivery governance\]\(delivery-governance\.md\)/u);
 
   for (const heading of [
     "# Wave 1 Delivery Report",

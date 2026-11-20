@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { contractDescriptor } from "../contract-descriptor";
+import { runSandboxBindingSchema } from "./sandbox-binding";
 
 export { contractDescriptor } from "../contract-descriptor";
 export type { EvidenceRedactionInput } from "./evidence";
@@ -16,6 +17,34 @@ export {
   base64UrlEncode,
   TENANT_ID_PATTERN,
 } from "./identity";
+export type {
+  RunSandboxBinding,
+  RunSandboxBindingRefusal,
+  RunSandboxBindingRefusalReason,
+} from "./sandbox-binding";
+export {
+  RUN_SANDBOX_BINDING_CONTRACT_VERSION,
+  RUN_SANDBOX_BINDING_REFUSAL_CODE,
+  RUN_SANDBOX_BINDING_REFUSAL_REASONS,
+  runSandboxBindingRefusalReasonSchema,
+  runSandboxBindingRefusalSchema,
+  runSandboxBindingSchema,
+} from "./sandbox-binding";
+export type {
+  SandboxInspectionObserved,
+  SandboxInspectionPolicy,
+  SandboxInspectionRecord,
+  SandboxInspectionRequest,
+  SandboxInspectionResult,
+} from "./sandbox-inspection";
+export {
+  SANDBOX_INSPECTION_CONTRACT_VERSION,
+  sandboxInspectionFenceSchema,
+  sandboxInspectionLifecycleSchema,
+  sandboxInspectionRequestSchema,
+  sandboxInspectionResultSchema,
+  sandboxInspectionStateSchema,
+} from "./sandbox-inspection";
 
 if (contractDescriptor.apiVersions.length !== 1) {
   throw new Error("Agent Runner must publish exactly one API version.");
@@ -481,6 +510,11 @@ export const runAgentInputSchema = z.object({
 export const startRunInputSchema = z
   .object({
     operationId: canonicalUuidSchema,
+    /**
+     * Optional expectation, never a selector: the run is refused unless the
+     * agent's already-recorded sandbox matches. See `./sandbox-binding`.
+     */
+    sandboxBinding: runSandboxBindingSchema.optional(),
     task: z.string().trim().min(1).max(AGENT_RUNNER_LIMITS.maxTaskLength),
   })
   .strict();
@@ -542,6 +576,13 @@ export const runSnapshotSchema = z
     completedAt: datetimeSchema.nullable().default(null),
     createdAt: datetimeSchema,
     error: runErrorSchema.nullable().optional(),
+    executedSandbox: z
+      .object({
+        bindingDigest: z.string().regex(/^[0-9a-f]{64}$/u),
+        generation: z.number().int().nonnegative(),
+      })
+      .strict()
+      .optional(),
     fileEvidence: z
       .array(fileEvidenceSchema)
       .max(AGENT_RUNNER_LIMITS.maxFileOperations),
@@ -1260,6 +1301,37 @@ export const runSnapshotEnvelopeSchema = z
     run: runSnapshotSchema,
   })
   .strict();
+/**
+ * A short-lived, signed view of a running sandbox's desktop, or the reason
+ * one is not available. The URL is unredacted by nature and expires; clients
+ * refresh it rather than persist it.
+ */
+export const runLiveViewEnvelopeSchema = z
+  .object({
+    apiVersion: agentRunnerApiVersionSchema,
+    view: z.discriminatedUnion("kind", [
+      z
+        .object({
+          expiresAt: datetimeSchema,
+          kind: z.literal("ready"),
+          url: z.string().url().max(4096),
+        })
+        .strict(),
+      z
+        .object({
+          kind: z.literal("unavailable"),
+          reason: z.enum([
+            "desktop_unavailable",
+            "not_configured",
+            "not_running",
+            "provider_unavailable",
+            "sandbox_missing",
+          ]),
+        })
+        .strict(),
+    ]),
+  })
+  .strict();
 export const startRunEnvelopeSchema = runSnapshotEnvelopeSchema;
 export const getRunEnvelopeSchema = runSnapshotEnvelopeSchema;
 export const stopRunEnvelopeSchema = runSnapshotEnvelopeSchema;
@@ -1599,6 +1671,8 @@ export type RunErrorEnvelope = z.infer<typeof runErrorEnvelopeSchema>;
 export type RunEventType = z.infer<typeof runEventTypeSchema>;
 export type RunEventsEnvelope = z.infer<typeof runEventsEnvelopeSchema>;
 export type RunSnapshotEnvelope = z.infer<typeof runSnapshotEnvelopeSchema>;
+export type RunLiveViewEnvelope = z.infer<typeof runLiveViewEnvelopeSchema>;
+export type RunLiveView = RunLiveViewEnvelope["view"];
 export type CreateSkillInput = z.input<typeof createSkillInputSchema>;
 export type CreateTeamInput = z.input<typeof createTeamInputSchema>;
 export type CreateTeamRunInput = z.input<typeof createTeamRunInputSchema>;

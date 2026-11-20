@@ -26,12 +26,17 @@ import {
   type RunnerResourceOperationObserver,
   runnerResourceProviderSignal,
 } from "../resource-observability";
+import {
+  type SandboxBindingRefusalReason,
+  sandboxBindingRecordRefusal,
+} from "../sandbox-binding";
 import type { RunnerStore } from "../store";
 import type {
   RunnerAgentRecord,
   RunnerDispatchAuthority,
   RunnerOperator,
   RunnerPrincipal,
+  RunnerSandboxBinding,
 } from "../types";
 import {
   type DaytonaSandboxResourcePolicy,
@@ -123,6 +128,7 @@ export type DaytonaSandboxConfiguration = DaytonaSandboxResourcePolicy &
   }>;
 
 export type DaytonaSandboxLifecycleDependencies = Readonly<{
+  awaitProviderSettlement?: boolean;
   deadline?: number;
   now?: () => number;
   signal?: AbortSignal;
@@ -160,6 +166,22 @@ export class DaytonaSandboxLifecycleError extends Error {
     this.kind = options.kind ?? "lifecycle";
     this.name = "DaytonaSandboxLifecycleError";
     this.retryable = options.retryable;
+  }
+}
+
+/**
+ * A run that carries a sandbox binding could not be dispatched to its exact
+ * recorded sandbox. Raised only by the bound path, which makes at most one
+ * provider read and no provider mutation, so nothing needs cleaning up and
+ * the run must end rather than be retried into the create path.
+ */
+export class DaytonaSandboxBindingRefusedError extends Error {
+  readonly reason: SandboxBindingRefusalReason;
+
+  constructor(reason: SandboxBindingRefusalReason) {
+    super("Daytona dispatch refused the run's sandbox binding.");
+    this.name = "DaytonaSandboxBindingRefusedError";
+    this.reason = reason;
   }
 }
 
@@ -590,6 +612,12 @@ function withLifecycleAbort<T>(
   // or mark its durable lifecycle fence immediately.
   throwIfTransitionAborted(lifecycle);
   const signal = lifecycle?.signal;
+  if (lifecycle?.awaitProviderSettlement) {
+    return operation().then((value) => {
+      throwIfTransitionAborted(lifecycle);
+      return value;
+    });
+  }
   if (!signal) {
     return operation();
   }
@@ -826,6 +854,10 @@ async function startOrRecoverSandbox(
 }
 
 type DaytonaSandboxPersistence = Readonly<{
+  reuseExisting?: (
+    agent: RunnerAgentRecord,
+    prepare: () => Promise<void>
+  ) => Promise<boolean>;
   attach: (
     reserved: RunnerAgentRecord,
     sandboxId: string
@@ -857,6 +889,36 @@ type DaytonaSandboxPersistence = Readonly<{
     | { kind: "stale_version" }
   >;
 }>;
+
+async function prepareAttachedSandbox(
+  sandbox: Sandbox,
+  agent: RunnerAgentRecord,
+  configuration: DaytonaSandboxConfiguration,
+  dependencies: DaytonaSandboxDependencies,
+  persistence: DaytonaSandboxPersistence,
+  adopt: boolean
+): Promise<void> {
+  const lifecycle =
+    persistence.reuseExisting && dependencies.lifecycle
+      ? { ...dependencies.lifecycle, awaitProviderSettlement: true }
+      : dependencies.lifecycle;
+  const prepare = async () => {
+    throwIfTransitionAborted(lifecycle);
+    await startOrRecoverSandbox(sandbox, lifecycle);
+    throwIfTransitionAborted(lifecycle);
+    if (adopt) {
+      await adoptDaytonaSandboxPolicy(sandbox, configuration, dependencies);
+    }
+  };
+  if (!persistence.reuseExisting) {
+    await prepare();
+  } else if (!(await persistence.reuseExisting(agent, prepare))) {
+    throw new DaytonaSandboxLifecycleError(
+      "Daytona sandbox changed before preparation.",
+      { retryable: true }
+    );
+  }
+}
 
 function subscriberSandboxPersistence(
   principal: RunnerPrincipal,
@@ -892,6 +954,12 @@ function subscriberSandboxPersistence(
           Date.now() - SANDBOX_PROVISIONING_TIMEOUT_MS
         ),
       }),
+    reuseExisting: (agent, prepare) =>
+      dependencies.store.withUnpinnedDaytonaSandboxReuse(
+        principal,
+        agent,
+        prepare
+      ),
   };
 }
 
@@ -1068,11 +1136,14 @@ async function createSandbox(
     persistence,
     created
   );
-  throwIfTransitionAborted(dependencies.lifecycle);
-  await startOrRecoverSandbox(sandbox, dependencies.lifecycle);
-  if (!created) {
-    await adoptDaytonaSandboxPolicy(sandbox, configuration, dependencies);
-  }
+  await prepareAttachedSandbox(
+    sandbox,
+    persisted,
+    configuration,
+    dependencies,
+    persistence,
+    !created
+  );
   return { agent: persisted, sandbox };
 }
 
@@ -1284,8 +1355,14 @@ async function reconcileAmbiguousDaytonaSandbox(
       return refuseMismatchedSandboxReuse(configuration, dependencies);
     }
     const persisted = await persistSandbox(agent, sandbox, persistence, false);
-    await startOrRecoverSandbox(sandbox, dependencies.lifecycle);
-    await adoptDaytonaSandboxPolicy(sandbox, configuration, dependencies);
+    await prepareAttachedSandbox(
+      sandbox,
+      persisted,
+      configuration,
+      dependencies,
+      persistence,
+      true
+    );
     return { agent: persisted, sandbox };
   } catch (error) {
     if (error instanceof DaytonaSandboxLifecycleError) {
@@ -1349,9 +1426,151 @@ async function ensureDaytonaSandboxWithPersistence(
   if (!sandboxConfigurationMatches(sandbox, configuration)) {
     return refuseMismatchedSandboxReuse(configuration, dependencies);
   }
-  await startOrRecoverSandbox(sandbox, dependencies.lifecycle);
-  await adoptDaytonaSandboxPolicy(sandbox, configuration, dependencies);
+  await prepareAttachedSandbox(
+    sandbox,
+    agent,
+    configuration,
+    dependencies,
+    persistence,
+    true
+  );
   return { agent, sandbox };
+}
+
+// Match the order-independent identity while requiring exactly the configured entries.
+function boundDomainAllowListMatches(
+  observed: unknown,
+  configured: string | undefined
+): boolean {
+  if (configured === undefined) {
+    return observed === undefined;
+  }
+  return (
+    typeof observed === "string" &&
+    observed.split(",").sort(compareAscii).join(",") ===
+      configured.split(",").sort(compareAscii).join(",")
+  );
+}
+
+/** Observed policy must match too: labels alone cannot attest mutable settings. */
+function boundSandboxPolicyMatches(
+  sandbox: Sandbox,
+  configuration: DaytonaSandboxConfiguration
+): boolean {
+  return (
+    daytonaSandboxConfigurationIdentity(sandbox, configuration) !==
+      "mismatch" &&
+    sandbox.snapshot === configuration.snapshotName &&
+    sandbox.target === configuration.target &&
+    sandbox.cpu === configuration.resources.cpu &&
+    sandbox.memory === configuration.resources.memory &&
+    sandbox.disk === configuration.resources.disk &&
+    sandbox.gpu === 0 &&
+    sandbox.autoStopInterval === configuration.autoStopInterval &&
+    sandbox.autoArchiveInterval === configuration.autoArchiveInterval &&
+    sandbox.autoDeleteInterval === configuration.autoDeleteInterval &&
+    sandbox.autoPauseInterval === 0 &&
+    sandbox.autoDestroyAt === undefined &&
+    boundDomainAllowListMatches(
+      sandbox.domainAllowList,
+      configuration.domainAllowList
+    ) &&
+    sandbox.networkAllowList === undefined &&
+    sandbox.outboundProxyUrl === undefined &&
+    sandbox.networkBlockAll === false &&
+    sandbox.linkedSandboxId === undefined &&
+    sandbox.warmPoolId === undefined &&
+    (sandbox.volumes === undefined ||
+      (Array.isArray(sandbox.volumes) && sandbox.volumes.length === 0))
+  );
+}
+
+/**
+ * Resolves the one sandbox a bound run was admitted against, or refuses.
+ *
+ * The binding and the agent both come from the locked run, so neither a
+ * request body nor a dispatcher can substitute another sandbox. The provider
+ * is asked exactly once, by the recorded ID: no name lookup, no list, no
+ * label search, and no fallback. Unlike the unbound path this never creates,
+ * recreates, starts, recovers, deletes, resizes, or relabels a sandbox and
+ * never writes the agent record, whatever the provider reports. A provider
+ * failure other than not-found propagates unchanged and stays retryable.
+ */
+async function resolveBoundDaytonaSandbox(
+  agent: RunnerAgentRecord,
+  binding: RunnerSandboxBinding,
+  configuration: DaytonaSandboxConfiguration,
+  dependencies: DaytonaSandboxDependencies
+): Promise<{ agent: RunnerAgentRecord; sandbox: Sandbox }> {
+  const recordRefusal = sandboxBindingRecordRefusal(agent, binding);
+  if (recordRefusal) {
+    throw new DaytonaSandboxBindingRefusedError(recordRefusal);
+  }
+  const sandbox = await verifyDaytonaBinding(
+    agent,
+    binding,
+    configuration,
+    dependencies
+  );
+  return { agent, sandbox };
+}
+
+export async function verifyDaytonaBinding(
+  agent: RunnerAgentRecord,
+  binding: RunnerSandboxBinding,
+  configuration: DaytonaSandboxConfiguration,
+  dependencies: Pick<DaytonaSandboxDependencies, "daytona" | "lifecycle">
+): Promise<Sandbox> {
+  let sandbox: Sandbox;
+  try {
+    sandbox = await withLifecycleAbort(
+      () => dependencies.daytona.get(binding.expectedSandboxId),
+      dependencies.lifecycle
+    );
+  } catch (error) {
+    if (
+      error instanceof DaytonaSandboxLifecycleError ||
+      classifyDaytonaProviderError(error) !== "not_found"
+    ) {
+      throw error;
+    }
+    // biome-ignore lint/style/useErrorCause: Do not retain raw provider diagnostics.
+    throw new DaytonaSandboxBindingRefusedError("provider_not_found");
+  }
+  // `get` also resolves names; only the exact recorded ID is acceptable.
+  if (sandbox.id !== binding.expectedSandboxId) {
+    throw new DaytonaSandboxBindingRefusedError("returned_id_mismatch");
+  }
+  if (sandbox.state === SandboxState.DESTROYED) {
+    throw new DaytonaSandboxBindingRefusedError("destroyed");
+  }
+  if (sandbox.state !== SandboxState.STARTED) {
+    throw new DaytonaSandboxBindingRefusedError("not_started");
+  }
+  if (sandbox.public !== false) {
+    throw new DaytonaSandboxBindingRefusedError("public_sandbox");
+  }
+  const expectedLabels = {
+    ...daytonaSandboxLabels(agent.tenant, agent.id),
+    sandboxGeneration: String(agent.sandboxGeneration),
+  };
+  if (
+    !Object.entries(expectedLabels).every(
+      ([name, value]) => sandbox.labels?.[name] === value
+    )
+  ) {
+    throw new DaytonaSandboxBindingRefusedError("ownership_mismatch");
+  }
+  if (!boundSandboxPolicyMatches(sandbox, configuration)) {
+    throw new DaytonaSandboxBindingRefusedError("configuration_drift");
+  }
+  if (
+    sandbox.labels?.credentialBoundaryVersion !==
+    DAYTONA_CREDENTIAL_BOUNDARY_VERSION
+  ) {
+    throw new DaytonaSandboxBindingRefusedError("credential_boundary_missing");
+  }
+  return sandbox;
 }
 
 /**
@@ -1381,7 +1600,8 @@ export async function ensureDaytonaSandboxForDispatch(
   operator: RunnerOperator,
   authority: RunnerDispatchAuthority,
   configuration: DaytonaSandboxConfiguration,
-  dependencies: DaytonaSandboxDependencies
+  dependencies: DaytonaSandboxDependencies,
+  verifySnapshot?: () => Promise<void>
 ): Promise<{ agent: RunnerAgentRecord; sandbox: Sandbox }> {
   const associated = await dependencies.store.getDispatchAgent(
     operator,
@@ -1393,6 +1613,22 @@ export async function ensureDaytonaSandboxForDispatch(
       { retryable: true }
     );
   }
+  const sandboxBinding = associated.run.sandboxBinding ?? null;
+  if (sandboxBinding) {
+    const resolved = await resolveBoundDaytonaSandbox(
+      associated.agent,
+      sandboxBinding,
+      configuration,
+      dependencies
+    );
+    // Refusals need only the exact sandbox read. A valid binding still must
+    // pass the pinned profile preflight before execution or credential
+    // staging can follow. Read-only resolution is not sandbox preparation.
+    await verifySnapshot?.();
+    return resolved;
+  }
+  // Unbound creation, start and policy adoption remain behind the preflight.
+  await verifySnapshot?.();
   return ensureDaytonaSandboxWithPersistence(
     associated.agent,
     configuration,
@@ -1476,6 +1712,9 @@ export async function warmDaytonaSandbox(
   | { kind: "unavailable"; source: "database" }
   | { kind: "failed"; error: DaytonaProviderErrorKind }
 > {
+  if (agent.pinnedSandboxId) {
+    return { kind: "stale_version" };
+  }
   let ensured: { agent: RunnerAgentRecord; sandbox: Sandbox };
   try {
     ensured = await ensureDaytonaSandbox(

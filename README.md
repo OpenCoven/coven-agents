@@ -9,6 +9,8 @@ Read the accepted [Product authority boundary](docs/architecture/adr-001-product
 and [Daytona execution boundary](docs/architecture/adr-002-daytona-execution-boundary.md)
 before changing identity, credentials, execution, or persistence.
 
+For contributor and coding-agent setup, see [CLAUDE.md](CLAUDE.md). It covers isolated worktrees, Git hook verification, signed commits, and local checks.
+
 ## Execution and security
 
 Browser execution requests use relative same-origin `/api` routes and the
@@ -182,7 +184,7 @@ sequencing, release gates, and capability status live in
 [planning document registry](docs/roadmap/README.md) classifies living plans,
 proposals, historical evidence, decision logs, and superseded specifications.
 The published [Wave 1 delivery report](docs/roadmap/wave-1-delivery.md) records
-public delivery artifacts without replacing the private planning authority.
+delivery evidence. GitHub issues track repository tasks and acceptance.
 
 Run the repository gates:
 

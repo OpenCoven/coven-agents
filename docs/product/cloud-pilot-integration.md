@@ -1,6 +1,7 @@
 # Familiar delegation: cloud pilot integration boundary
 
-Status: bounded implementation, not production certification.
+Status: bounded implementation with partial production evidence, not production
+certification.
 Decision context: [Research Parity Upgrade Plan](https://chatgpt.com/share/6aa0de01-9e18-83e9-b26e-662bdfa11cb2).
 
 ## Product boundary
@@ -34,12 +35,12 @@ This is a source-level gap register, not a claim of deployed parity.
 | --- | --- | --- |
 | Native Chat familiar/conversation reads | Implemented in Chat | Preserve frozen three-platform native conformance |
 | Canonical Runtime Authority dispatch binding | Coven dispatch seam exists; production selection remains separate work | Trusted producer adapters, authenticated consumer admission, immutable terminal receipt |
-| Bounded authority consumer projection | Separate producer work in OpenCoven/coven#953 | Projection is evidence, never a transferable execution capability |
-| Daytona dispatch, durable attempts, cancellation/reconciliation | Existing Coven Agents implementation | Exact authority integration and real-provider containment evidence |
-| Daytona resource and reuse policy | Snapshot creation/verification requires exact active resources; ambiguous cleanup keeps its attempt fence and preserves the workspace | No repeated-run availability until an approved fenced reset or workspace-preserving containment workflow exists |
-| Stripe single-plan validation | Exact configured Price checked before new billing mutations | Confirm intended live amount/currency and restricted-key Price-read permission |
+| Bounded authority consumer projection | Separate draft producer work in [OpenCoven/coven#953](https://github.com/OpenCoven/coven/pull/953) | Add exact base-run, attempt, occurrence, and validity-deadline correlation; projection remains evidence, never a transferable execution capability |
+| Daytona dispatch, durable attempts, cancellation/reconciliation | Existing Coven Agents implementation plus a successful production create/execute/delete diagnostic | Exact authority integration and a retained production containment receipt |
+| Daytona resource and reuse policy | Production verified `coven-agents-copilot-2` at 2 vCPU, 4 GiB memory, 10 GiB disk, and target `us`; ambiguous cleanup keeps its attempt fence and preserves the workspace | No repeated-run availability until a production containment exercise proves the reset decision and an approved fenced reset or workspace-preserving workflow exists |
+| Stripe single-plan validation | Exact configured Price checked before new billing mutations; production Checkout is off because the active live Price is `$30/month`, not the intended `$25/month` | An authorized Stripe operator must create and select the intended `$25/month` live recurring Price |
 | Monthly allowance and reservations | Existing transactionally enforced 300-minute allowance, 15-minute run bound | Real-provider settlement across failure/recovery cases |
-| Billing recovery after paid access expires | Authenticated, current-version owner may use hosted Portal | Live Portal configuration and payment recovery journey |
+| Billing recovery after paid access expires | Authenticated, current-version owner may use hosted Portal when Stripe has an active Portal configuration | Create the live Portal configuration and retain the payment recovery journey |
 | Public billing policy | `/api/subscription` returns `plan`; `/api/usage` owns bounded allowance observation | Consume only through a reviewed native account/transport contract |
 | Native delegate/observe/cancel/recover | Not enabled by this change | Producer and SDK contracts plus packaged native end-to-end evidence |
 
@@ -70,6 +71,12 @@ in-flight transport operation; it must never be advertised as mission
 cancellation. The separate consumer-evidence projection cannot fill either
 authority gap. No protected native/SDK conformance pin was changed.
 
+[OpenCoven/coven#953](https://github.com/OpenCoven/coven/pull/953) is still a
+draft and does not carry the exact base-run, attempt, and occurrence identifiers
+or the authorization validity deadline required by this boundary. Coven Agents
+must not invent those fields locally or infer them from billing, browser, or
+session state.
+
 ## Commercial policy
 
 One configured, active, fixed-price monthly subscription buys the disclosed
@@ -85,24 +92,35 @@ It does not copy a potentially stale currency amount into frontend text.
 
 The same public plan projects sandbox policy defaults (2 vCPU, 4 GiB memory,
 10 GiB disk) and caps (4 vCPU, 8 GiB memory, 10 GiB disk) from the server's
-dependency-free resource policy. These are bounded policy values, not a receipt
-for a configured or deployed snapshot. Before promotion, use the read-only
-`pnpm daytona:snapshot --verify` path against the intended immutable generation
-and retain the exact resource receipt. [Daytona's snapshot documentation](https://www.daytona.io/docs/en/snapshots/)
-describes memory/storage in GiB; this does not establish local deployment state.
+dependency-free resource policy. Production deployment
+`coven-agents-6gib1jkqo-0xbuns.vercel.app` returned the exact protected
+diagnostic receipt for `coven-agents-copilot-2`: 2 vCPU, 4 GiB memory, 10 GiB
+disk, and target `us`. The
+[Daytona cutover attestation](../operations/daytona-cutover-attestation.md)
+records the sanitized evidence boundary.
 
 **Repeated runs are deliberately not ready.** Session/file absence cannot prove
 that detached descendants terminated. After a launched or possibly launched
 attempt, cleanup retains the exact durable fence and refuses another credential
 transfer. Legacy sandbox markers and configuration drift also require an
 approved reset rather than automatic workspace deletion. Existing destructive
-reset/decommission authority is not broadened by this patch. The resulting
-availability limitation must be resolved before a paid pilot is promoted.
+reset/decommission authority is not broadened. Draft
+[PR #268](https://github.com/OpenCoven/coven-agents/pull/268) adds a source-level
+synthetic detached-descendant and credential-cleanup exercise, but no production
+result is claimed until that exact revision is merged, deployed, and retained.
+The resulting availability limitation must be resolved before a paid pilot is
+promoted.
 
 Optional existing prepaid minute packs remain explicit purchases controlled
 by configuration. They do not turn into automatic overage. The new-sales gate
 remains default-off; webhooks, existing entitlement enforcement, and billing
 management remain independent of that gate.
+
+Production Checkout is currently off. The live Stripe account has an active
+`$30/month` recurring Price, no active Customer Portal configuration, and an
+enabled webhook for `invoice.paid`, `invoice.payment_failed`, and
+`customer.subscription.deleted`. The current restricted key can read Prices
+but cannot create the intended `$25/month` Price or Portal configuration.
 
 ### Billing loss is not identity loss
 
@@ -128,7 +146,7 @@ declared identity.
 | Web | Hosted Stripe Checkout, only after the default-off sales gate is deliberately enabled |
 | Direct-distribution desktop | No new purchase CTA until native account mapping, transport, and release acceptance are complete |
 | Mac App Store, iOS, and other mobile storefronts | No universal external-purchase assumption; leave CTA disabled until a storefront-specific policy and approved purchase source exist |
-| Existing web billing account | Hosted Portal through a verified current account, independent of new-sales enablement |
+| Existing web billing account | Hosted Portal through a verified current account after Stripe has an active Portal configuration; independent of new-sales enablement |
 
 Tax collection remains unimplemented. Before selling in applicable
 jurisdictions, the operator must resolve registration and tax treatment.

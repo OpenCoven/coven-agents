@@ -79,6 +79,38 @@ test("request hashing binds restricted execution permission without changing ord
   );
 });
 
+test("request hashing binds a sandbox binding without changing unbound hashes", () => {
+  const unbound = hashRunRequest(agentId, "Same task.");
+  const binding = { expectedGeneration: 2, expectedSandboxId: "sandbox-a" };
+  assert.equal(
+    hashRunRequest(agentId, "Same task.", "unrestricted", null),
+    unbound
+  );
+  const bound = hashRunRequest(agentId, "Same task.", "unrestricted", binding);
+  assert.notEqual(bound, unbound);
+  assert.equal(
+    hashRunRequest(agentId, "Same task.", "unrestricted", {
+      expectedGeneration: 2,
+      expectedSandboxId: "sandbox-a",
+    }),
+    bound
+  );
+  assert.notEqual(
+    hashRunRequest(agentId, "Same task.", "unrestricted", {
+      ...binding,
+      expectedGeneration: 3,
+    }),
+    bound
+  );
+  assert.notEqual(
+    hashRunRequest(agentId, "Same task.", "unrestricted", {
+      ...binding,
+      expectedSandboxId: "sandbox-b",
+    }),
+    bound
+  );
+});
+
 test("bounds Unicode by UTF-16 and UTF-8 limits without splitting characters", () => {
   const value = "😀".repeat(100);
   const bounded = truncateUtf8(value, 31, 31, "");

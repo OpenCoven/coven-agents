@@ -16,6 +16,7 @@ import type { RunnerExecutionProvenance } from "./execution-provenance";
  * This is deliberately not interchangeable with RunnerOperator.
  */
 export type RunnerPrincipal = {
+  ownerCredentialId?: string;
   kind: "subscriber";
   tenant: string;
   userId: string;
@@ -125,6 +126,7 @@ export type RunnerAgentRecord = {
   lastRunAt: Date | null;
   model: string;
   name: string;
+  pinnedSandboxId?: string;
   runtime: RunnerRuntime;
   sandboxGeneration: number;
   sandboxLifecycle: RunnerSandboxLifecycle;
@@ -147,6 +149,12 @@ export type RunnerAgentExecutionSnapshot = Readonly<{
   workspace: string | null;
 }>;
 
+/** An expectation to compare with the recorded sandbox; never a selector. */
+export type RunnerSandboxBinding = Readonly<{
+  expectedGeneration: number;
+  expectedSandboxId: string;
+}>;
+
 export type RunnerRunRecord = Omit<
   RunSnapshot,
   "apiVersion" | "completedAt" | "createdAt" | "error" | "startedAt"
@@ -156,6 +164,7 @@ export type RunnerRunRecord = Omit<
   agentRuntime: RunnerRuntime;
   agentWorkspace: string | null;
   authVersion: number | null;
+  ownerCredentialId?: string;
   authorityRevalidation?: boolean;
   cancellationRequestedAt: Date | null;
   completedAt: Date | null;
@@ -181,6 +190,12 @@ export type RunnerRunRecord = Omit<
   logCursor: number;
   queueSequence: number;
   requestHash: string;
+  /**
+   * The sandbox this run was admitted against, when its request carried one.
+   * A bound run is dispatched only to this exact recorded sandbox and never
+   * creates, starts, or changes one. Null or absent on every other run.
+   */
+  sandboxBinding?: RunnerSandboxBinding | null;
   startedAt: Date | null;
   teamStepId: string | null;
   tenant: string;
@@ -248,6 +263,7 @@ export type StartRunnerRunInput = {
   initialDispatch?: Pick<DispatchClaimInput, "leaseExpiresAt" | "leaseToken">;
   operationId: string;
   requestHash: string;
+  sandboxBinding?: RunnerSandboxBinding | null;
   task: string;
   teamStepId?: string | null;
 };

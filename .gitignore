@@ -24,7 +24,7 @@ tsconfig.tsbuildinfo
 .worktrees/
 .config/opencoven/coven-agents-staging-certify.env*
 
-# Private Beads planning data
+# Legacy private planning data from older checkouts
 .beads/
 *.beads-private.json
 

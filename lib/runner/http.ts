@@ -1,5 +1,7 @@
+import type { OwnerCredentialRequest } from "./owner-credential";
 import "server-only";
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import {
   AGENT_RUNNER_API_VERSION,
@@ -11,6 +13,8 @@ import {
   okEnvelopeSchema,
   runErrorEnvelopeSchema,
   runListEnvelopeSchema,
+  runLiveViewEnvelopeSchema,
+  runSandboxBindingSchema,
   runSnapshotEnvelopeSchema,
   startRunInputSchema,
   updateAgentInputSchema,
@@ -63,6 +67,13 @@ import {
 
 const diagnosticResponseSchema = z
   .object({
+    containment: z
+      .object({
+        credentialRemoved: z.literal(true),
+        detachedDescendantObserved: z.boolean(),
+        reusePolicy: z.literal("sandbox_reset_required"),
+      })
+      .strict(),
     exitCode: z.number().int().min(0).max(255),
     ok: z.boolean(),
     output: z.string().max(1024),
@@ -175,6 +186,14 @@ type After = (task: AfterTask) => void;
 
 export type RunnerHttpDependencies = Readonly<{
   after?: After;
+  /**
+   * How often an open event stream nudges reconciliation while its run is
+   * still live, so a watching console sees steps at that cadence rather than
+   * the cron's. Zero disables the nudge. Defaults from
+   * `RUNNER_LIVE_TAIL_MS`, then to ten seconds.
+   */
+  liveTailMs?: number;
+  now?: () => number;
   appOrigin?: string | (() => string | null);
   auth: RunnerAuth;
   createDiagnosticName?: () => string;
@@ -193,12 +212,14 @@ export type RunnerHttpDependencies = Readonly<{
 
 export type RunnerHttpHandlers = Readonly<{
   createAgent: (request: Request) => Promise<Response>;
+  bindSandbox: (request: Request, agentId: string) => Promise<Response>;
   deleteAgent: (request: Request, agentId: string) => Promise<Response>;
   diagnoseSandbox: (request: Request) => Promise<Response>;
   getAgent: (request: Request, agentId: string) => Promise<Response>;
   getHarnesses: (request: Request) => Promise<Response>;
   getRun: (request: Request, runId: string) => Promise<Response>;
   getRunEvents: (request: Request, runId: string) => Promise<Response>;
+  getRunLiveView: (request: Request, runId: string) => Promise<Response>;
   health: (request: Request) => Promise<Response>;
   listAgentRuns: (request: Request, agentId: string) => Promise<Response>;
   listAgents: (request: Request) => Promise<Response>;
@@ -340,9 +361,25 @@ async function authorizeSubscriber(
   request: Request,
   route: AbuseEnforcementInput["route"],
   dependencies: RunnerHttpDependencies,
-  mutation?: "empty" | "json"
+  mutation?: "empty" | "json",
+  grant?: OwnerCredentialRequest
 ): Promise<Response | RunnerAuthenticatedSubscriber> {
-  if (mutation) {
+  const bearer = request.headers.get("authorization") !== null;
+  if (bearer && !grant) {
+    return runnerErrorResponse(dependencies, "unauthorized");
+  }
+  if (
+    bearer &&
+    mutation === "json" &&
+    request.headers
+      .get("content-type")
+      ?.split(";", 1)[0]
+      ?.trim()
+      .toLowerCase() !== "application/json"
+  ) {
+    return runnerErrorResponse(dependencies, "unsupported_media_type");
+  }
+  if (!bearer && mutation) {
     const rejected = validateRunnerMutationRequest(request, dependencies, {
       jsonBody: mutation === "json",
     });
@@ -350,7 +387,23 @@ async function authorizeSubscriber(
       return rejected;
     }
   }
-  const subscriber = await dependencies.auth.authorizeSubscriber();
+  if (bearer) {
+    const budget = await dependencies.enforceAbuse(
+      policyInput(
+        "runner_sandbox_inspect_auth",
+        dependencies.ipAddress(request)
+      )
+    );
+    if (budget.kind !== "allowed") {
+      return abuseFailure(dependencies, budget);
+    }
+  }
+  const subscriber = bearer
+    ? await dependencies.auth.authorizeBearerOwner?.(request, grant)
+    : await dependencies.auth.authorizeSubscriber();
+  if (!subscriber || subscriber.kind === "unavailable") {
+    return runnerErrorResponse(dependencies, "runner_unavailable");
+  }
   if (subscriber.kind !== "allowed") {
     return subscriberFailure(dependencies, subscriber);
   }
@@ -437,6 +490,99 @@ function scheduleLiveRunReconciliation(
   });
 }
 
+export const DEFAULT_LIVE_TAIL_MS = 10_000;
+const MIN_LIVE_TAIL_MS = 2000;
+const MAX_LIVE_TAIL_MS = 5 * 60_000;
+
+export function liveTailMsFromEnvironment(
+  environment: NodeJS.ProcessEnv = process.env
+): number {
+  const raw = environment.RUNNER_LIVE_TAIL_MS?.trim();
+  if (!raw) {
+    return DEFAULT_LIVE_TAIL_MS;
+  }
+  const parsed = Number(raw);
+  if (parsed === 0) {
+    return 0;
+  }
+  if (
+    !Number.isSafeInteger(parsed) ||
+    parsed < MIN_LIVE_TAIL_MS ||
+    parsed > MAX_LIVE_TAIL_MS
+  ) {
+    throw new Error(
+      `RUNNER_LIVE_TAIL_MS must be 0 or an integer between ${MIN_LIVE_TAIL_MS} and ${MAX_LIVE_TAIL_MS} milliseconds.`
+    );
+  }
+  return parsed;
+}
+
+function startRetainedReconciliation(
+  dependencies: RunnerHttpDependencies,
+  service: RunnerService
+): Promise<void> {
+  const logger = dependencies.logger ?? console;
+  let canStart = false;
+  // Register the hot promise before taking leases, not a callback that waits
+  // for the stream to close. Failed registration must not orphan active work.
+  const task = Promise.resolve()
+    .then(async () => {
+      if (canStart) {
+        await service.reconcileAndDispatch();
+      }
+    })
+    .catch((error: unknown) => {
+      logger.error("Runner live reconciliation failed.", {
+        name:
+          error instanceof RunnerServiceError ? "runner_service" : "unknown",
+      });
+    });
+  try {
+    dependencies.after?.(task);
+    canStart = true;
+  } catch {
+    logger.error("Runner live reconciliation could not be retained.", {
+      name: "unknown",
+    });
+  }
+  return task;
+}
+
+/**
+ * Turns an open event stream into a heartbeat for its run.
+ *
+ * The harness writes to a sandbox log that only reconciliation reads, so
+ * without this a watcher sees a new burst of steps once a minute, when cron
+ * fires. Each nudge is a full leased `reconcileAndDispatch`; the lease makes
+ * concurrent watchers and cron collapse into one pass, and the attempt lease
+ * (`RUNNER_ATTEMPT_LEASE_MS`) decides whether a pass re-reads the sandbox.
+ * Each nudge starts eagerly and is retained independently of stream closure.
+ * A failure here never disturbs the stream.
+ */
+function liveTail(
+  dependencies: RunnerHttpDependencies,
+  service: RunnerService
+): (terminal: boolean) => void {
+  const interval = dependencies.liveTailMs ?? liveTailMsFromEnvironment();
+  if (interval <= 0) {
+    return () => undefined;
+  }
+  const now = dependencies.now ?? Date.now;
+  let last = now();
+  let inFlight = false;
+  // Backpressure can move later pulls outside Next's request-local context.
+  return AsyncLocalStorage.bind((terminal: boolean) => {
+    if (terminal || inFlight || now() - last < interval) {
+      return;
+    }
+    last = now();
+    inFlight = true;
+    startRetainedReconciliation(dependencies, service).finally(() => {
+      inFlight = false;
+    });
+  });
+}
+
 function startLiveRunReconciliation(
   dependencies: RunnerHttpDependencies,
   service: RunnerService,
@@ -445,14 +591,7 @@ function startLiveRunReconciliation(
   if (!dependencies.after || !live) {
     return;
   }
-  try {
-    const task = service.reconcileAndDispatch().catch(() => {
-      // The durable queue and authenticated cron are the correctness path.
-    });
-    dependencies.after(task);
-  } catch {
-    // `after` is a latency optimization and must never change a response.
-  }
+  startRetainedReconciliation(dependencies, service);
 }
 
 async function warmAndReconcile(
@@ -592,6 +731,52 @@ export function createRunnerHttpHandlers(
   const eventStream = dependencies.createEventStream ?? createRunEventStream;
 
   return {
+    bindSandbox: (request, agentId) =>
+      safely(dependencies, async () => {
+        const owner = await authorizeSubscriber(
+          request,
+          "runner_write",
+          dependencies,
+          "json"
+        );
+        if (isResponse(owner)) {
+          return owner;
+        }
+        const invalid = invalidId(dependencies, agentId);
+        if (invalid) {
+          return invalid;
+        }
+        const body = await boundedJson(
+          request,
+          "runner_write",
+          runSandboxBindingSchema,
+          dependencies
+        );
+        if (body.kind !== "ok") {
+          return body.response;
+        }
+        const service = await dependencies.createService(owner);
+        const result = await service.bindSandbox?.(
+          owner.principal,
+          agentId,
+          body.value
+        );
+        if (result === "bound") {
+          return Response.json(
+            { ok: true },
+            { headers: { "cache-control": "no-store" } }
+          );
+        }
+        if (result === "not_found") {
+          return agentNotFound(dependencies);
+        }
+        if (!result || result === "unavailable") {
+          return runnerUnavailable(dependencies);
+        }
+        return runnerErrorResponse(dependencies, "sandbox_binding_refused", {
+          details: result,
+        });
+      }),
     createAgent: (request) =>
       safely(dependencies, async () => {
         const context = await authorizeSubscriber(
@@ -674,7 +859,6 @@ export function createRunnerHttpHandlers(
         });
         return agentCreateIdempotencyResponse(dependencies, result);
       }),
-
     deleteAgent: (request, agentId) =>
       safely(dependencies, async () => {
         const context = await authorizeSubscriber(
@@ -778,7 +962,9 @@ export function createRunnerHttpHandlers(
         const context = await authorizeSubscriber(
           request,
           "runner_read",
-          dependencies
+          dependencies,
+          undefined,
+          { scope: "run:read", target: { runId } }
         );
         if (isResponse(context)) {
           return context;
@@ -808,7 +994,9 @@ export function createRunnerHttpHandlers(
         const context = await authorizeSubscriber(
           request,
           "runner_read",
-          dependencies
+          dependencies,
+          undefined,
+          { scope: "run:events", target: { runId } }
         );
         if (isResponse(context)) {
           return context;
@@ -833,17 +1021,33 @@ export function createRunnerHttpHandlers(
           return runNotFound(dependencies);
         }
         startLiveRunReconciliation(dependencies, service, !initial.terminal);
+        const nudge = liveTail(dependencies, service);
         const stream = eventStream({
           lastEventId,
           read: async (cursor) => {
+            if (context.principal.ownerCredentialId) {
+              const current = await dependencies.auth.authorizeBearerOwner?.(
+                request,
+                { scope: "run:events", target: { runId } }
+              );
+              if (
+                current?.kind !== "allowed" ||
+                current.principal.ownerCredentialId !==
+                  context.principal.ownerCredentialId
+              ) {
+                return null;
+              }
+            }
             const page = await service.readRunEvents(
               context.principal,
               runId,
               cursor
             );
-            return page.kind === "found"
-              ? { events: page.events, terminal: page.terminal }
-              : null;
+            if (page.kind !== "found") {
+              return null;
+            }
+            nudge(page.terminal);
+            return { events: page.events, terminal: page.terminal };
           },
           signal: request.signal,
         });
@@ -855,6 +1059,32 @@ export function createRunnerHttpHandlers(
             "x-accel-buffering": "no",
           },
         });
+      }),
+
+    getRunLiveView: (request, runId) =>
+      safely(dependencies, async () => {
+        const context = await authorizeSubscriber(
+          request,
+          "runner_read",
+          dependencies
+        );
+        if (isResponse(context)) {
+          return context;
+        }
+        const invalid = invalidId(dependencies, runId);
+        if (invalid) {
+          return invalid;
+        }
+        const service = await dependencies.createService(context);
+        const result = await service.getRunLiveView(context.principal, runId);
+        if (result.kind === "not_found") {
+          return runNotFound(dependencies);
+        }
+        return runnerJsonResponse(
+          runLiveViewEnvelopeSchema,
+          { apiVersion: AGENT_RUNNER_API_VERSION, view: result },
+          { headers: { "cache-control": "no-store" } }
+        );
       }),
 
     health: (request) =>
@@ -1050,7 +1280,8 @@ export function createRunnerHttpHandlers(
           request,
           "runner_run_start",
           dependencies,
-          "json"
+          "json",
+          { scope: "run:start", target: { agentId } }
         );
         if (isResponse(context)) {
           return context;
@@ -1111,8 +1342,14 @@ export function createRunnerHttpHandlers(
                   dependencies,
                   "admission_unavailable"
                 );
+              case "sandbox_binding_refused":
+                return runnerErrorResponse(
+                  dependencies,
+                  "sandbox_binding_refused",
+                  { details: scheduled.reason }
+                );
               default:
-                return unreachableResult(scheduled.code);
+                return unreachableResult(scheduled);
             }
           case "accepted":
             return runnerJsonResponse(
@@ -1134,7 +1371,8 @@ export function createRunnerHttpHandlers(
           request,
           "runner_stop",
           dependencies,
-          "empty"
+          "empty",
+          { scope: "run:stop", target: { runId } }
         );
         if (isResponse(context)) {
           return context;
@@ -1153,17 +1391,36 @@ export function createRunnerHttpHandlers(
           case "not_found":
             return runNotFound(dependencies);
           case "in_progress":
+          case "stopped": {
             schedule(dependencies, async () => {
               await service.reconcileAndDispatch();
             });
+            const status = result.kind === "in_progress" ? 202 : 200;
+            const credentialId = context.principal.ownerCredentialId;
+            if (credentialId) {
+              const read = await dependencies.auth.authorizeBearerOwner?.(
+                request,
+                { scope: "run:read", target: { runId } }
+              );
+              if (
+                read?.kind !== "allowed" ||
+                read.principal.ownerCredentialId !== credentialId
+              ) {
+                return new Response(null, {
+                  headers: { "cache-control": "no-store" },
+                  status: status === 202 ? 202 : 204,
+                });
+              }
+            }
             return runnerJsonResponse(
               runSnapshotEnvelopeSchema,
               {
                 apiVersion: AGENT_RUNNER_API_VERSION,
                 run: result.run,
               },
-              { status: 202 }
+              { status }
             );
+          }
           case "stale_version":
             return runnerErrorResponse(dependencies, "stale_version");
           case "unavailable":
@@ -1180,14 +1437,6 @@ export function createRunnerHttpHandlers(
               await service.reconcileAndDispatch();
             });
             return runnerErrorResponse(dependencies, "cleanup_required");
-          case "stopped":
-            schedule(dependencies, async () => {
-              await service.reconcileAndDispatch();
-            });
-            return runnerJsonResponse(runSnapshotEnvelopeSchema, {
-              apiVersion: AGENT_RUNNER_API_VERSION,
-              run: result.run,
-            });
           default:
             return unreachableResult(result);
         }

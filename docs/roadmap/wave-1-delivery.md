@@ -5,10 +5,7 @@
 - Scope: product authority, safe guest replay, commit leak prevention, and
   execution threat modeling
 
-The checked-in public roadmap snapshot reports public wave status, but its
-authority-freshness note applies while private reconciliation remains pending.
-This dated report proves the bounded tranche below; it does not close later
-work that the authoritative private plan assigns to the same wave.
+At the time of delivery, the private planning reconciliation was pending. This report covers the bounded August tranche. Consult GitHub issues and the current [delivery governance](delivery-governance.md) for later work.
 
 ## Outcome
 
