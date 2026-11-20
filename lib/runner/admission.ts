@@ -362,6 +362,9 @@ export async function admitRunnerRun(
       ...(input.sandboxBinding ? { sandboxBinding: input.sandboxBinding } : {}),
       task: input.task,
       teamStepId: input.teamStepId ?? null,
+      ...(input.useOwnerExecutionPolicy
+        ? { useOwnerExecutionPolicy: true }
+        : {}),
     });
   } catch (error) {
     dependencies.reportFailure?.(runnerAdmissionFailure("run_insert", error));

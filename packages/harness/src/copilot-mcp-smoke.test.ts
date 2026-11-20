@@ -121,7 +121,8 @@ type ResolveSmokeApp = (fixture: SmokeFixture) => Promise<string>;
 
 async function withCopilotSmoke<T>(
   run: (fixture: SmokeFixture) => Promise<T>,
-  resolveApp: ResolveSmokeApp = () => pinnedCopilotApp()
+  resolveApp: ResolveSmokeApp = () => pinnedCopilotApp(),
+  reply: (fixture: SmokeFixture) => string = providerResponse
 ): Promise<T> {
   const requests: Record<string, unknown>[] = [];
   const provider = createServer((request, response) => {
@@ -133,7 +134,7 @@ async function withCopilotSmoke<T>(
     request.on("end", () => {
       requests.push(JSON.parse(body) as Record<string, unknown>);
       response.writeHead(200, { "content-type": "application/json" });
-      response.end(providerResponse());
+      response.end(reply(fixture));
     });
   });
   const scratch = await mkdtemp(
@@ -290,6 +291,101 @@ async function restrictedVisibleTools(
     return { args: invocation.args, visibleTools };
   }, resolveApp);
 }
+
+test("read-only Copilot handles denied file and command requests without effects", {
+  timeout: 60_000,
+}, async () => {
+  await withCopilotSmoke(
+    async (fixture) => {
+      const inside = join(fixture.workspace, "inside.txt");
+      const outside = join(fixture.scratch, "outside.txt");
+      const marker = join(fixture.workspace, "command-ran");
+      await Promise.all(
+        [inside, outside].map((path) => writeFile(path, "original"))
+      );
+      const invocation = buildInvocation({
+        attemptDir: fixture.attemptDir,
+        configDir: join(fixture.scratch, "copilot-home"),
+        cwd: fixture.workspace,
+        harness: "copilot",
+        instructions: "Read the indicated file.",
+        model: "gpt-5.4",
+        permissionMode: "workspace_read",
+        task: "Inspect inside.txt.",
+      });
+      await fixture.startCli(invocation.args);
+      await waitForProvider(fixture);
+      const deadline = Date.now() + 20_000;
+      while (fixture.requests.length < 2) {
+        assert.ok(Date.now() < deadline, "missing tool results");
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      const input = fixture.requests[1].input as {
+        type: string;
+        call_id?: string;
+        output?: string;
+      }[];
+      const outputs = new Map(
+        input
+          .filter((item) => item.type === "function_call_output")
+          .map((item) => [item.call_id, item.output])
+      );
+      assert.equal(outputs.get("read"), "original");
+      for (const id of ["change_inside", "change_outside", "command"]) {
+        assert.match(outputs.get(id) ?? "", /does not exist/u);
+      }
+      assert.deepEqual(
+        await Promise.all(
+          [inside, outside].map((path) => readFile(path, "utf8"))
+        ),
+        ["original", "original"]
+      );
+      await assert.rejects(stat(marker), { code: "ENOENT" });
+    },
+    undefined,
+    (fixture) => {
+      if (fixture.requests.length > 1) {
+        return providerResponse();
+      }
+      const response = JSON.parse(providerResponse());
+      const inside = join(fixture.workspace, "inside.txt");
+      const outside = join(fixture.scratch, "outside.txt");
+      response.output = [
+        ["read", "view", { path: inside }],
+        [
+          "change_inside",
+          "apply_patch",
+          {
+            patch: `*** Begin Patch\n*** Update File: ${inside}\n@@\n-original\n+changed\n*** End Patch`,
+          },
+        ],
+        [
+          "change_outside",
+          "apply_patch",
+          {
+            patch: `*** Begin Patch\n*** Update File: ${outside}\n@@\n-original\n+changed\n*** End Patch`,
+          },
+        ],
+        [
+          "command",
+          "bash",
+          {
+            command: "echo executed > command-ran",
+            description: "fixture marker",
+          },
+        ],
+      ].map(([id, name, args]) => ({
+        arguments: JSON.stringify(args),
+        call_id: id,
+        id: `fc_${id}`,
+        name,
+        status: "completed",
+        type: "function_call",
+      }));
+      return JSON.stringify(response);
+    }
+  );
+});
 
 test("Copilot smoke version matches the repository's exact dependency pin", async () => {
   const manifest = JSON.parse(

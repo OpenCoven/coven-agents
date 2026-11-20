@@ -274,3 +274,9 @@ separate operator attestation with a credential-free, retained deployed
 Daytona attempt, internal inventory/diagnostic response capture, browser
 runner envelope/SSE capture, and a cross-tenant refusal check. No deployed
 proof is represented by these local assertions.
+
+### Read-only owner runs
+
+The server-owned `RunnerAgent.ownerWorkspaceRead` setting selects `workspace_read` for owner starts. The setting defaults to false and is maintained through trusted database administration. The public start body cannot set it. Admission reads the setting under the agent lock, stores the resulting run permission and binds it to the operation digest. Copilot receives only `view`, `rg`, and `glob` and launches with isolated configuration.
+
+This permission grants no shell, write, or network tool. Sandbox egress remains governed by the configured Daytona network policy. Operators must qualify that policy separately before using a sandbox for work that requires an enforced egress boundary.
