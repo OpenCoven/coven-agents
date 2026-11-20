@@ -65,7 +65,7 @@ async function pinnedCopilotApp(
     version: string;
   };
   assert.equal(platformValue.version, expectedVersion);
-  return join(dirname(platformJson), "app.js");
+  return platformEntry;
 }
 
 function providerResponse(): string {
@@ -151,7 +151,9 @@ async function withCopilotSmoke<T>(
       const address = provider.address();
       assert.ok(address && typeof address === "object");
       const app = await resolveApp(fixture);
-      const child = spawn(process.execPath, [app, ...args], {
+      const executable = app.endsWith(".cjs") ? process.execPath : app;
+      const argv = executable === app ? args : [app, ...args];
+      const child = spawn(executable, argv, {
         cwd: fixture.workspace,
         env: {
           ...env,

@@ -22,7 +22,7 @@ import {
 } from "./sandbox";
 
 /** Must equal the pinned `@daytona/sdk` dependency; a test enforces it. */
-export const DAYTONA_SDK_VERSION = "0.230.0";
+export const DAYTONA_SDK_VERSION = "0.231.1";
 /** Kept local so inspection does not load the dispatch executor module. */
 export const DAYTONA_INSPECTION_ADAPTER_VERSION = "daytona-adapter-v1";
 
