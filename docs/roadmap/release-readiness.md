@@ -18,8 +18,7 @@ Do not promote when:
 
 - any repository gate fails;
 - a worktree is `AT RISK`;
-- private Beads-to-Project reconciliation has not completed with a final no-op
-  preview;
+- a release-blocking issue is unresolved or lacks verified acceptance evidence;
 - release audience configuration is ambiguous;
 - an enabled beta campaign carries an unapproved account cap, minute grant,
   or account-age floor;
@@ -77,11 +76,7 @@ pnpm validate:release
 
 ## Planning and delivery reconciliation
 
-Only an authorized maintainer may update private planning data. Run the
-repository's documented preview/apply sequence and retain only sanitized
-aggregate results. A delivery artifact never overrides the private authority.
-Do not promote until private Beads-to-Project reconciliation has completed with
-a final no-op preview and `ROADMAP.md` passes its freshness check.
+Before promotion, the maintainer verifies that release-blocking issues are resolved, acceptance is supported by linked evidence, and the roadmap reflects current delivery state.
 
 ## Required local gates
 

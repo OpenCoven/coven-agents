@@ -1,7 +1,7 @@
 # Daytona Run Diagnostics Proposal
 
 - Status: proposed; not authorized for delivery
-- Decision authority: private Beads/DoltHub
+- Decision authority: repository maintainer, recorded in the linked GitHub issue when approved.
 - Last reviewed: 2026-08-31
 - Entry gate: an approved private task with bounded evidence requirements
 - Registry: [planning document registry](../roadmap/README.md)

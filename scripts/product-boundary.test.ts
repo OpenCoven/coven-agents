@@ -369,8 +369,6 @@ const developmentDependencies = [
 ] as const;
 const scriptNames = [
   "account",
-  "beads:seed",
-  "beads:sync",
   "build",
   "check",
   "credentials:rewrap",
@@ -392,7 +390,6 @@ const scriptNames = [
   "planning:check",
   "prepare",
   "readiness:check",
-  "roadmap:status",
   "secret:scan",
   "secret:scan:all",
   "secret:scan:history",
@@ -717,7 +714,7 @@ test("the historical tombstone maps every removed document to specific current g
     ],
     [
       "docs/superpowers/plans/2026-08-23-beads-project-board.md",
-      ["../beads-project-sync.md", "../roadmap/delivery-governance.md"],
+      ["../roadmap/delivery-governance.md"],
     ],
     [
       "docs/superpowers/plans/2026-08-24-demo-replay.md",
@@ -778,7 +775,7 @@ test("the historical tombstone maps every removed document to specific current g
     ],
     [
       "docs/superpowers/specs/2026-08-23-beads-project-board-design.md",
-      ["../beads-project-sync.md", "../roadmap/delivery-governance.md"],
+      ["../roadmap/delivery-governance.md"],
     ],
     [
       "docs/superpowers/specs/2026-08-24-demo-replay-design.md",

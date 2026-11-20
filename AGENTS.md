@@ -26,6 +26,8 @@ Before publishing Markdown, keep each prose paragraph on one logical source line
 
 ## Issues
 
+GitHub issues track repository tasks and acceptance. Follow [delivery governance](docs/roadmap/delivery-governance.md) when recording landed work.
+
 - Open issues end with an `Agent prompts` block (marker `<!-- opencoven-agent-prompts:YYYY-MM-DD -->`) holding a long-running goal prompt, a follow-up prompt, a lane and a mode. Read the whole issue, its newest comments and its linked PRs before acting.
 - When your work changes an issue's state, update the block's mode and date and leave a checkpoint comment: exact head SHA, commands, results, what is unmet, and the next action or the owner it waits on.
 - Dependencies are native blocked-by and sub-issue links. Work for OpenCoven/coven-castles is tracked here under issues titled `(Castles #N)`.

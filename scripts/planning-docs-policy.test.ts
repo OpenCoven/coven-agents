@@ -25,7 +25,7 @@ const registry = `# Planning document registry
 <!-- coven-agents-planning-registry:v1:start -->
 | Path | Role | Lifecycle | Authority | Last reviewed | Current guidance |
 | --- | --- | --- | --- | --- | --- |
-| [\`ROADMAP.md\`](../../ROADMAP.md) | Strategy | Current | Beads-derived aggregate | 2026-08-31 | — |
+| [\`ROADMAP.md\`](../../ROADMAP.md) | Strategy | Current | Delivery summary | 2026-08-31 | — |
 | [\`POLISH.md\`](../../POLISH.md) | Decision log | Historical | Repository evidence | 2026-08-31 | [Current state](current-state.md) |
 | [\`docs/roadmap/README.md\`](README.md) | Registry | Current | Operating policy | 2026-08-31 | — |
 | [\`docs/roadmap/current-state.md\`](current-state.md) | State | Current | Repository evidence | 2026-08-31 | — |
@@ -79,7 +79,7 @@ test("accepts complete planning coverage and ignores conditional future links", 
 test("rejects duplicate registry paths", () => {
   const duplicate = registry.replace(
     "<!-- coven-agents-planning-registry:v1:end -->",
-    "| [`ROADMAP.md`](../../ROADMAP.md) | Strategy | Current | Beads-derived aggregate | 2026-08-31 | — |\n<!-- coven-agents-planning-registry:v1:end -->"
+    "| [`ROADMAP.md`](../../ROADMAP.md) | Strategy | Current | Delivery summary | 2026-08-31 | — |\n<!-- coven-agents-planning-registry:v1:end -->"
   );
 
   assert.deepEqual(
@@ -116,7 +116,7 @@ test("rejects unknown lifecycle and role values", () => {
 test("rejects unknown authority and invalid review dates", () => {
   const invalid = registry
     .replace(
-      "| Strategy | Current | Beads-derived aggregate | 2026-08-31 |",
+      "| Strategy | Current | Delivery summary | 2026-08-31 |",
       "| Strategy | Current | Private task copy | 2026-08-31 |"
     )
     .replace(
@@ -214,23 +214,18 @@ test("requires nested roadmap and proposal documents to be indexed", () => {
   );
 });
 
-test("requires planning operations and sync guidance to be indexed", () => {
+test("requires planning operations guidance to be indexed", () => {
   assert.deepEqual(
     findPlanningDocumentViolations(
       input({
         trackedPaths: [
           ...trackedPaths,
-          "docs/beads-project-sync.md",
           "docs/operations/cutover.md",
           "docs/operations/deployment.md",
         ],
       })
     ),
     [
-      {
-        path: "docs/beads-project-sync.md",
-        reason: "unindexed-planning-document",
-      },
       {
         path: "docs/operations/cutover.md",
         reason: "unindexed-planning-document",
@@ -320,7 +315,7 @@ test("repository scanning does not treat untracked files as tracked", () => {
 <!-- coven-agents-planning-registry:v1:start -->
 | Path | Role | Lifecycle | Authority | Last reviewed | Current guidance |
 | --- | --- | --- | --- | --- | --- |
-| [\`ROADMAP.md\`](../../ROADMAP.md) | Strategy | Current | Beads-derived aggregate | 2026-08-31 | — |
+| [\`ROADMAP.md\`](../../ROADMAP.md) | Strategy | Current | Delivery summary | 2026-08-31 | — |
 | [\`docs/roadmap/README.md\`](README.md) | Registry | Current | Operating policy | 2026-08-31 | — |
 <!-- coven-agents-planning-registry:v1:end -->
 `

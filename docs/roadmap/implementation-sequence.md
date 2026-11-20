@@ -7,8 +7,7 @@ The baseline gate repair shipped in #302. Scoped owner credentials and inspectio
 - #299 is assigned to BunsDev. Next, carry server-enforced read-only permission through owner admission and prove a permitted read and denied mutation in the recording executor.
 - #300 needs the lifecycle owner’s bootstrap decision. Record the selected snapshot or install contract and prove the exact-pinned path and refusal when its prerequisites are missing before promoting it.
 
-This sequence describes public outcome ordering. Private planning remains the
-task-level authority and must not be reconstructed from this document.
+This sequence describes public outcome ordering. Check the delivery issues for task status and acceptance criteria.
 
 ## Authority reminder
 
@@ -16,14 +15,6 @@ Coven Agents owns product accounts, subscriptions, encrypted tenant harness
 credentials, Daytona execution, PostgreSQL run state, and bounded evidence.
 Other OpenCoven authorities remain external and are consumed through versioned
 references and adapters.
-
-## Authority freshness
-
-The public outcome order below was reviewed but not reordered on 2026-08-31
-because private planning authority was unavailable. Repository evidence and
-operating policy may be corrected independently, but task status, dependency
-order, priority, assignment, and promotion remain unchanged until an authorized
-Beads-to-Project reconciliation ends with a final no-op preview.
 
 ## Promotion model
 
@@ -39,10 +30,9 @@ An outcome advances only when:
 
 ### Planning authority
 
-- Authorized maintainers validate the private source before changing the
-  generated project view or public aggregates.
-- Preview/apply cycles must finish with a no-op preview.
-- Public artifacts contain outcomes and evidence, never private task text.
+- Verify issue owners, blockers, and acceptance before advancing delivery.
+- Link landed changes and their evidence from the delivery issue.
+- Keep private task details out of public artifacts.
 
 ### Repository integrity
 
