@@ -13,6 +13,11 @@ import {
   authVersionMatches,
   validAuthVersion,
 } from "@/lib/auth/session-revocation";
+import {
+  createWorkOSProvider,
+  readWorkOSConfiguration,
+  verifiedWorkOSProfile,
+} from "@/lib/auth/workos";
 import { readCampaignPolicy } from "@/lib/billing/campaign";
 import {
   enrollCampaignParticipant,
@@ -32,6 +37,8 @@ import {
   serializeSubscriptionAuthority,
 } from "@/lib/subscription-authority";
 import { authConfig } from "./auth.config";
+
+const workosConfiguration = readWorkOSConfiguration(process.env);
 
 export type UserType = "demo" | "subscriber";
 
@@ -81,7 +88,7 @@ export const {
 } = NextAuth({
   ...authConfig,
   callbacks: {
-    async jwt({ token, user, account, trigger, session: updated }) {
+    async jwt({ token, user, account, profile, trigger, session: updated }) {
       /**
        * A session update POST is only a signal to reload the stored user. The
        * browser payload is never an authority source: the avatar route commits
@@ -108,8 +115,11 @@ export const {
        * keys on email here, so an unverified one would let a stranger claim
        * an account by typing its address into a fresh GitHub profile.
        */
-      if (account?.provider === "github") {
-        const email = await fetchGithubEmail(account.access_token);
+      if (account?.provider === "github" || account?.provider === "workos") {
+        const email =
+          account.provider === "workos"
+            ? verifiedWorkOSProfile(profile).email
+            : await fetchGithubEmail(account.access_token);
 
         if (!email) {
           // No verified address: refuse rather than invent an identity.
@@ -126,18 +136,21 @@ export const {
          * whereas an exception here is a person who cannot sign in.
          */
         const now = new Date();
-        const enrollment = await enrollInCampaignIfEligible(
-          {
-            accessToken: account.access_token,
-            now,
-            policy: readCampaignPolicy(process.env),
-            user: row,
-          },
-          {
-            enroll: enrollCampaignParticipant,
-            fetchAccountCreatedAt: fetchGithubAccountCreatedAt,
-          }
-        );
+        const enrollment =
+          account.provider === "github"
+            ? await enrollInCampaignIfEligible(
+                {
+                  accessToken: account.access_token,
+                  now,
+                  policy: readCampaignPolicy(process.env),
+                  user: row,
+                },
+                {
+                  enroll: enrollCampaignParticipant,
+                  fetchAccountCreatedAt: fetchGithubAccountCreatedAt,
+                }
+              )
+            : { kind: "disabled" as const };
         const granted =
           enrollment.kind === "enrolled" ||
           enrollment.kind === "already_enrolled"
@@ -194,26 +207,15 @@ export const {
       return session;
     },
   },
-  providers: [
-    /**
-     * The only way in.
-     *
-     * The password provider is gone: there is no mail delivery here, so a
-     * forgotten password was unrecoverable, and maintaining two paths meant
-     * two sets of rules about who may sign in. GitHub is also what tenants
-     * already have -- they bring a Copilot or Claude credential regardless.
-     *
-     * This makes AUTH_GITHUB_ID and AUTH_GITHUB_SECRET required rather than
-     * optional: without them no one can sign in at all.
-     */
-    GitHub({
-      authorization: {
-        // Identity only. No repository scope is requested; agents
-        // authenticate with credentials the tenant supplies separately.
-        params: { scope: "read:user user:email" },
-      },
-    }),
-  ],
+  // WorkOS replaces direct GitHub login when enabled so new accounts cannot
+  // bypass the hosted waitlist by calling the old provider endpoint.
+  providers: workosConfiguration
+    ? [createWorkOSProvider(workosConfiguration)]
+    : [
+        GitHub({
+          authorization: { params: { scope: "read:user user:email" } },
+        }),
+      ],
 });
 
 /**

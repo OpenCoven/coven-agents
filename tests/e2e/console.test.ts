@@ -859,9 +859,7 @@ test.describe("Run console", () => {
     await expect(
       page.getByRole("heading", { name: "Sign in to manage your account" })
     ).toBeVisible();
-    await expect(
-      page.getByRole("link", { name: "Sign in with GitHub" })
-    ).toBeVisible();
+    await expect(page.getByRole("link", { name: "Sign in" })).toBeVisible();
     await expect(page.getByLabel("GitHub Copilot credential")).toHaveCount(0);
     expect(billingRequests).toEqual([]);
   });
