@@ -4,8 +4,8 @@
 
 The baseline gate repair shipped in #302. Scoped owner credentials and inspection shipped in #311, and guarded binding and redacted run evidence shipped in #312. Issues #296, #297, and #298 are complete at the repository contract boundary. Keep the verified merge SHAs in the Castles consumer pins. The contributor setup and Git hook update carries the reviewed changes from #310 and the guide from #305. The account-keyed billing ledger landed in #317 with migrations 0048 and 0049 after runner migration 0047. Issues #225 and #226 are complete at the repository boundary. Production migration remains separately gated. Keep dependency updates in their own qualification lane.
 
-- #299 is assigned to BunsDev. Next, carry server-enforced read-only permission through owner admission and prove a permitted read and denied mutation in the recording executor.
-- #300 needs the lifecycle owner’s bootstrap decision. Record the selected snapshot or install contract and prove the exact-pinned path and refusal when its prerequisites are missing before promoting it.
+- #299 has a review candidate for server-selected read-only owner runs. The owner-start service and store tests cover restricted invocation arguments, request widening, sandbox trust history and operation replay. Castles #3 can consume this boundary after acceptance and merge. Sandbox egress still depends on the configured Daytona policy.
+- #300 selected snapshot verification without installation. The lifecycle owner still needs to decide whether the harness version recorded by the pinned snapshot build satisfies the installed-version requirement. Until that decision, Castles #3 can report the expected version but cannot claim it independently measured the installed binary.
 
 This sequence describes public outcome ordering. Private planning remains the
 task-level authority and must not be reconstructed from this document.
