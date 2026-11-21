@@ -947,6 +947,7 @@ export const runnerRun = pgTable(
     agentWorkspace: varchar("agentWorkspace", {
       length: AGENT_RUNNER_LIMITS.maxWorkspaceLength,
     }),
+    attemptRef: uuid("attemptRef"),
     authorityRevalidation: boolean("authorityRevalidation")
       .notNull()
       .default(false),

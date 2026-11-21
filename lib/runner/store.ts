@@ -247,6 +247,9 @@ function asRun(row: Record<string, unknown>): RunnerRunRecord {
     commandEvidence: column(row, "commandEvidence"),
     completedAt: nullableTimestampColumn(row, "completedAt"),
     createdAt: timestampColumn(row, "createdAt"),
+    ...(row.attemptRef
+      ? { attemptRef: column<string>(row, "attemptRef") }
+      : {}),
     daytonaAttemptId: column(row, "daytonaAttemptId"),
     daytonaCommandId: column(row, "daytonaCommandId"),
     daytonaLogCursor: column(row, "daytonaLogCursor"),
@@ -766,6 +769,7 @@ function evidenceJson(
 
 function runSnapshot(run: RunnerRunRecord): RunSnapshot {
   return {
+    ...(run.attemptRef ? { attemptRef: run.attemptRef } : {}),
     agentId: run.agentId,
     apiVersion: AGENT_RUNNER_API_VERSION,
     ...(run.startedAt && run.sandboxBinding
@@ -2075,6 +2079,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
             },
             sql`UPDATE "RunnerRun"
               SET "daytonaAttemptId" = ${attemptId},
+                  "attemptRef" = gen_random_uuid(),
                   "executionProvenance" = ${JSON.stringify(input.executionProvenance)}::jsonb,
                   "updatedAt" = now(),
                   "version" = "version" + 1
@@ -5356,7 +5361,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
               "get-run-sandbox-binding-fence",
               { agentId: input.agentId, tenant: principal.tenant },
               sql`SELECT COALESCE(bool_or(
-                  (
+                  "status" IN ('queued', 'running') OR (
                     "dispatchState" IN ('dispatching', 'running')
                     AND "authorityRevalidation" = false
                   )
