@@ -570,6 +570,7 @@ export const runSnapshotSchema = z
   .object({
     agentId: agentIdSchema,
     apiVersion: agentRunnerApiVersionSchema,
+    attemptRef: z.uuid().optional(),
     commandEvidence: z
       .array(commandEvidenceSchema)
       .max(AGENT_RUNNER_LIMITS.maxCommandResults),
