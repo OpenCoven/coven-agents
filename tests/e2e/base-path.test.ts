@@ -289,7 +289,9 @@ test.describe("Demo base path", () => {
 
     const input = page.getByLabel("GitHub Copilot");
     await input.fill("demo-token");
-    await page.getByRole("button", { name: "Save" }).click();
+    await page
+      .getByRole("button", { name: "Save GitHub Copilot CLI credential" })
+      .click();
     await expect(page.getByText("Connected", { exact: true })).toBeVisible();
     await page
       .getByRole("button", { name: "Remove GitHub Copilot CLI credential" })

@@ -580,6 +580,7 @@ function HarnessRow({
           />
 
           <Button
+            aria-label={`Save ${harness.label} credential`}
             className="h-10 rounded-[8px] text-[13px]"
             disabled={busy || !value.trim()}
             onClick={handleSave}
