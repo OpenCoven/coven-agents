@@ -29,13 +29,13 @@ import { sessionFetch as fetch } from "@/lib/auth/session-recovery";
  * Derived from the registry rather than listed here, because offering a slot
  * for an unsupported harness stores a credential that looks like a working
  * setup and behaves like a missing one -- the runner refuses the run with
- * `harness_unsupported` long after the person thought they were done. Codex
- * and Claude Code are present in the registry but not yet supported, so they
- * are deliberately absent from this form.
+ * `harness_unsupported` long after the person thought they were done. The
+ * supported registry now includes Copilot, Codex and Claude Code.
  */
 const GUIDANCE: Record<string, string> = {
   claude: "A Claude Code OAuth token.",
-  codex: "An OpenAI API key.",
+  codex:
+    "Your Codex CLI ChatGPT auth.json contents. API-key sign-ins are not accepted.",
   copilot:
     "A fine-grained PAT with the Copilot Requests permission, or an OAuth token from the Copilot CLI. Classic ghp_ tokens are not supported.",
 };
@@ -569,7 +569,11 @@ function HarnessRow({
             id={`cred-${harness.id}`}
             onChange={handleChange}
             placeholder={
-              configured ? "Replace stored credential" : "Paste token"
+              configured
+                ? "Replace stored credential"
+                : harness.id === "codex"
+                  ? "Paste auth.json"
+                  : "Paste token"
             }
             type="password"
             value={value}
