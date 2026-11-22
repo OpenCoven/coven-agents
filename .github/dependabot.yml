@@ -26,6 +26,13 @@ updates:
     # major still arrive; only the major jump is suppressed. Remove an entry
     # here when the upgrade is actually wanted.
     ignore:
+      # No fixed release was available on 2026-11-22; keep trying newer releases.
+      - dependency-name: katex
+        versions:
+          - "<=0.19.1"
+      - dependency-name: zod
+        versions:
+          - "<=4.6.7"
       - dependency-name: lucide-react
         update-types:
           - version-update:semver-major
