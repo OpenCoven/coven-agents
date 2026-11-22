@@ -182,3 +182,17 @@ test("CLI support: Claude maps assistant/tool/result frames without guessing tok
     );
   }
 });
+
+test("CLI completion frames do not invent operating-system exit codes", () => {
+  for (const harness of ["codex", "claude"] as const) {
+    const events = frame(
+      harness,
+      harness === "codex"
+        ? { type: "turn.completed", usage: {} }
+        : { is_error: false, subtype: "success", type: "result" }
+    );
+    const finished = events.find((event) => event.kind === "finished");
+    assert.ok(finished && finished.kind === "finished");
+    assert.equal(finished.exitCode, null);
+  }
+});

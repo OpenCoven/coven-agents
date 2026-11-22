@@ -2834,7 +2834,11 @@ printf 'synthetic-cli-auth-ready'
         .replaceAll(CONFIG_DIRECTORY, configPath)
         .replaceAll("/workspace/repo", workspace);
     execFileSync("sh", ["-c", mapPaths(stage)], {
-      env: { COVEN_CODEX_AUTH_JSON: credential, PATH: process.env.PATH },
+      env: {
+        COVEN_CODEX_AUTH_JSON: credential,
+        NODE_ENV: "test",
+        PATH: process.env.PATH,
+      },
     });
     const syntheticLaunch = mapPaths(launch).replace(
       "exec 'codex'",
@@ -2846,6 +2850,7 @@ printf 'synthetic-cli-auth-ready'
         encoding: "utf8",
         env: {
           CODEX_API_KEY: "synthetic-rejected-api-key",
+          NODE_ENV: "test",
           PATH: process.env.PATH,
         },
       }),
@@ -2865,3 +2870,34 @@ printf 'synthetic-cli-auth-ready'
     rmSync(directory, { force: true, recursive: true });
   }
 });
+
+for (const harness of ["codex", "claude"] as const) {
+  test(`${harness} terminal process failure overrides a prior successful CLI result`, async () => {
+    const stdout = JSON.stringify(
+      harness === "codex"
+        ? { type: "turn.completed", usage: {} }
+        : { is_error: false, subtype: "success", type: "result" }
+    );
+    const double = processDouble({
+      command: { exitCode: 17, status: "failed" },
+      logs: { stdout },
+    });
+    const snapshot = await snapshotDaytonaProcess({
+      attemptId: PREPARATION_CLAIM,
+      commandId: "cmd-1",
+      credential: SECRET,
+      cursor: 0,
+      harness,
+      runId: RUN_ID,
+      sandbox: double.sandbox,
+    });
+    assert.equal(snapshot.status, "failed");
+    assert.equal(snapshot.exitCode, 17);
+    assert.equal(snapshot.summary.status, "failed");
+    assert.ok(
+      snapshot.events.every(
+        (event) => event.kind !== "finished" || event.status === "failed"
+      )
+    );
+  });
+}
