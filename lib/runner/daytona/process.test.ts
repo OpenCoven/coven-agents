@@ -2901,3 +2901,45 @@ for (const harness of ["codex", "claude"] as const) {
     );
   });
 }
+
+for (const harness of ["codex", "claude"] as const) {
+  test(`${harness} waits for process settlement before finalizing its CLI result`, async () => {
+    const stdout = `${JSON.stringify(harness === "codex" ? { type: "turn.completed", usage: {} } : { is_error: false, subtype: "success", type: "result" })}\n`;
+    const pending = processDouble({
+      command: { status: "running" },
+      logs: { stdout },
+    });
+    const input = {
+      attemptId: PREPARATION_CLAIM,
+      commandId: "cmd-1",
+      credential: SECRET,
+      cursor: 0,
+      harness,
+      runId: RUN_ID,
+      sandbox: pending.sandbox,
+    };
+    const first = await snapshotDaytonaProcess(input);
+    assert.equal(first.status, "running");
+    assert.equal(first.summary.status, null);
+    assert.ok(first.events.every((event) => event.kind !== "finished"));
+    const settled = processDouble({
+      command: { exitCode: 17, status: "failed" },
+      logs: { stdout },
+    });
+    const last = await snapshotDaytonaProcess({
+      ...input,
+      cursor: first.cursor,
+      sandbox: settled.sandbox,
+    });
+    assert.equal(last.status, "failed");
+    assert.equal(last.exitCode, 17);
+    assert.ok(
+      last.events.some(
+        (event) =>
+          event.kind === "finished" &&
+          event.status === "failed" &&
+          event.exitCode === 17
+      )
+    );
+  });
+}
