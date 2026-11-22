@@ -636,13 +636,19 @@ export async function dispatchRunnerClaim(
         : { kind: "retained", reason: "cleanup_pending", runId: run.id };
     }
   }
-  if (!isRunnableHarness(run.agentRuntime)) {
+  const unsupportedPermission =
+    run.agentRuntime !== "copilot" &&
+    (run.executionPermission !== "unrestricted" ||
+      run.githubBrokerPolicy !== null);
+  if (!isRunnableHarness(run.agentRuntime) || unsupportedPermission) {
     return (await terminalizeUnstartedDispatchFailure(
       dependencies,
       authority,
       run,
       UNSUPPORTED_HARNESS_RUN_ERROR.code,
-      UNSUPPORTED_HARNESS_RUN_ERROR.message,
+      unsupportedPermission
+        ? "The selected harness cannot enforce the requested restricted permission."
+        : UNSUPPORTED_HARNESS_RUN_ERROR.message,
       UNSUPPORTED_HARNESS_RUN_ERROR.retryable
     ))
       ? { kind: "refused", reason: "harness", runId: run.id }

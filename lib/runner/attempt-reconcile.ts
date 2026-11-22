@@ -37,6 +37,7 @@ import type {
   RunnerExecutionAttemptId,
   RunnerOperator,
   RunnerRunRecord,
+  RunnerRuntime,
 } from "./types";
 
 const DEFAULT_BATCH_SIZE = 20;
@@ -98,7 +99,7 @@ export type RunnerAttemptSnapshotInput = Readonly<{
   context: RunnerReconciliationContext;
   credential: EvidenceRedactionInput;
   cursor: number;
-  harness: "copilot";
+  harness: RunnerRuntime;
   runId: string;
 }>;
 
@@ -730,7 +731,7 @@ async function reconcileAttachedProcess(
       context,
       credential: evidenceRedactions,
       cursor: liveRun.daytonaLogCursor,
-      harness: "copilot",
+      harness: run.agentRuntime,
       runId: run.id,
     });
     const toolNames = new Map<string, string>();

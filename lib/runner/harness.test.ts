@@ -13,7 +13,7 @@ import {
 const AT = "2026-08-28T09:00:00.000Z";
 const SECRET = "copilot-credential-9f3b";
 
-test("bounds workspaces and only admits the supported Copilot harness", () => {
+test("bounds workspaces and refuses malformed Codex CLI credentials", () => {
   assert.equal(resolveSandboxWorkspace(), "/workspace");
   assert.equal(
     resolveSandboxWorkspace("repo/../project"),
@@ -31,7 +31,7 @@ test("bounds workspaces and only admits the supported Copilot harness", () => {
   assert.throws(
     () => requireHarness("codex", { credential: SECRET }),
     (error: unknown) =>
-      error instanceof HarnessError && error.code === "harness_unsupported"
+      error instanceof HarnessError && error.code === "harness_unauthenticated"
   );
 });
 
@@ -332,4 +332,38 @@ test("skips malformed structured records without stopping later valid results", 
     AT
   );
   assert.deepEqual(replay.events, []);
+});
+
+test("Codex ChatGPT auth JSON validates and registers every token for redaction", () => {
+  const tokens = {
+    access_token: "synthetic-access-value",
+    account_id: "synthetic-account",
+    id_token: "synthetic-id-value",
+    refresh_token: "synthetic-refresh-value",
+  };
+  const credential = JSON.stringify({
+    auth_mode: "chatgpt",
+    OPENAI_API_KEY: null,
+    tokens,
+  });
+  const bound = requireHarness("codex", { credential });
+  assert.equal(bound.auth.name, "COVEN_CODEX_AUTH_JSON");
+  for (const value of Object.values(tokens)) {
+    assert.ok(bound.secrets.includes(value));
+  }
+  assert.throws(
+    () =>
+      requireHarness("codex", {
+        credential: JSON.stringify({
+          auth_mode: "apikey",
+          OPENAI_API_KEY: "synthetic",
+          tokens,
+        }),
+      }),
+    HarnessError
+  );
+  assert.equal(
+    requireHarness("claude", { credential: SECRET }).auth.name,
+    "CLAUDE_CODE_OAUTH_TOKEN"
+  );
 });

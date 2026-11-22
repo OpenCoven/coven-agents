@@ -209,7 +209,7 @@ test("rejects malformed nested structured result values", () => {
   }
 });
 
-test("harnesses without a translation emit nothing rather than invented detail", () => {
+test("vendor-specific frames are never cross-parsed by another harness", () => {
   const line = JSON.stringify({
     data: { content: "hi" },
     type: "assistant.message",

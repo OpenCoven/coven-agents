@@ -1117,7 +1117,7 @@ test("stages only through per-call env and starts a safe asynchronous session", 
       `COPILOT_GITHUB_TOKEN="$(cat -- '${PATH}')"`,
       "export COPILOT_GITHUB_TOKEN",
       `rm -f -- '${PATH}'`,
-      "unset GH_TOKEN GITHUB_TOKEN CODEX_API_KEY CLAUDE_CODE_OAUTH_TOKEN AI_GATEWAY_API_KEY ANTHROPIC_API_KEY AZURE_OPENAI_API_KEY GOOGLE_API_KEY OPENAI_API_KEY ABUSE_KEY_SECRET AUTH_GITHUB_SECRET AUTH_SECRET BLOB_READ_WRITE_TOKEN CREDENTIAL_KEK CREDENTIAL_KEK_CURRENT_VERSION CREDENTIAL_KEK_V1 CREDENTIAL_KEK_V2 CRON_SECRET DAYTONA_API_KEY OPERATOR_DIAGNOSTIC_TOKEN POSTGRES_URL REDIS_URL RUNNER_MANUAL_RECONCILE_SECRET STRIPE_SECRET_KEY STRIPE_WEBHOOK_SECRET WORKOS_API_KEY WORKOS_COOKIE_PASSWORD",
+      "unset GH_TOKEN GITHUB_TOKEN COVEN_CODEX_AUTH_JSON CLAUDE_CODE_OAUTH_TOKEN AI_GATEWAY_API_KEY ANTHROPIC_API_KEY AZURE_OPENAI_API_KEY GOOGLE_API_KEY OPENAI_API_KEY CODEX_API_KEY ABUSE_KEY_SECRET AUTH_GITHUB_SECRET AUTH_SECRET BLOB_READ_WRITE_TOKEN CREDENTIAL_KEK CREDENTIAL_KEK_CURRENT_VERSION CREDENTIAL_KEK_V1 CREDENTIAL_KEK_V2 CRON_SECRET DAYTONA_API_KEY OPERATOR_DIAGNOSTIC_TOKEN POSTGRES_URL REDIS_URL RUNNER_MANUAL_RECONCILE_SECRET STRIPE_SECRET_KEY STRIPE_WEBHOOK_SECRET WORKOS_API_KEY WORKOS_COOKIE_PASSWORD",
       "export CI=true",
       "mkdir -p -- '/workspace/repo'",
       "cd -- '/workspace/repo'",
@@ -1720,7 +1720,7 @@ test("cleans exact resources but retains the attempt when launch authorization i
       (call) =>
         call.kind === "command" &&
         call.command ===
-          `rm -f -- '${PATH}' && test ! -e '${PATH}' && test ! -L '${PATH}'`
+          `rm -f -- '${PATH}' && test ! -e '${PATH}' && test ! -L '${PATH}' && rm -f -- '${CONFIG_DIRECTORY}/auth.json' && test ! -e '${CONFIG_DIRECTORY}/auth.json' && test ! -L '${CONFIG_DIRECTORY}/auth.json'`
     )
   );
   assert.deepEqual(sessionIds(), []);
@@ -1757,7 +1757,7 @@ test("cleans exact resources and preserves the fence when launch authorization t
       (call) =>
         call.kind === "command" &&
         call.command ===
-          `rm -f -- '${PATH}' && test ! -e '${PATH}' && test ! -L '${PATH}'`
+          `rm -f -- '${PATH}' && test ! -e '${PATH}' && test ! -L '${PATH}' && rm -f -- '${CONFIG_DIRECTORY}/auth.json' && test ! -e '${CONFIG_DIRECTORY}/auth.json' && test ! -L '${CONFIG_DIRECTORY}/auth.json'`
     )
   );
   assert.ok(calls.some((call) => call.kind === "delete"));
@@ -1990,7 +1990,7 @@ test("retains the claim with a retryable durable-release error when cleanup succ
       (call) =>
         call.kind === "command" &&
         call.command ===
-          `rm -f -- '${PATH}' && test ! -e '${PATH}' && test ! -L '${PATH}'`
+          `rm -f -- '${PATH}' && test ! -e '${PATH}' && test ! -L '${PATH}' && rm -f -- '${CONFIG_DIRECTORY}/auth.json' && test ! -e '${CONFIG_DIRECTORY}/auth.json' && test ! -L '${CONFIG_DIRECTORY}/auth.json'`
     )
   );
 });
@@ -2503,7 +2503,7 @@ test("verifies exact credential cleanup without declaring persistent reuse safe"
       (call) =>
         call.kind === "command" &&
         call.command ===
-          `rm -f -- '${PATH}' && test ! -e '${PATH}' && test ! -L '${PATH}'` &&
+          `rm -f -- '${PATH}' && test ! -e '${PATH}' && test ! -L '${PATH}' && rm -f -- '${CONFIG_DIRECTORY}/auth.json' && test ! -e '${CONFIG_DIRECTORY}/auth.json' && test ! -L '${CONFIG_DIRECTORY}/auth.json'` &&
         call.env === undefined
     )
   );
@@ -2559,7 +2559,7 @@ test("404 and 410 session absence still require credential cleanup and approved 
           .every(
             (call) =>
               call.command ===
-              `rm -f -- '${PATH}' && test ! -e '${PATH}' && test ! -L '${PATH}'`
+              `rm -f -- '${PATH}' && test ! -e '${PATH}' && test ! -L '${PATH}' && rm -f -- '${CONFIG_DIRECTORY}/auth.json' && test ! -e '${CONFIG_DIRECTORY}/auth.json' && test ! -L '${CONFIG_DIRECTORY}/auth.json'`
           ),
         true
       );
@@ -2694,3 +2694,93 @@ test("owner revocation at the provider boundary prevents staging or launch and r
     })
   );
 });
+
+test("Codex ChatGPT CLI sign-in is file-scoped, redacted and swept; restricted modes refuse before effects", async () => {
+  const tokens = {
+    access_token: "synthetic-access-value",
+    account_id: "synthetic-account",
+    id_token: "synthetic-id-value",
+    refresh_token: "synthetic-refresh-value",
+  };
+  const credential = JSON.stringify({ auth_mode: "chatgpt", tokens });
+  const double = processDouble();
+  let redactions: readonly string[] = [];
+  await startDaytonaProcess({
+    ...startInput(double.sandbox),
+    credential: { credential },
+    persistAttemptRedaction: async (input) => {
+      redactions = input.secrets;
+      return true;
+    },
+    runtime: "codex",
+  });
+  const launch =
+    double.calls.find((call) => call.kind === "start")?.command ?? "";
+  assert.ok(launch.includes(`export CODEX_HOME='${CONFIG_DIRECTORY}'`));
+  assert.ok(launch.includes(`mv -- '${PATH}' '${CONFIG_DIRECTORY}/auth.json'`));
+  assert.ok(launch.includes("'--json'"));
+  assert.ok(!launch.includes(credential));
+  for (const token of Object.values(tokens)) {
+    assert.ok(redactions.includes(token));
+    assert.ok(!launch.includes(token));
+  }
+  await sweepDaytonaCredentials(double.sandbox, [
+    { attemptId: PREPARATION_CLAIM, runId: RUN_ID },
+  ]);
+  assert.ok(
+    double.calls.some(
+      (call) =>
+        call.kind === "command" &&
+        call.command.includes(`rm -f -- '${CONFIG_DIRECTORY}/auth.json'`)
+    )
+  );
+  await Promise.all(
+    ["codex", "claude"].map(async (runtime) => {
+      const refused = processDouble();
+      await assert.rejects(
+        startDaytonaProcess({
+          ...startInput(refused.sandbox),
+          credential: { credential: runtime === "codex" ? credential : SECRET },
+          executionPermission: "workspace_read",
+          runtime,
+        }),
+        /cannot enforce/
+      );
+      assert.deepEqual(refused.calls, []);
+    })
+  );
+});
+for (const harness of ["codex", "claude"] as const) {
+  test(`${harness} snapshots use the selected CLI translator`, async () => {
+    const stdout = JSON.stringify(
+      harness === "codex"
+        ? {
+            item: { text: "synthetic reply", type: "agent_message" },
+            type: "item.completed",
+          }
+        : {
+            message: { content: [{ text: "synthetic reply", type: "text" }] },
+            type: "assistant",
+          }
+    );
+    const double = processDouble({
+      command: { exitCode: 0 },
+      logs: { stdout },
+    });
+    const snapshot = await snapshotDaytonaProcess({
+      attemptId: PREPARATION_CLAIM,
+      commandId: "cmd-1",
+      credential: SECRET,
+      cursor: 0,
+      harness,
+      runId: RUN_ID,
+      sandbox: double.sandbox,
+    });
+    assert.ok(
+      snapshot.events.some(
+        (event) => event.kind === "message" && event.text === "synthetic reply"
+      )
+    );
+    assert.equal(snapshot.status, "completed");
+  });
+}

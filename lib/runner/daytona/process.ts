@@ -16,6 +16,7 @@ import {
   buildHarnessCommand,
   HARNESS_SPECS,
   type HarnessCredential,
+  type HarnessId,
   type HarnessStatus,
   harnessesFromProbe,
   parseHarnessLog,
@@ -181,7 +182,15 @@ function providerError(
 }
 
 function cleanupCommand(path: string): string {
-  return `rm -f -- ${shellQuote(path)} && test ! -e ${shellQuote(path)} && test ! -L ${shellQuote(path)}`;
+  const staged = `rm -f -- ${shellQuote(path)} && test ! -e ${shellQuote(path)} && test ! -L ${shellQuote(path)}`;
+  const match = /^\/tmp\/(coven-run-[a-f0-9]+)\.credential$/u.exec(path);
+  if (!match) {
+    return staged;
+  }
+  // The same attempt owns the CLI's file-backed ChatGPT sign-in. Sweep it
+  // even when no runtime is available during recovery; never touch workspace.
+  const authPath = `/run/coven-agents/${match[1]}/copilot/auth.json`;
+  return `${staged} && rm -f -- ${shellQuote(authPath)} && test ! -e ${shellQuote(authPath)} && test ! -L ${shellQuote(authPath)}`;
 }
 
 function stagingCommand(authName: string, path: string): string {
@@ -227,6 +236,7 @@ function asyncCommand(
     "AZURE_OPENAI_API_KEY",
     "GOOGLE_API_KEY",
     "OPENAI_API_KEY",
+    "CODEX_API_KEY",
   ];
   const controlPlaneCredentialVariables = [
     "ABUSE_KEY_SECRET",
@@ -286,9 +296,21 @@ function asyncCommand(
           "unset COPILOT_ALLOW_ALL GITHUB_COPILOT_PROMPT_MODE_EXTENSIONS",
         ]
       : []),
-    `${authName}="$(cat -- ${shellQuote(credentialPath)})"`,
-    `export ${authName}`,
-    `rm -f -- ${shellQuote(credentialPath)}`,
+    ...(authName === "CLAUDE_CODE_OAUTH_TOKEN"
+      ? [`export CLAUDE_CONFIG_DIR=${shellQuote(configDirectory)}`]
+      : []),
+    ...(authName === "COVEN_CODEX_AUTH_JSON"
+      ? [
+          `export CODEX_HOME=${shellQuote(configDirectory)}`,
+          `mv -- ${shellQuote(credentialPath)} ${shellQuote(`${configDirectory}/auth.json`)}`,
+          `chmod 600 ${shellQuote(`${configDirectory}/auth.json`)}`,
+          "unset COVEN_CODEX_AUTH_JSON",
+        ]
+      : [
+          `${authName}="$(cat -- ${shellQuote(credentialPath)})"`,
+          `export ${authName}`,
+          `rm -f -- ${shellQuote(credentialPath)}`,
+        ]),
     ...(githubTool
       ? [
           `COVEN_GITHUB_CAPABILITY="$(cat -- ${shellQuote(githubTool.capabilityPath)})"`,
@@ -635,7 +657,20 @@ export async function startDaytonaProcess(input: {
   task: string;
   workspace?: string;
 }): Promise<DaytonaStartedProcess> {
-  const { auth, spec } = requireHarness(input.runtime, input.credential);
+  const { auth, secrets, spec } = requireHarness(
+    input.runtime,
+    input.credential
+  );
+  if (
+    spec.id !== "copilot" &&
+    (input.executionPermission !== "unrestricted" || input.githubTool)
+  ) {
+    throw new DaytonaProcessError(
+      "This harness cannot enforce the requested restricted permission.",
+      "process_start_failed",
+      false
+    );
+  }
   const restricted = input.executionPermission !== "unrestricted";
   const workspaceRestricted =
     input.executionPermission === "workspace_read" ||
@@ -862,9 +897,7 @@ export async function startDaytonaProcess(input: {
       !(await input.persistAttemptRedaction({
         attemptId,
         runId: input.runId,
-        secrets: input.githubTool
-          ? [auth.value, githubCapability]
-          : [auth.value],
+        secrets: input.githubTool ? [...secrets, githubCapability] : secrets,
       }))
     ) {
       throw new Error("Attempt redaction persistence was rejected.");
@@ -1275,7 +1308,7 @@ export async function snapshotDaytonaProcess(input: {
   commandId: string;
   credential: EvidenceRedactionInput;
   cursor: number;
-  harness: "copilot";
+  harness: HarnessId;
   now?: () => Date;
   sandbox: DaytonaProcessSandbox;
   runId: string;

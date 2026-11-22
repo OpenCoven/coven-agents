@@ -96,7 +96,11 @@ export function resolveSandboxWorkspace(requested?: string): string {
 export function requireHarness(
   runtime: string,
   supplied: HarnessCredential
-): { auth: { name: string; value: string }; spec: HarnessSpec } {
+): {
+  auth: { name: string; value: string };
+  secrets: readonly string[];
+  spec: HarnessSpec;
+} {
   const spec = harnessSpec(runtime);
   if (!spec) {
     throw new HarnessError(`Unknown harness: ${runtime}`, "unknown_harness");
@@ -112,7 +116,48 @@ export function requireHarness(
   if (!name || typeof value !== "string" || !value.trim()) {
     throw new HarnessError(harnessAuthHint(spec), "harness_unauthenticated");
   }
-  return { auth: { name, value }, spec };
+  const secrets = [value];
+  if (spec.id === "codex") {
+    // Only CLI ChatGPT sign-in, never an API-key auth.json. Do not retain
+    // parsing errors, which could contain the caller's credential bytes.
+    try {
+      const parsed: unknown = JSON.parse(value);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("Invalid CLI sign-in shape.");
+      }
+      const auth = parsed as Record<string, unknown>;
+      if (
+        auth.auth_mode !== "chatgpt" ||
+        (auth.OPENAI_API_KEY !== null && auth.OPENAI_API_KEY !== undefined)
+      ) {
+        throw new Error("Invalid CLI sign-in shape.");
+      }
+      const { tokens } = auth;
+      if (!tokens || typeof tokens !== "object" || Array.isArray(tokens)) {
+        throw new Error("Invalid CLI sign-in shape.");
+      }
+      const bag = tokens as Record<string, unknown>;
+      for (const key of [
+        "id_token",
+        "access_token",
+        "refresh_token",
+        "account_id",
+      ]) {
+        const token = bag[key];
+        if (typeof token !== "string" || !token.trim()) {
+          throw new Error("Invalid CLI sign-in shape.");
+        }
+        secrets.push(token);
+      }
+    } catch {
+      // biome-ignore lint/style/useErrorCause: Credential parser errors may contain secret bytes and must never escape.
+      throw new HarnessError(
+        "Codex requires its ChatGPT CLI auth.json, without a provider API key.",
+        "harness_unauthenticated"
+      );
+    }
+  }
+  return { auth: { name, value }, secrets, spec };
 }
 
 export function harnessesFromProbe(

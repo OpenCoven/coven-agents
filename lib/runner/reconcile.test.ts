@@ -3605,6 +3605,7 @@ test("reconciliation appends only fresh logs and terminalizes a settled command"
   const commandId = "daytona-command-neutral-projection";
   const sessionId = "daytona-session-neutral-projection";
   const attached = run({
+    agentRuntime: "claude",
     daytonaCommandId: commandId,
     daytonaSessionId: sessionId,
     dispatchState: "running",
@@ -3647,6 +3648,11 @@ test("reconciliation appends only fresh logs and terminalizes a settled command"
         return {} as never;
       },
       snapshot: async (input) => {
+        assert.equal(
+          input.harness,
+          "claude",
+          "recovery must use the frozen runtime, not a hardcoded translator"
+        );
         calls.push("snapshot");
         for (const value of privateValues) {
           assert.equal(
