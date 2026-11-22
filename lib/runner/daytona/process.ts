@@ -1377,18 +1377,21 @@ export async function snapshotDaytonaProcess(input: {
           : "running";
   return {
     cursor: parsed.cursor,
-    events: providerFailed
-      ? events.map((event) =>
-          event.kind === "finished"
-            ? {
-                ...event,
-                exitCode: normalizedCommand.exitCode,
-                status: "failed" as const,
-              }
-            : event
-        )
-      : events,
-    exitCode: normalizedCommand.exitCode ?? result?.exitCode ?? null,
+    events:
+      providerFailed || (terminal && input.harness !== "copilot")
+        ? events.map((event) =>
+            event.kind === "finished"
+              ? {
+                  ...event,
+                  exitCode: normalizedCommand.exitCode,
+                  status: providerFailed ? ("failed" as const) : event.status,
+                }
+              : event
+          )
+        : events,
+    exitCode: providerFailed
+      ? normalizedCommand.exitCode
+      : (result?.exitCode ?? normalizedCommand.exitCode),
     logsSettled: !parsed.pendingTail,
     status,
     summary: {

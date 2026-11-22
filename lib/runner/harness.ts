@@ -337,8 +337,11 @@ export function parseHarnessLog(
     : assembler.push(consumed);
   const events: RunEvent[] = [];
   let malformedDiagnostics = 0;
+  let lineOffset = 0;
 
   for (const line of lines) {
+    const lineStart = consumed.indexOf(line, lineOffset);
+    lineOffset = lineStart + line.length;
     let malformed = false;
     try {
       JSON.parse(line);
@@ -351,6 +354,16 @@ export function parseHarnessLog(
           (event) =>
             sanitizeHarnessEvent(harness, event, credential, fallbackAt)
         );
+        // These CLI result frames describe a turn, not the OS process exit.
+        // Leave the frame unread until the provider settles so the delivery
+        // cursor neither loses the result nor replays earlier streamed events.
+        if (
+          harness !== "copilot" &&
+          !terminal &&
+          normalized.some((event) => event.kind === "finished")
+        ) {
+          return { cursor: safeCursor + lineStart, events, pendingTail };
+        }
         events.push(...normalized);
       } catch (error) {
         if (

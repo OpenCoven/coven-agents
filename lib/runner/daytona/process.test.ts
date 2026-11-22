@@ -2920,7 +2920,6 @@ for (const harness of ["codex", "claude"] as const) {
     };
     const first = await snapshotDaytonaProcess(input);
     assert.equal(first.status, "running");
-    assert.equal(first.summary.status, null);
     assert.ok(first.events.every((event) => event.kind !== "finished"));
     const settled = processDouble({
       command: { exitCode: 17, status: "failed" },
@@ -2933,6 +2932,26 @@ for (const harness of ["codex", "claude"] as const) {
     });
     assert.equal(last.status, "failed");
     assert.equal(last.exitCode, 17);
+    const repeated = await snapshotDaytonaProcess({
+      ...input,
+      cursor: last.cursor,
+      sandbox: settled.sandbox,
+    });
+    assert.deepEqual(repeated.events, []);
+    const success = await snapshotDaytonaProcess({
+      ...input,
+      cursor: first.cursor,
+      sandbox: processDouble({
+        command: { exitCode: 0, status: "completed" },
+        logs: { stdout },
+      }).sandbox,
+    });
+    assert.equal(success.status, "completed");
+    assert.ok(
+      success.events.some(
+        (event) => event.kind === "finished" && event.exitCode === 0
+      )
+    );
     assert.ok(
       last.events.some(
         (event) =>
