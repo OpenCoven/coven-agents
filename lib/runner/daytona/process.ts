@@ -1358,18 +1358,37 @@ export async function snapshotDaytonaProcess(input: {
       event.kind === "finished"
   );
   const summary = summarizeRun(authoritativeEvents);
-  const status = result
-    ? result.status
-    : normalizedCommand.status === "completed" ||
-        (terminal && normalizedCommand.exitCode === 0)
-      ? "completed"
-      : terminal
-        ? "failed"
-        : "running";
+  const providerFailed =
+    terminal &&
+    ((normalizedCommand.exitCode !== null &&
+      normalizedCommand.exitCode !== 0) ||
+      normalizedCommand.status === "failed" ||
+      normalizedCommand.status === "error" ||
+      normalizedCommand.status === "killed");
+  const status = providerFailed
+    ? "failed"
+    : result
+      ? result.status
+      : normalizedCommand.status === "completed" ||
+          (terminal && normalizedCommand.exitCode === 0)
+        ? "completed"
+        : terminal
+          ? "failed"
+          : "running";
   return {
     cursor: parsed.cursor,
-    events,
-    exitCode: result?.exitCode ?? normalizedCommand.exitCode,
+    events: providerFailed
+      ? events.map((event) =>
+          event.kind === "finished"
+            ? {
+                ...event,
+                exitCode: normalizedCommand.exitCode,
+                status: "failed" as const,
+              }
+            : event
+        )
+      : events,
+    exitCode: normalizedCommand.exitCode ?? result?.exitCode ?? null,
     logsSettled: !parsed.pendingTail,
     status,
     summary: {

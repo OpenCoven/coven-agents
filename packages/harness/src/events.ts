@@ -311,7 +311,7 @@ function terminal(
 ): RunEvent {
   return {
     at,
-    exitCode: failed ? 1 : 0,
+    exitCode: null,
     filesModified: [],
     kind: "finished",
     sessionId,
