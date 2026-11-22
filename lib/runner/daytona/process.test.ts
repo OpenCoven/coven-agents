@@ -1,6 +1,9 @@
 // biome-ignore-all lint/suspicious/useAwait: Daytona doubles intentionally preserve SDK promise signatures.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import {
   DaytonaGoneError,
@@ -2784,3 +2787,81 @@ for (const harness of ["codex", "claude"] as const) {
     assert.equal(snapshot.status, "completed");
   });
 }
+
+test("Codex credential staging and sweep work in a real shell with a synthetic CLI", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "coven-cli-shell-"));
+  const stagedPath = join(directory, "staged.credential");
+  const configPath = join(directory, "config");
+  const workspace = join(directory, "workspace");
+  const fake = join(directory, "synthetic-codex");
+  const credential = JSON.stringify({
+    auth_mode: "chatgpt",
+    tokens: {
+      access_token: "synthetic-access-value",
+      account_id: "synthetic-account",
+      id_token: "synthetic-id-value",
+      refresh_token: "synthetic-refresh-value",
+    },
+  });
+  try {
+    writeFileSync(
+      fake,
+      `#!/bin/sh
+set -eu
+test -f "$CODEX_HOME/auth.json"
+test "$(stat -c '%a' "$CODEX_HOME/auth.json" 2>/dev/null || stat -f '%Lp' "$CODEX_HOME/auth.json")" = 600
+test -z "\${CODEX_API_KEY:-}"
+grep -q 'synthetic-access-value' "$CODEX_HOME/auth.json"
+printf 'synthetic-cli-auth-ready'
+`,
+      { mode: 0o700 }
+    );
+    const double = processDouble();
+    await startDaytonaProcess({
+      ...startInput(double.sandbox),
+      credential: { credential },
+      runtime: "codex",
+    });
+    const stage =
+      double.calls.find((call) => call.kind === "command" && call.env)
+        ?.command ?? "";
+    const launch =
+      double.calls.find((call) => call.kind === "start")?.command ?? "";
+    assert.ok(launch.includes("exec 'codex'"));
+    const mapPaths = (command: string) =>
+      command
+        .replaceAll(PATH, stagedPath)
+        .replaceAll(CONFIG_DIRECTORY, configPath)
+        .replaceAll("/workspace/repo", workspace);
+    execFileSync("sh", ["-c", mapPaths(stage)], {
+      env: { COVEN_CODEX_AUTH_JSON: credential, PATH: process.env.PATH },
+    });
+    const syntheticLaunch = mapPaths(launch).replace(
+      "exec 'codex'",
+      `exec '${fake}'`
+    );
+    assert.ok(!syntheticLaunch.includes("exec 'codex'"));
+    assert.equal(
+      execFileSync("sh", ["-c", syntheticLaunch], {
+        encoding: "utf8",
+        env: {
+          CODEX_API_KEY: "synthetic-rejected-api-key",
+          PATH: process.env.PATH,
+        },
+      }),
+      "synthetic-cli-auth-ready"
+    );
+    assert.equal(existsSync(stagedPath), false);
+    assert.equal(existsSync(join(configPath, "auth.json")), true);
+    await sweepDaytonaCredentials(double.sandbox, [
+      { attemptId: PREPARATION_CLAIM, runId: RUN_ID },
+    ]);
+    const cleanup =
+      double.calls.filter((call) => call.kind === "command").at(-1)?.command ??
+      "";
+    execFileSync("sh", ["-c", mapPaths(cleanup)]);
+    assert.equal(existsSync(join(configPath, "auth.json")), false);
+  } finally {
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
