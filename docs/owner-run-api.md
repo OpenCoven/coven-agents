@@ -51,3 +51,86 @@ From the authenticated owner's browser, POST to `/api/agents/{agentId}/sandbox/b
 After a successful bind, even a start that omits the optional sandbox expectation is pinned to the recorded ID and generation. Refusal carries a reason such as `generation_mismatch`, `ownership_mismatch` or `configuration_drift`. Dispatch cannot provision a substitute. Automatic prewarm and routine resource-floor repair leave pinned sandboxes untouched. Once a bound run has started, its snapshot exposes `executedSandbox.generation` and an agent-scoped SHA-256 `bindingDigest`. The digest covers the JSON array containing the literal `bound-sandbox-v1`, tenant, agent ID and exact sandbox ID. Queued and pre-launch refusals omit execution evidence.
 
 Migration 0047 adds the persistent agent pin after the owner-credential migration. If the runner stack lands first, regenerate billing’s pending migration against 0047. Before rolling back the application, suspend new admissions for pinned agents and drain their queued runs while pin enforcement is available. Preserve the recorded IDs, generations and run evidence.
+
+## Inspection metadata proposed in PR #324
+
+Send the inspection-scoped request to `POST /api/agents/{agentId}/sandbox/inspection` with the bound sandbox ID and generation. To request the proposed detail block, use this body.
+
+```json
+{"expectedSandboxId":"sandbox-a","expectedGeneration":3,"includeProviderMetadata":true}
+```
+
+The following synthetic HTTP 200 response illustrates the opt-in contract. Within `observed.providerMetadata`, null means unknown, false means observed absence under the application convention, and zero means an explicitly empty volume list. The producer maps an undefined scalar to unknown and a runtime-null scalar to absence. Detailed consumers use the nested values even when a legacy field has a different default. Omitting the option preserves the legacy response. Daytona SDK 0.231.1 exposes neither OS nor architecture on this exact-ID read. Castles separately evaluates its pinned snapshot policy.
+
+```json
+{
+  "observed": {
+    "autoArchiveInterval": 10080,
+    "autoDeleteInterval": -1,
+    "autoDestroyAtConfigured": false,
+    "autoPauseInterval": null,
+    "autoStopInterval": 15,
+    "cpu": 2,
+    "diskGib": 10,
+    "domainAllowListConfigured": false,
+    "domainAllowListMatchesPolicy": true,
+    "gpu": null,
+    "identity": {
+      "configuration": "current",
+      "credentialBoundary": true,
+      "generationLabel": true,
+      "ownershipLabels": true
+    },
+    "linkedSandbox": false,
+    "memoryGib": 4,
+    "networkAllowListConfigured": false,
+    "networkBlockAll": false,
+    "outboundProxyConfigured": false,
+    "providerMetadata": {
+      "autoDestroyAtConfigured": null,
+      "linkedSandbox": false,
+      "platform": {
+        "architecture": null,
+        "os": null
+      },
+      "volumes": 0,
+      "warmPool": null
+    },
+    "public": false,
+    "snapshot": "coven-agents-copilot-2",
+    "state": "started",
+    "target": "us",
+    "volumes": 0,
+    "warmPool": false
+  },
+  "outcome": "observed",
+  "policy": {
+    "adapterVersion": "daytona-adapter-v1",
+    "capabilityContractVersion": "hosted-v1",
+    "credentialBoundaryVersion": "attempt-reset-v1",
+    "harnesses": [
+      {
+        "id": "copilot",
+        "package": "@github/copilot",
+        "version": "1.0.80"
+      }
+    ],
+    "resources": {
+      "cpu": 2,
+      "diskGib": 10,
+      "memoryGib": 4
+    },
+    "sdkVersion": "0.231.1",
+    "snapshotName": "coven-agents-copilot-2",
+    "target": "us"
+  },
+  "record": {
+    "agentId": "00000000-0000-4000-8000-000000000001",
+    "fence": "none",
+    "generation": 3,
+    "lifecycle": "ready",
+    "sandboxId": "sandbox-a"
+  },
+  "version": 1
+}
+```

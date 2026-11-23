@@ -21,6 +21,10 @@ Production-config operator checks from pending persistent Daytona lifecycle,
 subscriber certification, observation-window, and full product release
 approval.
 
+## Sandbox inspection as of November 23, 2026
+
+The merged v1 inspection response supports the default caller. It folds missing TTL and attachment metadata into booleans or a volume count. Producer PR #324 and Castles PR #21 propose an opt-in detail block that preserves unknown values. Both PRs are open, and #21 is stacked on Castles #18. The accepted Castles #2 revision remains `3e6d01539aecf2358c81f4561d856fcd89ef4413`. See the [verification matrix](verification-matrix.md#sandbox-inspection-candidates) for the tested pair, platform limitation and outstanding decisions. [Issue #322](https://github.com/OpenCoven/coven-agents/issues/322) · [Issue #323](https://github.com/OpenCoven/coven-agents/issues/323)
+
 ## Implemented surfaces
 
 | Surface | Current repository reality | Evidence |
