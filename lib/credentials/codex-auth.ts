@@ -36,7 +36,7 @@ export function prepareCodexAuth(value: string): {
     }
     const auth = authSchema.parse(parsed);
     const secrets = [...new Set(Object.values(auth.tokens))];
-    // Use the production codec itself, before save or any provider effect.
+    // Use the production codec itself, before save or process credential staging.
     // Whole JSON is not a secret unit: whitespace and combined token size
     // must not prevent persistence when every staged private value is covered.
     encodeRunnerAttemptRedactionSecrets(secrets);
