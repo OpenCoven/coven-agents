@@ -1,5 +1,9 @@
 # Implementation Sequence
 
+## Sandbox inspection delivery
+
+Review producer #324 at `6dedc26e9d49d945fc2442252c531b9ffdba3e18` and Castles #21 at `910d60ed770516e21446760fced3779a9868375f` together. #21 is stacked on Castles #18 at `e064756cd6f9cf404cf582d9407db3e5e6aa9b4f`. Deliver producer support before enabling the option in Castles. Coordinate the consumer rebase with the #2 steward after #20 lands and repeat qualification on changed heads. #322 awaits independent review and maintainer acceptance. For #323, the maintainer must decide whether unknown satisfies each platform requirement or designate a read-only provider source. Keep the accepted consumer pin until acceptance. [Verification matrix](verification-matrix.md#sandbox-inspection-candidates)
+
 ## Current delivery checkpoint
 
 The baseline gate repair shipped in #302. The later dependency regression was repaired in [#319](https://github.com/OpenCoven/coven-agents/pull/319). Scoped owner credentials and inspection shipped in #311, and guarded binding and redacted run evidence shipped in #312. Issues #296, #297, and #298 are complete at the repository contract boundary. Keep the verified merge SHAs in the Castles consumer pins. The contributor setup and Git hook update carries the reviewed changes from #310 and the guide from #305. The account-keyed billing ledger landed in #317 with migrations 0048 and 0049 after runner migration 0047. Issues #225 and #226 are complete at the repository boundary. Production migration remains separately gated. Keep dependency updates in their own qualification lane.
