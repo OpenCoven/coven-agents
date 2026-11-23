@@ -155,6 +155,8 @@ export function hermeticRunnerExecutor(input: {
       };
     },
     executionProvenance: HERMETIC_EXECUTION_PROVENANCE,
+    // This adapter has no provider network or real credential transport.
+    inspectNetworkSafety: async () => ({ kind: "safe" }),
     inspectWorkspaceSafety: async (
       _context,
       _workspace

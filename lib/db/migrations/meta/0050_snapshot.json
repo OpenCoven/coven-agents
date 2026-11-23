@@ -1,5 +1,5 @@
 {
-  "id": "c5b479c9-6162-4b86-8283-b1f1bf24a800",
+  "id": "1748d06c-8f45-4598-8ee2-34d465965a19",
   "prevId": "b7c35ae8-1b7e-453b-b55a-74ec7841e180",
   "version": "7",
   "dialect": "postgresql",
@@ -1075,6 +1075,13 @@
           "primaryKey": false,
           "notNull": true,
           "default": "'unprovisioned'"
+        },
+        "ownerWorkspaceRead": {
+          "name": "ownerWorkspaceRead",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
         },
         "sandboxTrust": {
           "name": "sandboxTrust",
@@ -2539,12 +2546,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
-        },
-        "attemptRef": {
-          "name": "attemptRef",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
         },
         "daytonaAttemptId": {
           "name": "daytonaAttemptId",

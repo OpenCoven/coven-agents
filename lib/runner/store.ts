@@ -209,6 +209,7 @@ function asAgent(row: Record<string, unknown>): RunnerAgentRecord {
     lastRunAt: nullableTimestampColumn(row, "lastRunAt"),
     model: column(row, "model"),
     name: column(row, "name"),
+    ...(row.ownerWorkspaceRead === true ? { ownerWorkspaceRead: true } : {}),
     runtime: column(row, "runtime"),
     sandboxGeneration: column(row, "sandboxGeneration"),
     sandboxLifecycle: column(row, "sandboxLifecycle"),
@@ -788,6 +789,9 @@ function runSnapshot(run: RunnerRunRecord): RunSnapshot {
             generation: run.sandboxBinding.expectedGeneration,
           },
         }
+      : {}),
+    ...(run.executionPermission === "workspace_read"
+      ? { executionPermission: run.executionPermission }
       : {}),
     commandEvidence: run.commandEvidence,
     completedAt: run.completedAt?.toISOString() ?? null,
@@ -5256,7 +5260,6 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           >;
         }
     > => {
-      const executionPermission = input.executionPermission ?? "unrestricted";
       const githubBrokerPolicy = input.githubBrokerPolicy ?? null;
       const teamStepId = input.teamStepId ?? null;
       return database.transaction(async (transaction) => {
@@ -5297,6 +5300,20 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           };
         }
         const sandboxBinding = input.sandboxBinding ?? pinnedBinding;
+        // Re-read policy under the agent lock so admission cannot use stale authority.
+        const executionPermission = input.useOwnerExecutionPolicy
+          ? agent.ownerWorkspaceRead === true
+            ? "workspace_read"
+            : "unrestricted"
+          : (input.executionPermission ?? "unrestricted");
+        const requestHash = input.useOwnerExecutionPolicy
+          ? hashRunRequest(
+              input.agentId,
+              input.task,
+              executionPermission,
+              input.sandboxBinding ?? null
+            )
+          : input.requestHash;
         const existingOperation = await lockedOperationRun(
           transaction,
           input,
@@ -5314,7 +5331,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
           }
           return matchesRunRequest(
             existingOperation,
-            { ...input, sandboxBinding },
+            { ...input, requestHash, sandboxBinding },
             executionPermission
           )
             ? { kind: "duplicate", run: runSnapshot(existingOperation) }
@@ -5476,7 +5493,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
               githubBrokerPolicy,
               id: input.id,
               operationId: input.operationId,
-              requestHash: input.requestHash,
+              requestHash,
               sandboxBinding,
               task: input.task,
               teamStepId,
@@ -5491,7 +5508,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
               ${input.id}, ${input.agentId}, ${principal.tenant},
               ${agentSnapshot.instructions}, ${agentSnapshot.model},
               ${agentSnapshot.runtime}, ${agentSnapshot.workspace},
-              ${input.authVersion}, ${principal.ownerCredentialId ?? null}, ${input.operationId}, ${input.requestHash},
+              ${input.authVersion}, ${principal.ownerCredentialId ?? null}, ${input.operationId}, ${requestHash},
               ${input.task}, ${executionPermission}, ${teamStepId},
               ${sandboxBinding?.expectedSandboxId ?? null},
               ${sandboxBinding?.expectedGeneration ?? null},
@@ -5638,7 +5655,7 @@ export function createRunnerStore(database: RunnerStoreDatabase) {
         }
         return matchesRunRequest(
           run,
-          { ...input, sandboxBinding },
+          { ...input, requestHash, sandboxBinding },
           executionPermission
         )
           ? { kind: "duplicate", run: runSnapshot(run) }

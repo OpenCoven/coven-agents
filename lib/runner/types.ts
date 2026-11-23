@@ -117,6 +117,7 @@ export const DEFAULT_RUNNER_ADMISSION_LIMITS: RunnerAdmissionLimits = {
 };
 
 export type RunnerAgentRecord = {
+  ownerWorkspaceRead?: boolean;
   createdAt: Date;
   daytonaSandboxId: string | null;
   description: string;
@@ -157,7 +158,12 @@ export type RunnerSandboxBinding = Readonly<{
 
 export type RunnerRunRecord = Omit<
   RunSnapshot,
-  "apiVersion" | "completedAt" | "createdAt" | "error" | "startedAt"
+  | "apiVersion"
+  | "completedAt"
+  | "createdAt"
+  | "error"
+  | "executionPermission"
+  | "startedAt"
 > & {
   agentInstructions: string;
   agentModel: string;
@@ -253,6 +259,7 @@ export type UpdateRunnerAgentInput = {
 };
 
 export type StartRunnerRunInput = {
+  useOwnerExecutionPolicy?: boolean;
   agentId: string;
   agentSnapshot?: RunnerAgentExecutionSnapshot;
   admission?: RunnerAdmissionLimits;

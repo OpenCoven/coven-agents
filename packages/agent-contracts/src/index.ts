@@ -584,6 +584,7 @@ export const runSnapshotSchema = z
       })
       .strict()
       .optional(),
+    executionPermission: z.literal("workspace_read").optional(),
     fileEvidence: z
       .array(fileEvidenceSchema)
       .max(AGENT_RUNNER_LIMITS.maxFileOperations),
