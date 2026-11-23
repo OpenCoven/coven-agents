@@ -297,7 +297,11 @@ function asyncCommand(
         ]
       : []),
     ...(authName === "CLAUDE_CODE_OAUTH_TOKEN"
-      ? [`export CLAUDE_CONFIG_DIR=${shellQuote(configDirectory)}`]
+      ? [
+          `export CLAUDE_CONFIG_DIR=${shellQuote(configDirectory)}`,
+          "export IS_SANDBOX=1",
+          "export DISABLE_AUTOUPDATER=1",
+        ]
       : []),
     ...(authName === "COVEN_CODEX_AUTH_JSON"
       ? [

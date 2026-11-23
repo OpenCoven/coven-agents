@@ -11,6 +11,10 @@ import {
   DaytonaTimeoutError,
   type Sandbox,
 } from "@daytona/sdk";
+import {
+  decodeRunnerAttemptRedactionSecrets,
+  encodeRunnerAttemptRedactionSecrets,
+} from "../redaction-secrets";
 import type { RunnerDispatchAuthority } from "../types";
 import {
   daytonaRunCredentialPath,
@@ -2973,4 +2977,39 @@ test("Claude launch declares its deliberately authorized sandbox and disables na
     double.calls.find((call) => call.kind === "start")?.command ?? "";
   assert.ok(launch.includes("export IS_SANDBOX=1"));
   assert.ok(launch.includes("export DISABLE_AUTOUPDATER=1"));
+});
+
+test("Codex pretty auth stages only covered tokens through actual persistence codec", async () => {
+  const tokens = {
+    access_token: "a".repeat(1600),
+    account_id: "synthetic-account",
+    id_token: "b".repeat(1600),
+    refresh_token: "c".repeat(1600),
+  };
+  const credential = JSON.stringify(
+    { auth_mode: "chatgpt", extra_private: "must-not-stage", tokens },
+    null,
+    2
+  );
+  const double = processDouble();
+  let persisted: readonly string[] = [];
+  await startDaytonaProcess({
+    ...startInput(double.sandbox),
+    credential: { credential },
+    persistAttemptRedaction: async ({ secrets }) => {
+      persisted = decodeRunnerAttemptRedactionSecrets(
+        encodeRunnerAttemptRedactionSecrets(secrets)
+      );
+      return true;
+    },
+    runtime: "codex",
+  });
+  assert.deepEqual([...persisted].sort(), Object.values(tokens).sort());
+  const stage = double.calls.find(
+    (call) => call.kind === "command" && call.env
+  );
+  const staged = JSON.parse(stage?.env?.COVEN_CODEX_AUTH_JSON ?? "null");
+  assert.deepEqual(staged.tokens, tokens);
+  assert.equal(staged.extra_private, undefined);
+  assert.ok(double.calls.some((call) => call.kind === "start"));
 });

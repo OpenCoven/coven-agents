@@ -113,3 +113,19 @@ test("Codex credential writes refuse invalid or unredactable sign-in before stor
     }
   }
 });
+
+test("removing Codex auth does not require the old sign-in but still requires subscriber authority", () => {
+  const removal = { credential: "placeholder-not-stored", harnessId: "codex" };
+  assert.equal(
+    decideCredentialWrite(subscriber(), removal, "remove").kind,
+    "allowed"
+  );
+  assert.equal(
+    decideCredentialWrite(null, removal, "remove").kind,
+    "unauthorized"
+  );
+  assert.equal(
+    decideCredentialWrite(toSession(null), removal, "remove").kind,
+    "forbidden"
+  );
+});
