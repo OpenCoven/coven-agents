@@ -2962,3 +2962,15 @@ for (const harness of ["codex", "claude"] as const) {
     );
   });
 }
+
+test("Claude launch declares its deliberately authorized sandbox and disables native updates", async () => {
+  const double = processDouble();
+  await startDaytonaProcess({
+    ...startInput(double.sandbox),
+    runtime: "claude",
+  });
+  const launch =
+    double.calls.find((call) => call.kind === "start")?.command ?? "";
+  assert.ok(launch.includes("export IS_SANDBOX=1"));
+  assert.ok(launch.includes("export DISABLE_AUTOUPDATER=1"));
+});
