@@ -118,7 +118,13 @@ function PureMultimodalInput({
   useEffect(() => {
     if (!hasAutoFocused.current && width) {
       const timer = setTimeout(() => {
-        textareaRef.current?.focus();
+        // Respect a control the user focused while the composer was starting.
+        if (
+          !document.activeElement ||
+          document.activeElement === document.body
+        ) {
+          textareaRef.current?.focus();
+        }
         hasAutoFocused.current = true;
       }, 100);
       return () => clearTimeout(timer);
