@@ -26,6 +26,38 @@ function isAuthJsSessionRead(request: Request): boolean {
   return request.headers()["content-type"] === "application/json";
 }
 
+async function controlCredentialRecoverySessionReads(page: Page) {
+  let holding = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const delivery = Promise.withResolvers<void>();
+  const release = () => {
+    holding = false;
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+    delivery.resolve();
+  };
+  await page.route("**/api/auth/session", async (route) => {
+    const backgroundRead = isAuthJsSessionRead(route.request());
+    if (backgroundRead && holding) {
+      await delivery.promise;
+    }
+    const response = await route.fetch();
+    if (backgroundRead && holding) {
+      await delivery.promise;
+    }
+    await route.fulfill({ response });
+  });
+  return {
+    hold() {
+      holding = true;
+      // Isolate the credential refusal from background verification briefly.
+      timer = setTimeout(release, 5000);
+    },
+    release,
+  };
+}
+
 async function controlSessionReads(page: Page) {
   const network = {
     authJsFailures: 0,
@@ -203,44 +235,62 @@ test.describe("hermetic session recovery", () => {
       page,
     }) => {
       const account = HERMETIC_USERS.subscriberA;
-      await page
-        .context()
-        .addCookies(await sessionCookies("subscriber", account));
-      await page.goto(surface === "account" ? "/account" : "/agents");
-      if (surface === "console") {
-        await page
-          .getByRole("button", { name: "Account and settings" })
-          .click();
-      }
-      await credentialField(page).fill("hermetic-never-saved-token");
-      accountCommand("account", ["revoke-sessions", account.email]);
-      const refusal = page.waitForResponse(
+      const sessionReads = await controlCredentialRecoverySessionReads(page);
+      const initialCredentials = page.waitForResponse(
         (response) =>
           response.url().endsWith("/api/credentials") &&
-          response.request().method() === "POST"
+          response.request().method() === "GET"
       );
-      if (surface === "account") {
+      try {
+        await page
+          .context()
+          .addCookies(await sessionCookies("subscriber", account));
+        await page.goto(surface === "account" ? "/account" : "/agents");
+        if (surface === "console") {
+          await page
+            .getByRole("button", { name: "Account and settings" })
+            .click();
+        }
+        const initialResponse = await initialCredentials;
+        expect(initialResponse.status()).toBe(200);
+        await initialResponse.finished();
+        if (surface === "account") {
+          await expect(
+            page.getByLabel("Codex CLI", { exact: true })
+          ).toBeVisible();
+          await expect(
+            page.getByLabel("Claude Code", { exact: true })
+          ).toBeVisible();
+        }
+        await credentialField(page).fill("hermetic-never-saved-token");
+        const refusal = page.waitForResponse(
+          (response) =>
+            response.url().endsWith("/api/credentials") &&
+            response.request().method() === "POST"
+        );
+        sessionReads.hold();
+        accountCommand("account", ["revoke-sessions", account.email]);
+        const [refusalResponse] = await Promise.all([
+          refusal,
+          page
+            .getByRole("button", {
+              exact: true,
+              name:
+                surface === "account"
+                  ? "Save GitHub Copilot CLI credential"
+                  : "Save",
+            })
+            .click(),
+        ]);
+        expect(refusalResponse.status()).toBe(401);
+        sessionReads.release();
+        await expectRecovered(page);
         await expect(
-          page.getByLabel("Codex CLI", { exact: true })
-        ).toBeVisible();
-        await expect(
-          page.getByLabel("Claude Code", { exact: true })
-        ).toBeVisible();
+          page.locator('input[value="hermetic-never-saved-token"]')
+        ).toHaveCount(0);
+      } finally {
+        sessionReads.release();
       }
-      await page
-        .getByRole("button", {
-          exact: true,
-          name:
-            surface === "account"
-              ? "Save GitHub Copilot CLI credential"
-              : "Save",
-        })
-        .click();
-      expect((await refusal).status()).toBe(401);
-      await expectRecovered(page);
-      await expect(
-        page.locator('input[value="hermetic-never-saved-token"]')
-      ).toHaveCount(0);
     });
   }
 
