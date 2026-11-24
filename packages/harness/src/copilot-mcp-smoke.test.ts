@@ -17,11 +17,14 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { normalizeEvent } from "./events";
 import {
   buildInvocation,
   COVEN_GITHUB_CAPABILITY_ENV_REFERENCE,
   COVEN_GITHUB_TOOL_URL_ENV_REFERENCE,
 } from "./invocation";
+import { harnessSpec } from "./registry";
+import { summarizeRun } from "./summary";
 
 // This is the local smoke dependency, not the separately pinned runtime image.
 const smokeManifest = JSON.parse(
@@ -50,10 +53,11 @@ function platformPackage(): string {
 }
 
 async function pinnedCopilotApp(
-  expectedVersion = PINNED_COPILOT_VERSION
+  expectedVersion = PINNED_COPILOT_VERSION,
+  packageName = "@github/copilot"
 ): Promise<string> {
   const require = createRequire(import.meta.url);
-  const packageJson = require.resolve("@github/copilot/package.json");
+  const packageJson = require.resolve(`${packageName}/package.json`);
   const packageValue = JSON.parse(await readFile(packageJson, "utf8")) as {
     version: string;
   };
@@ -114,6 +118,7 @@ interface SmokeFixture {
     env?: Record<string, string>
   ) => Promise<void>;
   stderr: string;
+  stdout: string;
   workspace: string;
 }
 
@@ -121,7 +126,8 @@ type ResolveSmokeApp = (fixture: SmokeFixture) => Promise<string>;
 
 async function withCopilotSmoke<T>(
   run: (fixture: SmokeFixture) => Promise<T>,
-  resolveApp: ResolveSmokeApp = () => pinnedCopilotApp()
+  resolveApp: ResolveSmokeApp = () => pinnedCopilotApp(),
+  reply: (fixture: SmokeFixture) => string = providerResponse
 ): Promise<T> {
   const requests: Record<string, unknown>[] = [];
   const provider = createServer((request, response) => {
@@ -132,8 +138,48 @@ async function withCopilotSmoke<T>(
     });
     request.on("end", () => {
       requests.push(JSON.parse(body) as Record<string, unknown>);
-      response.writeHead(200, { "content-type": "application/json" });
-      response.end(providerResponse());
+      const payload = reply(fixture);
+      if (requests.at(-1)?.stream === true) {
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        const parsed = JSON.parse(payload);
+        const emit = (type: string, data: Record<string, unknown>) =>
+          response.write(
+            `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`
+          );
+        emit("response.created", {
+          response: { ...parsed, output: [], status: "in_progress" },
+        });
+        parsed.output.forEach(
+          (item: Record<string, unknown>, output_index: number) => {
+            emit("response.output_item.added", {
+              item: {
+                ...item,
+                status: "in_progress",
+                ...(item.type === "function_call" ? { arguments: "" } : {}),
+              },
+              output_index,
+            });
+            if (item.type === "function_call") {
+              emit("response.function_call_arguments.delta", {
+                delta: item.arguments,
+                item_id: item.id,
+                output_index,
+              });
+              emit("response.function_call_arguments.done", {
+                arguments: item.arguments,
+                item_id: item.id,
+                output_index,
+              });
+            }
+            emit("response.output_item.done", { item, output_index });
+          }
+        );
+        emit("response.completed", { response: parsed });
+        response.end();
+      } else {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(payload);
+      }
     });
   });
   const scratch = await mkdtemp(
@@ -173,9 +219,13 @@ async function withCopilotSmoke<T>(
           XDG_CACHE_HOME: join(home, ".cache"),
           XDG_CONFIG_HOME: join(home, ".config"),
         },
-        stdio: ["ignore", "ignore", "pipe"],
+        stdio: ["ignore", "pipe", "pipe"],
       });
       fixture.child = child;
+      child.stdout?.setEncoding("utf8");
+      child.stdout?.on("data", (chunk: string) => {
+        fixture.stdout += chunk;
+      });
       child.stderr?.setEncoding("utf8");
       child.stderr?.on("data", (chunk: string) => {
         fixture.stderr += chunk;
@@ -186,6 +236,7 @@ async function withCopilotSmoke<T>(
       await once(child, "spawn");
     },
     stderr: "",
+    stdout: "",
     workspace: join(scratch, "workspace"),
   };
 
@@ -291,10 +342,150 @@ async function restrictedVisibleTools(
   }, resolveApp);
 }
 
+for (const runtime of ["development", "snapshot"] as const) {
+  test(`read-only Copilot ${runtime} handles denied file and command requests without effects`, {
+    timeout: 60_000,
+  }, async () => {
+    await withCopilotSmoke(
+      async (fixture) => {
+        const inside = join(fixture.workspace, "inside.txt");
+        const outside = join(fixture.scratch, "outside.txt");
+        const marker = join(fixture.workspace, "command-ran");
+        await Promise.all(
+          [inside, outside].map((path) => writeFile(path, "original"))
+        );
+        const invocation = buildInvocation({
+          attemptDir: fixture.attemptDir,
+          configDir: join(fixture.scratch, "copilot-home"),
+          cwd: fixture.workspace,
+          harness: "copilot",
+          instructions: "Read the indicated file.",
+          model: "gpt-5.4",
+          permissionMode: "workspace_read",
+          stream: true,
+          task: "Inspect inside.txt.",
+        });
+        await fixture.startCli(invocation.args);
+        await waitForProvider(fixture);
+        const deadline = Date.now() + 20_000;
+        while (fixture.requests.length < 2) {
+          assert.ok(Date.now() < deadline, "missing tool results");
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        const input = fixture.requests[1].input as {
+          type: string;
+          call_id?: string;
+          output?: string;
+        }[];
+        const outputs = new Map(
+          input
+            .filter((item) => item.type === "function_call_output")
+            .map((item) => [item.call_id, item.output])
+        );
+        assert.equal(
+          outputs.get("read"),
+          runtime === "snapshot" ? "1. original" : "original"
+        );
+        for (const id of ["change_inside", "change_outside", "command"]) {
+          assert.match(outputs.get(id) ?? "", /does not exist/u);
+        }
+        assert.deepEqual(
+          await Promise.all(
+            [inside, outside].map((path) => readFile(path, "utf8"))
+          ),
+          ["original", "original"]
+        );
+        await assert.rejects(stat(marker), { code: "ENOENT" });
+        assert.ok(fixture.child);
+        if (fixture.child.exitCode === null) {
+          await once(fixture.child, "close");
+        }
+        assert.equal(fixture.child.exitCode, 0);
+        assert.equal(fixture.child.signalCode, null);
+        const events = fixture.stdout
+          .trim()
+          .split("\n")
+          .flatMap((line) =>
+            normalizeEvent("copilot", line, new Date(0).toISOString())
+          );
+        const summary = summarizeRun(events);
+        assert.equal(summary.status, "completed");
+        assert.ok(
+          events.some(
+            (event) => event.kind === "finished" && event.status === "completed"
+          )
+        );
+        assert.deepEqual(summary.fileOperations, []);
+        assert.equal(
+          summary.toolCalls.some(
+            (call) => /bash|shell|apply_patch/u.test(call.tool) && call.success
+          ),
+          false
+        );
+        assert.ok(
+          summary.toolCalls.some((call) => call.tool === "view" && call.success)
+        );
+      },
+      runtime === "snapshot"
+        ? () =>
+            pinnedCopilotApp(
+              harnessSpec("copilot")?.installVersion ?? "missing-runtime-pin",
+              "copilot-snapshot"
+            )
+        : undefined,
+      (fixture) => {
+        if (fixture.requests.length > 1) {
+          return providerResponse();
+        }
+        const response = JSON.parse(providerResponse());
+        const inside = join(fixture.workspace, "inside.txt");
+        const outside = join(fixture.scratch, "outside.txt");
+        response.output = [
+          ["read", "view", { path: inside }],
+          [
+            "change_inside",
+            "apply_patch",
+            {
+              patch: `*** Begin Patch\n*** Update File: ${inside}\n@@\n-original\n+changed\n*** End Patch`,
+            },
+          ],
+          [
+            "change_outside",
+            "apply_patch",
+            {
+              patch: `*** Begin Patch\n*** Update File: ${outside}\n@@\n-original\n+changed\n*** End Patch`,
+            },
+          ],
+          [
+            "command",
+            "bash",
+            {
+              command: "echo executed > command-ran",
+              description: "fixture marker",
+            },
+          ],
+        ].map(([id, name, args]) => ({
+          arguments: JSON.stringify(args),
+          call_id: id,
+          id: `fc_${id}`,
+          name,
+          status: "completed",
+          type: "function_call",
+        }));
+        return JSON.stringify(response);
+      }
+    );
+  });
+}
+
 test("Copilot smoke version matches the repository's exact dependency pin", async () => {
   const manifest = JSON.parse(
     await readFile(new URL("../../../package.json", import.meta.url), "utf8")
   ) as { devDependencies: Record<string, string> };
+  assert.equal(
+    manifest.devDependencies["copilot-snapshot"],
+    `npm:@github/copilot@${harnessSpec("copilot")?.installVersion}`
+  );
   assert.match(manifest.devDependencies["@github/copilot"], /^\d+\.\d+\.\d+$/u);
   assert.equal(
     PINNED_COPILOT_VERSION,

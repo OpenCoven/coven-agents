@@ -62,6 +62,7 @@ export const runEventSchema = z.discriminatedUnion("kind", [
   z.object({
     at: runEventTimestampSchema,
     callId: z.string(),
+    executionDenied: z.literal(true).optional(),
     kind: z.literal("tool-end"),
     success: z.boolean(),
     summary: z.string(),

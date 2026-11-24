@@ -1332,6 +1332,11 @@ export function createRunnerHttpHandlers(
                 return runnerErrorResponse(dependencies, "busy", {
                   message: "Daytona execution is busy. Try again later.",
                 });
+              case "sandbox_trust_conflict":
+                return runnerErrorResponse(
+                  dependencies,
+                  "sandbox_trust_conflict"
+                );
               case "lifecycle_conflict":
                 return runnerErrorResponse(
                   dependencies,

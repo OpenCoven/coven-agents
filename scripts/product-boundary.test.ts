@@ -357,6 +357,7 @@ const developmentDependencies = [
   "@types/react-dom",
   "@types/sanitize-html",
   "babel-plugin-react-compiler",
+  "copilot-snapshot",
   "drizzle-kit",
   "husky",
   "lint-staged",

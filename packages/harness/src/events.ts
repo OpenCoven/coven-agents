@@ -75,6 +75,21 @@ function optionalRecord(
   return asRecord(value) ?? malformed();
 }
 
+function toolArguments(
+  data: Record<string, unknown>
+): Record<string, unknown> | null {
+  if (typeof data.arguments !== "string") {
+    return optionalRecord(data, "arguments") ?? null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data.arguments);
+  } catch {
+    return malformed();
+  }
+  return asRecord(parsed) ?? malformed();
+}
+
 function eventData(envelope: Record<string, unknown>): Record<string, unknown> {
   return optionalRecord(envelope, "data") ?? {};
 }
@@ -188,7 +203,7 @@ export function normalizeCopilotEvent(
               text,
             },
           ]
-        : data.content === undefined
+        : data.content === undefined || data.content === ""
           ? []
           : malformed();
     }
@@ -204,10 +219,7 @@ export function normalizeCopilotEvent(
           at,
           callId,
           kind: "tool-start",
-          summary: summarizeArguments(
-            tool,
-            optionalRecord(data, "arguments") ?? null
-          ),
+          summary: summarizeArguments(tool, toolArguments(data)),
           tool,
         },
       ];
@@ -221,6 +233,12 @@ export function normalizeCopilotEvent(
       const result = optionalRecord(data, "result");
       const summary = result ? (optionalString(result, "content") ?? "") : "";
       const { success } = data;
+      const error = optionalRecord(data, "error");
+      const executionDenied =
+        success === false &&
+        error?.code === "failure" &&
+        typeof error.message === "string" &&
+        /^Tool '[^']+' does not exist\.$/u.test(error.message);
       if (success !== undefined && typeof success !== "boolean") {
         return malformed();
       }
@@ -229,6 +247,7 @@ export function normalizeCopilotEvent(
           at,
           callId,
           kind: "tool-end",
+          ...(executionDenied ? { executionDenied: true as const } : {}),
           success: success !== false,
           summary: clamp(summary),
         },

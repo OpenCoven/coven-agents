@@ -27,6 +27,7 @@ export async function runDatabaseVerification(
           "lib/db/minute-pack-postgres.test.ts",
           "lib/db/owner-credential-postgres.test.ts",
           "lib/db/owner-credential-http-postgres.test.ts",
+          "lib/db/owner-workspace-read-postgres.test.ts",
           "lib/db/run-reservation-postgres.test.ts",
           "lib/db/sandbox-binding-postgres.test.ts",
           "lib/db/stripe-reconciliation-postgres.test.ts",
