@@ -4,19 +4,36 @@
 
 The baseline gate repair shipped in #302. The later dependency regression was repaired in [#319](https://github.com/OpenCoven/coven-agents/pull/319). Scoped owner credentials and inspection shipped in #311, and guarded binding and redacted run evidence shipped in #312. Issues #296, #297, and #298 are complete at the repository contract boundary. Keep the verified merge SHAs in the Castles consumer pins. The contributor setup and Git hook update carries the reviewed changes from #310 and the guide from #305. The account-keyed billing ledger landed in #317 with migrations 0048 and 0049 after runner migration 0047. Issues #225 and #226 are complete at the repository boundary. Production migration remains separately gated. Keep dependency updates in their own qualification lane.
 
-- #299 is assigned to BunsDev. Next, carry server-enforced read-only permission through owner admission and prove a permitted read and denied mutation in the recording executor.
+- #299 has a separately reviewed read-only candidate in #320. Source, real pinned-CLI loopback and disposable-database proofs pass; current browser certification and post-merge acceptance are still required. Do not restart implementation or infer a live egress/installed-version result.
 - #300 is open. The maintainer selected snapshot verification only. The lifecycle owner still needs to expose and qualify the versioned read-only result, including the observed harness version, and verify the exact pin and mismatch refusal. [Bootstrap decision](https://github.com/OpenCoven/coven-agents/issues/300#issuecomment-6791981973) · [Castles acceptance](https://github.com/OpenCoven/coven-castles/issues/3)
 
 The web subscriber release still requires candidate-specific evidence. Track tenant and credential isolation in [#47](https://github.com/OpenCoven/coven-agents/issues/47), admission and revocation in [#49](https://github.com/OpenCoven/coven-agents/issues/49), live provider containment in [#262](https://github.com/OpenCoven/coven-agents/issues/262), and paid sales in [#263](https://github.com/OpenCoven/coven-agents/issues/263). The [subscriber rollout checklist](https://github.com/OpenCoven/coven-agents/issues/51) ties these results to one release candidate.
 
 This sequence describes public outcome ordering. Check the delivery issues for task status and acceptance criteria.
 
+## Next actions and owners — 2026-11-23
+
+The starting delivery inventory was 11 open issues and 12 open PRs. GitHub remains authoritative for current counts, assignments and acceptance. This board records the existing handoff roles; it does not assert operator availability or mutate assignments. Complete independent work when one row is blocked. No issue closes by age, merge alone or a reduced acceptance checklist.
+
+| Order | Issue | Coordination owner | Missing proof and next action | Unblock condition |
+| --- | --- | --- | --- | --- |
+| 1 | [#299](https://github.com/OpenCoven/coven-agents/issues/299) | BunsDev, delivery maintainer | Resolve the current required browser readiness gate without changing its assertions/deadlines, land the reviewed owner-read source and replay its acceptance on main | Exact landed policy/hash, denied-action and trust-refusal evidence plus all applicable gates |
+| 2 | [#326](https://github.com/OpenCoven/coven-agents/issues/326) | PR #327 implementer | Confirm bounded branch integration or apply the reviewed 0051 candidate; retain both PostgreSQL suites and backfill, exclude #325 | Qualified migration order and both attempt-reference/concurrent-denial acceptance rows on landed main |
+| 3 | [#328](https://github.com/OpenCoven/coven-agents/issues/328) | BunsDev, CLI delivery maintainer | Integrate corrected CLI credential custody and launch prerequisites with owner policy, then run final-head gates | Source acceptance for unrestricted-only CLI execution; target installation/provisioning remains separate |
+| 4 | [#322](https://github.com/OpenCoven/coven-agents/issues/322) | Castles #2 steward | Review and accept the exact producer/consumer pair after producer landing; coordinate any consumer rebase without changing accepted pins prematurely | Maintainer/steward acceptance and retained strict-default, nullable-metadata compatibility evidence |
+| 5 | [#323](https://github.com/OpenCoven/coven-agents/issues/323) | BunsDev, platform decision owner | Decide each field independently: explicit unknown accepted, or an authorized read-only provider observation required | Recorded decision; when observation is required, preserved values, omission/mismatch handling and consumer agreement |
+| 6 | [#300](https://github.com/OpenCoven/coven-agents/issues/300) | BunsDev, lifecycle-owner coordinator | Assign the trusted read-only installed-version observation and agree manifest comparison/digest with Castles #3 | Observed exact-bound version, zero writes/lifecycle calls, repeated-read and mismatch/unavailable/foreign refusal evidence |
+| 7 | [#51](https://github.com/OpenCoven/coven-agents/issues/51) | BunsDev, release coordinator | Obtain the sanitized production callback rejection stage and endpoint/database/role match status, then verify legitimate OAuth completion/reload and select the candidate/audience/window | Named operator and approved candidate-specific release receipt; no inferred sign-in success from health or initiation |
+| 8 | [#262](https://github.com/OpenCoven/coven-agents/issues/262) | Daytona lifecycle operator | Qualify the selected profile's containment, exact credential cleanup, ambiguity/reset behavior and safe subsequent execution | Sanitized real-provider matrix in an explicitly approved window; diagnostics and fixture passes alone are insufficient |
+| 9 | [#47](https://github.com/OpenCoven/coven-agents/issues/47) | BunsDev, tenant-isolation coordinator | Run the legitimate two-tenant account/credential/run/event/SSE/deletion refusals on the selected deployment and consume #262's cleanup/egress proof | Same-candidate tenant and credential isolation receipt with supported inbound/outbound posture |
+| 10 | [#49](https://github.com/OpenCoven/coven-agents/issues/49) | BunsDev, admission coordinator | Verify real current-version access, revocation, duplicate accounting and exact settlement; #325 remains a separate unmerged pilot proposal | Approved audience and legitimate-account window, access/allowance evidence and conditional billing disposition |
+| 11 | [#263](https://github.com/OpenCoven/coven-agents/issues/263) | Billing/release operator | Refresh Price/mode/Portal/jurisdiction and existing-obligation evidence, then execute test-mode Checkout through signed webhook, settlement and Portal | Complete dated billing receipt before paid sales; a complimentary pilot keeps sales off and requires separate approval |
+
+Other open PRs keep their separate lanes. #325 does not select a pilot audience through this delivery stack. #279's opt-in auth activation, #291's model availability/UI qualification and #329/#331–#333 dependency/security changes require their own exact-head review; an SDK major update invalidates earlier SDK-specific claims until requalified. #334's two inspection sections were handed off for this reconciliation; its later API-example contribution remains separately owned pending coordination. Do not close or merge unrelated PRs simply because this stack lands.
+
 ## Authority reminder
 
-Coven Agents owns product accounts, subscriptions, encrypted tenant harness
-credentials, Daytona execution, PostgreSQL run state, and bounded evidence.
-Other OpenCoven authorities remain external and are consumed through versioned
-references and adapters.
+Coven Agents owns product accounts, subscriptions, encrypted tenant harness credentials, Daytona execution, PostgreSQL run state, and bounded evidence. Other OpenCoven authorities remain external and are consumed through versioned references and adapters.
 
 ## Promotion model
 
@@ -66,25 +83,20 @@ An outcome advances only when:
 
 - Keep incident, key rotation, cutover, and release runbooks current.
 - Preserve local gate evidence because remote checks are intentionally absent.
-- Require an explicit approval record for production promotion or destructive
-  provider operations.
+- Require an explicit approval record for production promotion or destructive provider operations.
 
 ## Wave 2
 
 ### Execution safety
 
 - Complete and verify least-privilege outbound policy.
-- Prove tenant isolation across agent, run, event, credential, and sandbox
-  access.
-- Exercise capacity degradation without exposing credentials or provider
-  internals.
+- Prove tenant isolation across agent, run, event, credential, and sandbox access.
+- Exercise capacity degradation without exposing credentials or provider internals.
 
 ### Contracts and capabilities
 
-- Add harness support only with deterministic event translation and conformance
-  evidence.
-- Migrate the generic backend discriminator through a versioned dual-read,
-  single-write process when the contract changes.
+- Add harness support only with deterministic event translation and conformance evidence.
+- Migrate the generic backend discriminator through a versioned dual-read, single-write process when the contract changes.
 
 ### Runner lifecycle
 
@@ -94,33 +106,27 @@ An outcome advances only when:
 
 ### Explainability
 
-- Make queue, admission, cancellation, cleanup, and recovery states visible
-  without exposing tenant or credential data.
+- Make queue, admission, cancellation, cleanup, and recovery states visible without exposing tenant or credential data.
 
 ### Durability
 
-- Exercise restart and partial-write recovery against release-equivalent
-  PostgreSQL.
+- Exercise restart and partial-write recovery against release-equivalent PostgreSQL.
 - Prove exact attempt fencing and duplicate suppression.
 
 ## Later outcome envelopes
 
 ### Certify
 
-Retain production-equivalent security, lifecycle, rollback, and recovery
-evidence with owner approval.
+Retain production-equivalent security, lifecycle, rollback, and recovery evidence with owner approval.
 
 ### Platform
 
-Tune fairness, capacity, observability, and provider cost controls from measured
-behavior.
+Tune fairness, capacity, observability, and provider cost controls from measured behavior.
 
 ### Product data
 
-Complete tenant-scoped retention, export, deletion, and audit-safe archive
-behavior.
+Complete tenant-scoped retention, export, deletion, and audit-safe archive behavior.
 
 ### Operations
 
-Rehearse incident response, credential rotation, provider resource inventory,
-and rollback on a documented cadence.
+Rehearse incident response, credential rotation, provider resource inventory, and rollback on a documented cadence.

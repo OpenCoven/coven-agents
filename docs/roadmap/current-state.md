@@ -1,25 +1,25 @@
 # Current repository state
 
-- Snapshot date: 2026-09-09
-- Application baseline: `93b4784b8622cf371e63347f034df3cdd8aac70d`
-- Evidence class: verified repository and local contract evidence, retained
-  infrastructure cutover and Production-config operator evidence, a public
-  exact-build guest replay, a non-promoted exact latest-main production
-  candidate, and an exact production Daytona snapshot receipt
+- Snapshot date: 2026-11-23
+- Repository baseline: `0696af127207fb82cce734cd8c4ffa437d6f3502`
+- Deployment and live-provider state: not requalified by this repository snapshot
+- Evidence class: verified repository and local contract evidence, retained infrastructure cutover and Production-config operator evidence, a public exact-build guest replay, a non-promoted exact latest-main production candidate, and an exact production Daytona snapshot receipt
 
-This snapshot includes merged P0 repository certification through PR #183, the
-replay-timeline correction in PR #184, the public exact-build guest replay
-recorded by PR #185, unreachable UI removal in PR #186, retained exact-preview
-and hermetic receipts in PR #187, the subscriber launch runbook in PR #188,
-the fenced Daytona resource-repair path in PR #198, and definitive provider
-rejection handling in PR #200, the sanitized blocker receipt in PR #201, and
-the coordinated team console in PR #199. PR #266 added actionable bounded
-snapshot verification failures, and PR #267 added the exact protected snapshot
-receipt and shared diagnostic deadline.
-It distinguishes those completed boundaries and the successful
-Production-config operator checks from pending persistent Daytona lifecycle,
-subscriber certification, observation-window, and full product release
-approval.
+The historical infrastructure receipts summarized below include merged P0 repository certification through PR #183, the replay-timeline correction in PR #184, the public exact-build guest replay recorded by PR #185, unreachable UI removal in PR #186, retained exact-preview and hermetic receipts in PR #187, the subscriber launch runbook in PR #188, the fenced Daytona resource-repair path in PR #198, and definitive provider rejection handling in PR #200, the sanitized blocker receipt in PR #201, and the coordinated team console in PR #199. PR #266 added actionable bounded snapshot verification failures, and PR #267 added the exact protected snapshot receipt and shared diagnostic deadline. It distinguishes those completed boundaries and the successful Production-config operator checks from pending persistent Daytona lifecycle, subscriber certification, observation-window, and full product release approval.
+
+## Current delivery and acceptance
+
+Main includes scoped owner credentials and inspection from #311, guarded binding from #312, contributor signing and hook safeguards, the account-keyed pack ledger from #317/#318, gate repair from #319 and Beads retirement from #321. Issues #296, #297, #298, #225 and #226 are closed at their repository-contract boundaries. Their historical receipts do not certify a later deployment or a live subscriber journey.
+
+The owner-read, public attempt-reference, Codex/Claude CLI and detailed-inspection changes remain separate unmerged candidates. The current review and exact-head evidence are recorded in [#320](https://github.com/OpenCoven/coven-agents/pull/320), [#327](https://github.com/OpenCoven/coven-agents/pull/327), [#330](https://github.com/OpenCoven/coven-agents/pull/330) and [#324](https://github.com/OpenCoven/coven-agents/pull/324). The CLI review found and corrected a real auth.json persistence defect; the correction stages only supported fields and validates individual private values against the unchanged codec. A prior candidate's passing full suite is not evidence for a later head.
+
+Fresh owner-read qualification passed hygiene, lint, typecheck, build, 3,108 unit cases with 13 conditional skips, and 36 disposable PostgreSQL cases with no skips. The current normal hermetic browser gate is red on first-chat readiness. Separate unchanged-main and candidate runs both failed before usable document/assets within the original deadlines. Cache and font diagnostics are investigative only; no deadline, assertion or production guard was weakened. These results block promotion and are not release evidence.
+
+The shared root checkout contains other workers' retained worktrees. Isolated task-clone hygiene does not certify global workspace cleanup; no unrelated branch, worktree or evidence was deleted. Actions and Git-triggered deployments remain disabled. Production OAuth completion, tenant A/B isolation, provider containment/reuse and paid billing remain unverified for a single current release candidate. Preserve the issue-specific owner handoffs rather than replacing them with local test results.
+
+## Sandbox inspection as of November 23, 2026
+
+The merged v1 inspection response supports the default caller. It folds missing TTL and attachment metadata into booleans or a volume count. Producer PR #324 and Castles PR #21 propose an opt-in detail block that preserves unknown values. Both PRs are open, and #21 is stacked on Castles #18. The accepted Castles #2 revision remains `3e6d01539aecf2358c81f4561d856fcd89ef4413`. See the [verification matrix](verification-matrix.md#sandbox-inspection-candidates) for the tested pair, platform limitation and outstanding decisions. [Issue #322](https://github.com/OpenCoven/coven-agents/issues/322) · [Issue #323](https://github.com/OpenCoven/coven-agents/issues/323)
 
 ## Implemented surfaces
 
@@ -44,107 +44,44 @@ approval.
 
 ## Public delivery evidence
 
-- [PR #128](https://github.com/OpenCoven/coven-agents/pull/128) merged as
-  `bd46bece9ea9b33700f3316919c6f035aad7d7d1`.
-- [PR #133](https://github.com/OpenCoven/coven-agents/pull/133) merged as
-  `acc7ca3fa2dd51f496e1900573f239eb8a158ce6`.
-- [PR #134](https://github.com/OpenCoven/coven-agents/pull/134) merged as
-  `1bec409b399651d8a115e4518a0f444e9753a728`.
-- [PR #147](https://github.com/OpenCoven/coven-agents/pull/147) records the
-  completed Daytona infrastructure cutover and retired-provider cleanup.
-- [PR #162](https://github.com/OpenCoven/coven-agents/pull/162) added the
-  deny-only Vercel Git deployment control.
-- [PR #171](https://github.com/OpenCoven/coven-agents/pull/171) added
-  tenant-fenced skill, team, approval, and persistence foundations.
-- [PR #173](https://github.com/OpenCoven/coven-agents/pull/173) and
-  [PR #176](https://github.com/OpenCoven/coven-agents/pull/176) added
-  lease-fenced checkout recovery and transactional paid-period authority.
-- [PR #174](https://github.com/OpenCoven/coven-agents/pull/174) added bounded
-  handoffs and durable workspace-only team-run orchestration.
-- [PR #178](https://github.com/OpenCoven/coven-agents/pull/178) added resilient
-  subscriber checkout surfaces, canonical application paths, and owner-bound
-  credential authorization.
-- [PR #179](https://github.com/OpenCoven/coven-agents/pull/179) and
-  [PR #180](https://github.com/OpenCoven/coven-agents/pull/180) added and
-  integrated shared subscription-authority invalidation, strict expiry, and
-  authority-scoped credential lifecycle controls.
-- [PR #183](https://github.com/OpenCoven/coven-agents/pull/183) merged the P0
-  provider-neutral execution, billing, entitlement, credential, replay, and
-  hermetic certification gates as `52fe9f8`.
-- [PR #184](https://github.com/OpenCoven/coven-agents/pull/184) stabilized
-  replay event timelines.
-- [PR #185](https://github.com/OpenCoven/coven-agents/pull/185) recorded the
-  credential-free public exact-build guest replay.
-- [PR #186](https://github.com/OpenCoven/coven-agents/pull/186) removed
-  unreachable UI and orphaned dependency residue.
-- [PR #187](https://github.com/OpenCoven/coven-agents/pull/187) retained the
-  exact-preview and 11-case hermetic PostgreSQL receipts.
-- [PR #188](https://github.com/OpenCoven/coven-agents/pull/188) added the
-  subscriber launch runbook.
-- [PR #198](https://github.com/OpenCoven/coven-agents/pull/198) added exact,
-  durably fenced, stopped-only Daytona resource repair.
-- [PR #200](https://github.com/OpenCoven/coven-agents/pull/200) made
-  definitive provider resize rejections release their exact fences while
-  preserving fail-closed handling for ambiguous outcomes.
-- [PR #201](https://github.com/OpenCoven/coven-agents/pull/201) retained the
-  sanitized Daytona resize-blocker receipt.
-- [PR #266](https://github.com/OpenCoven/coven-agents/pull/266) made snapshot
-  verification failures bounded, redacted, and actionable.
-- [PR #267](https://github.com/OpenCoven/coven-agents/pull/267) added the exact
-  protected snapshot receipt and deployed production verification.
-- [PR #199](https://github.com/OpenCoven/coven-agents/pull/199) added the
-  coordinated team console and its bounded service and browser contracts.
+- [PR #128](https://github.com/OpenCoven/coven-agents/pull/128) merged as `bd46bece9ea9b33700f3316919c6f035aad7d7d1`.
+- [PR #133](https://github.com/OpenCoven/coven-agents/pull/133) merged as `acc7ca3fa2dd51f496e1900573f239eb8a158ce6`.
+- [PR #134](https://github.com/OpenCoven/coven-agents/pull/134) merged as `1bec409b399651d8a115e4518a0f444e9753a728`.
+- [PR #147](https://github.com/OpenCoven/coven-agents/pull/147) records the completed Daytona infrastructure cutover and retired-provider cleanup.
+- [PR #162](https://github.com/OpenCoven/coven-agents/pull/162) added the deny-only Vercel Git deployment control.
+- [PR #171](https://github.com/OpenCoven/coven-agents/pull/171) added tenant-fenced skill, team, approval, and persistence foundations.
+- [PR #173](https://github.com/OpenCoven/coven-agents/pull/173) and [PR #176](https://github.com/OpenCoven/coven-agents/pull/176) added lease-fenced checkout recovery and transactional paid-period authority.
+- [PR #174](https://github.com/OpenCoven/coven-agents/pull/174) added bounded handoffs and durable workspace-only team-run orchestration.
+- [PR #178](https://github.com/OpenCoven/coven-agents/pull/178) added resilient subscriber checkout surfaces, canonical application paths, and owner-bound credential authorization.
+- [PR #179](https://github.com/OpenCoven/coven-agents/pull/179) and [PR #180](https://github.com/OpenCoven/coven-agents/pull/180) added and integrated shared subscription-authority invalidation, strict expiry, and authority-scoped credential lifecycle controls.
+- [PR #183](https://github.com/OpenCoven/coven-agents/pull/183) merged the P0 provider-neutral execution, billing, entitlement, credential, replay, and hermetic certification gates as `52fe9f8`.
+- [PR #184](https://github.com/OpenCoven/coven-agents/pull/184) stabilized replay event timelines.
+- [PR #185](https://github.com/OpenCoven/coven-agents/pull/185) recorded the credential-free public exact-build guest replay.
+- [PR #186](https://github.com/OpenCoven/coven-agents/pull/186) removed unreachable UI and orphaned dependency residue.
+- [PR #187](https://github.com/OpenCoven/coven-agents/pull/187) retained the exact-preview and 11-case hermetic PostgreSQL receipts.
+- [PR #188](https://github.com/OpenCoven/coven-agents/pull/188) added the subscriber launch runbook.
+- [PR #198](https://github.com/OpenCoven/coven-agents/pull/198) added exact, durably fenced, stopped-only Daytona resource repair.
+- [PR #200](https://github.com/OpenCoven/coven-agents/pull/200) made definitive provider resize rejections release their exact fences while preserving fail-closed handling for ambiguous outcomes.
+- [PR #201](https://github.com/OpenCoven/coven-agents/pull/201) retained the sanitized Daytona resize-blocker receipt.
+- [PR #266](https://github.com/OpenCoven/coven-agents/pull/266) made snapshot verification failures bounded, redacted, and actionable.
+- [PR #267](https://github.com/OpenCoven/coven-agents/pull/267) added the exact protected snapshot receipt and deployed production verification.
+- [PR #199](https://github.com/OpenCoven/coven-agents/pull/199) added the coordinated team console and its bounded service and browser contracts.
 
-The application baseline also includes the merged console, billing,
-deployment-policy, branding, runner-reliability, coordinated-team, dependency,
-subscriber-surface, credential-lifecycle, and session-path corrections through
-`93b4784b8622cf371e63347f034df3cdd8aac70d`. The
-[cutover attestation](../operations/daytona-cutover-attestation.md) records
-infrastructure production evidence, exact application-preview results, and the
-[Production-config operator receipt](../operations/p0-production-config-receipt-2026-09-01.json)
-and the
-[resource-repair receipt](../operations/p0-daytona-resource-repair-receipt-2026-09-02.json)
-while preserving the remaining product certification and approval gates. The
-[latest-main candidate receipt](../operations/p0-latest-main-candidate-receipt-2026-09-02.json)
-records an exact production-target build with automatic domain promotion
-disabled, successful health, signed-out product refusal, operator credential
-refusal, and no claim of subscriber or provider lifecycle certification.
+The application baseline also includes the merged console, billing, deployment-policy, branding, runner-reliability, coordinated-team, dependency, subscriber-surface, credential-lifecycle, and session-path corrections through `93b4784b8622cf371e63347f034df3cdd8aac70d`. The [cutover attestation](../operations/daytona-cutover-attestation.md) records infrastructure production evidence, exact application-preview results, and the [Production-config operator receipt](../operations/p0-production-config-receipt-2026-09-01.json) and the [resource-repair receipt](../operations/p0-daytona-resource-repair-receipt-2026-09-02.json) while preserving the remaining product certification and approval gates. The [latest-main candidate receipt](../operations/p0-latest-main-candidate-receipt-2026-09-02.json) records an exact production-target build with automatic domain promotion disabled, successful health, signed-out product refusal, operator credential refusal, and no claim of subscriber or provider lifecycle certification.
 
 ## Known gaps
 
-- No retained full subscriber create, standalone and coordinated run, stream,
-  stop, delete, and cross-tenant production-equivalent artifact exists.
-- Production-config diagnostics, Stripe reconciliation, runner reconciliation,
-  closed-beta refusal, operator credential separation, and the exact production
-  snapshot diagnostic succeeded. Four
-  resources have unique durable mappings and remain stopped with only
-  below-policy CPU, memory, and disk drift. Daytona returned HTTP 404 from the
-  documented resize operation after exact hydration succeeded; all repair
-  fences were released, and no resource was deleted, recreated, or adopted.
-  Non-destructive provider repair or an explicitly approved workspace-
-  preservation migration remains required.
-- The protected containment diagnostic has source coverage for a deliberate
-  detached descendant and synthetic attempt credential cleanup in draft
-  [PR #268](https://github.com/OpenCoven/coven-agents/pull/268). Its exact
-  production receipt and the approved reset or workspace-preserving reuse
-  exercise remain pending.
-- Production Checkout is off. The live recurring Price is `$30/month`, no
-  active Customer Portal configuration exists, and the current restricted key
-  cannot create the approved `$25/month` Price or Portal configuration.
-- Canonical authority consumption remains blocked on a producer envelope with
-  exact base-run, attempt, occurrence, and validity-deadline correlation.
+- No retained full subscriber create, standalone and coordinated run, stream, stop, delete, and cross-tenant production-equivalent artifact exists.
+- Production-config diagnostics, Stripe reconciliation, runner reconciliation, closed-beta refusal, operator credential separation, and the exact production snapshot diagnostic succeeded. Four resources have unique durable mappings and remain stopped with only below-policy CPU, memory, and disk drift. Daytona returned HTTP 404 from the documented resize operation after exact hydration succeeded; all repair fences were released, and no resource was deleted, recreated, or adopted. Non-destructive provider repair or an explicitly approved workspace- preservation migration remains required.
+- The protected containment diagnostic has source coverage for a deliberate detached descendant and synthetic attempt credential cleanup in draft [PR #268](https://github.com/OpenCoven/coven-agents/pull/268). Its exact production receipt and the approved reset or workspace-preserving reuse exercise remain pending.
+- The historical paid-configuration receipt recorded disabled Checkout, a `$30/month` Price, missing Portal configuration and insufficient restricted-key authority for the intended `$25/month` replacement. These are dated observations, not a current configuration claim. The billing operator must refresh mode, Price, Portal and jurisdiction/tax evidence under #263 before enabling sales.
+- Canonical authority consumption remains blocked on a producer envelope with exact base-run, attempt, occurrence, and validity-deadline correlation.
 - Complete outbound policy evidence remains open.
-- Deployed evidence redaction, provider restart recovery, retention, export,
-  and deletion require release-equivalent certification; local cross-surface
-  redaction and hermetic recovery are verified.
-- Checkout, authority refresh, expiry, and owner-bound device authorization
-  have deterministic local and browser coverage but still require retained
-  release-equivalent provider evidence.
+- Deployed evidence redaction, provider restart recovery, retention, export, and deletion require release-equivalent certification; local cross-surface redaction and hermetic recovery are verified.
+- Checkout, authority refresh, expiry, and owner-bound device authorization have deterministic local and browser coverage but still require retained release-equivalent provider evidence.
 - Only GitHub Copilot CLI has implemented event translation.
-- GitHub-capable team steps remain intentionally blocked until approved
-  operations use a bounded production capability broker.
-- GitHub Actions remain intentionally disabled, so local gates are the only
-  repository verification boundary.
+- GitHub-capable team steps remain intentionally blocked until approved operations use a bounded production capability broker.
+- GitHub Actions remain intentionally disabled, so local gates are the only repository verification boundary.
 - Git-triggered Vercel deployments remain intentionally disabled.
 - GitHub issues track open delivery work. This audit records repository evidence and does not certify issue acceptance.
 
@@ -158,5 +95,4 @@ pnpm test:unit
 pnpm build
 ```
 
-See the [verification matrix](verification-matrix.md) for evidence states and
-the [release readiness runbook](release-readiness.md) for approval-gated work.
+See the [verification matrix](verification-matrix.md) for evidence states and the [release readiness runbook](release-readiness.md) for approval-gated work.

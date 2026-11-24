@@ -1,7 +1,7 @@
 # Planning Document Registry
 
 - Status: current operating index
-- Last reviewed: 2026-11-20
+- Last reviewed: 2026-11-23
 
 This registry is the entry point for Coven Agents planning documents. GitHub issues track repository work and acceptance. Tracked Markdown contains public outcomes, operating policy, proposals, and evidence. Keep private material out of both.
 
@@ -19,23 +19,23 @@ This registry is the entry point for Coven Agents planning documents. GitHub iss
 <!-- coven-agents-planning-registry:v1:start -->
 | Path | Role | Lifecycle | Authority | Last reviewed | Current guidance |
 | --- | --- | --- | --- | --- | --- |
-| [`ROADMAP.md`](../../ROADMAP.md) | Strategy | Current | Delivery summary | 2026-08-31 | — |
+| [`ROADMAP.md`](../../ROADMAP.md) | Strategy | Current | Delivery summary | 2026-11-23 | — |
 | [`POLISH.md`](../../POLISH.md) | Decision log | Historical | Repository evidence | 2026-08-31 | [Current state](current-state.md), [implementation sequence](implementation-sequence.md) |
-| [`docs/roadmap/README.md`](README.md) | Registry | Current | Operating policy | 2026-08-31 | — |
-| [`docs/roadmap/current-state.md`](current-state.md) | State | Current | Repository evidence | 2026-09-02 | — |
+| [`docs/roadmap/README.md`](README.md) | Registry | Current | Operating policy | 2026-11-23 | — |
+| [`docs/roadmap/current-state.md`](current-state.md) | State | Current | Repository evidence | 2026-11-23 | — |
 | [`docs/roadmap/daytona-cutover-audit-2026-08-29.md`](daytona-cutover-audit-2026-08-29.md) | Evidence | Historical | Repository evidence | 2026-08-31 | [Current state](current-state.md), [verification matrix](verification-matrix.md), [cutover attestation](../operations/daytona-cutover-attestation.md) |
 | [`docs/roadmap/delivery-governance.md`](delivery-governance.md) | Governance | Current | Operating policy | 2026-08-31 | — |
-| [`docs/roadmap/implementation-sequence.md`](implementation-sequence.md) | Sequence | Current | Delivery summary | 2026-08-31 | — |
-| [`docs/roadmap/release-readiness.md`](release-readiness.md) | Readiness | Current | Operating policy | 2026-08-31 | — |
+| [`docs/roadmap/implementation-sequence.md`](implementation-sequence.md) | Sequence | Current | Delivery summary | 2026-11-23 | — |
+| [`docs/roadmap/release-readiness.md`](release-readiness.md) | Readiness | Current | Operating policy | 2026-11-23 | — |
 | [`docs/roadmap/ui-functionality-audit-2026-08-26.md`](ui-functionality-audit-2026-08-26.md) | Evidence | Historical | Repository evidence | 2026-08-31 | [Current state](current-state.md), [verification matrix](verification-matrix.md), [release readiness](release-readiness.md) |
-| [`docs/roadmap/verification-matrix.md`](verification-matrix.md) | Verification | Current | Repository evidence | 2026-09-02 | — |
+| [`docs/roadmap/verification-matrix.md`](verification-matrix.md) | Verification | Current | Repository evidence | 2026-11-23 | — |
 | [`docs/roadmap/wave-1-delivery.md`](wave-1-delivery.md) | Evidence | Historical | Repository evidence | 2026-08-31 | [Public roadmap](../../ROADMAP.md), [implementation sequence](implementation-sequence.md) |
 | [`docs/proposals/prewarm.md`](../proposals/prewarm.md) | Proposal | Proposed | Non-authoritative proposal | 2026-08-31 | — |
 | [`docs/proposals/run-diagnostics.md`](../proposals/run-diagnostics.md) | Proposal | Proposed | Non-authoritative proposal | 2026-08-31 | — |
 | [`docs/superpowers/README.md`](../superpowers/README.md) | Tombstone | Superseded | Repository evidence | 2026-08-31 | [Delivery governance](delivery-governance.md) |
 | [`docs/operations/daytona-cutover-attestation.md`](../operations/daytona-cutover-attestation.md) | Evidence | Current | Repository evidence | 2026-08-31 | — |
 | [`docs/operations/vercel-git-deployment-disablement.md`](../operations/vercel-git-deployment-disablement.md) | Governance | Current | Operating policy | 2026-08-31 | — |
-| [`docs/operations/pack-draw-ledger.md`](../operations/pack-draw-ledger.md) | Proposal | Proposed | Non-authoritative proposal | 2026-11-17 | — |
+| [`docs/operations/pack-draw-ledger.md`](../operations/pack-draw-ledger.md) | Proposal | Historical | Repository evidence | 2026-11-23 | [Release readiness](release-readiness.md#database-migration), [verification matrix](verification-matrix.md#billing-ledger-checkpoint) |
 <!-- coven-agents-planning-registry:v1:end -->
 
 ## Maintenance rules
