@@ -137,6 +137,7 @@ const credentialSourceFiles = [
   "lib/credentials/authorize.ts",
   "lib/credentials/client.test.ts",
   "lib/credentials/client.ts",
+  "lib/credentials/codex-auth.ts",
   "lib/credentials/device-flow-attempt.test.ts",
   "lib/credentials/device-flow-attempt.ts",
   "lib/credentials/device-flow-binding.test.ts",
