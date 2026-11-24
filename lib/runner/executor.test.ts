@@ -133,6 +133,10 @@ class DeterministicFakeExecutor implements RunnerExecutor {
     return Promise.resolve({ agent: agent(), context: this.context });
   }
 
+  inspectNetworkSafety() {
+    return Promise.resolve({ kind: "safe" as const });
+  }
+
   inspectWorkspaceSafety(_context: RunnerExecutionContext, workspace: string) {
     this.calls.inspected = workspace;
     return Promise.resolve(this.inspection);
@@ -193,6 +197,7 @@ function daytonaExecutorExercise(): ExecutorExercise {
         return Promise.resolve({ agent: agent(), sandbox });
       },
       executionProvenance: daytonaProvenance,
+      inspectNetwork: async () => ({ kind: "safe" }),
       inspectWorkspace: (forwarded, workspace) => {
         assert.equal(forwarded, sandbox);
         calls.inspected = workspace;
@@ -502,6 +507,7 @@ test("Daytona adapter forwards GitHub broker callbacks only at the process start
   const executor = daytonaRunnerExecutor({
     ensureContext: async () => ({ agent: agent(), sandbox }),
     executionProvenance: daytonaProvenance,
+    inspectNetwork: async () => ({ kind: "safe" }),
     inspectWorkspace: async () => ({ kind: "safe" }),
     startProcess: (input) => {
       forwardedGitHubTool = input.githubTool;
@@ -523,4 +529,69 @@ test("Daytona adapter forwards GitHub broker callbacks only at the process start
   } as RunnerExecutorStartInput);
 
   assert.equal(forwardedGitHubTool, githubTool);
+});
+
+test("restricted Daytona workspace preflight rejects absent or drifted egress policy before process access", async () => {
+  await Promise.all(
+    [
+      {
+        accepted: true,
+        domainAllowList: "provider.example.test",
+        networkBlockAll: false,
+      },
+      {},
+      { domainAllowList: "provider.example.test", networkBlockAll: false },
+      { domainAllowList: "other.example.test", networkBlockAll: false },
+      { domainAllowList: "provider.example.test", networkBlockAll: true },
+      {
+        domainAllowList: "provider.example.test",
+        networkAllowList: "0.0.0.0/0",
+        networkBlockAll: false,
+      },
+      {
+        domainAllowList: "provider.example.test",
+        networkBlockAll: false,
+        outboundProxyUrl: "https://proxy.example.test",
+      },
+    ].map(async (observed) => {
+      const executor = configuredDaytonaRunnerExecutor({
+        operator: { kind: "runner-operator" },
+        sandboxConfiguration: {
+          autoArchiveInterval: 10_080,
+          autoDeleteInterval: -1,
+          autoStopInterval: 15,
+          domainAllowList:
+            observed.domainAllowList === "provider.example.test" &&
+            observed.networkBlockAll === false &&
+            Object.keys(observed).length === 2
+              ? undefined
+              : "provider.example.test",
+          resources: { cpu: 2, disk: 10, memory: 4 },
+          snapshotName: "coven-agents-copilot-2",
+          target: "us",
+          ttlMinutes: 0,
+        },
+        sandboxDependencies: {} as never,
+        store: {} as never,
+      });
+      const context = {
+        ...observed,
+        process: new Proxy(
+          {},
+          {
+            get() {
+              assert.fail("unsafe network reached workspace process");
+            },
+          }
+        ),
+      } as never;
+      const result = await executor.inspectNetworkSafety(context);
+      if ("accepted" in observed && observed.accepted) {
+        assert.deepEqual(result, { kind: "safe" });
+      } else {
+        assert.deepEqual(result, { kind: "unsafe" });
+        await assert.rejects(executor.start(startInput(context)), /network/iu);
+      }
+    })
+  );
 });

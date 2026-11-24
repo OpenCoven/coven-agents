@@ -47,6 +47,11 @@ export function summarizeRun(events: readonly RunEvent[]): RunSummary {
         starts.set(event.callId, { summary: event.summary, tool: event.tool });
         break;
       case "tool-end": {
+        // A tool absent from the CLI allowlist never executed. Its denial remains
+        // in events, but must not be presented as a command execution result.
+        if (event.executionDenied) {
+          break;
+        }
         const start = starts.get(event.callId);
         toolCalls.push({
           success: event.success,

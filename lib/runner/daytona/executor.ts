@@ -36,6 +36,9 @@ type DaytonaExecutorOperations = Readonly<{
     agent: Awaited<ReturnType<typeof ensureDaytonaSandboxForDispatch>>["agent"];
     sandbox: DaytonaProcessSandbox;
   }>;
+  inspectNetwork: (
+    sandbox: DaytonaProcessSandbox
+  ) => Promise<import("../executor").RestrictedWorkspaceInspection>;
   inspectWorkspace: typeof inspectRestrictedWorkspace;
   startProcess: typeof startDaytonaProcess;
 }>;
@@ -85,6 +88,8 @@ export function daytonaRunnerExecutor(
       };
     },
     executionProvenance: operations.executionProvenance,
+    inspectNetworkSafety: (context) =>
+      operations.inspectNetwork(daytonaProcessSandbox(context)),
     inspectWorkspaceSafety: (context, workspace) =>
       operations.inspectWorkspace(daytonaProcessSandbox(context), workspace),
     isCleanupPending: (error) =>
@@ -97,6 +102,18 @@ export function daytonaRunnerExecutor(
     sandboxBindingRefusal: (error) =>
       error instanceof DaytonaSandboxBindingRefusedError ? error.reason : null,
     start: async (input) => {
+      if (input.executionPermission !== "unrestricted") {
+        const network = await operations.inspectNetwork(
+          daytonaProcessSandbox(input.context)
+        );
+        if (network.kind !== "safe") {
+          throw new DaytonaProcessError(
+            "Restricted runner network policy is unsafe or unavailable.",
+            "process_start_failed",
+            network.kind === "unavailable"
+          );
+        }
+      }
       const started = await operations.startProcess({
         ...input.authorizers,
         credential: input.credential,
@@ -163,6 +180,29 @@ export function configuredDaytonaRunnerExecutor(
     executionProvenance: daytonaExecutionProvenance(
       configuration.sandboxConfiguration
     ),
+    inspectNetwork: (sandbox) => {
+      // Restricted model tools do not replace a provider-enforced egress policy.
+      // Check observations before any workspace process or credential staging.
+      const observed = sandbox as DaytonaProcessSandbox & {
+        domainAllowList?: unknown;
+        networkAllowList?: unknown;
+        networkBlockAll?: unknown;
+        outboundProxyUrl?: unknown;
+      };
+      const allowed = configuration.sandboxConfiguration.domainAllowList;
+      if (
+        !allowed?.trim() ||
+        typeof observed.domainAllowList !== "string" ||
+        observed.domainAllowList.split(",").sort().join(",") !==
+          allowed.split(",").sort().join(",") ||
+        observed.networkAllowList !== undefined ||
+        observed.outboundProxyUrl !== undefined ||
+        observed.networkBlockAll !== false
+      ) {
+        return Promise.resolve({ kind: "unsafe" });
+      }
+      return Promise.resolve({ kind: "safe" });
+    },
     inspectWorkspace: inspectRestrictedWorkspace,
     startProcess: startDaytonaProcess,
   });

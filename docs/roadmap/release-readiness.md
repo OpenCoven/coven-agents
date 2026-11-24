@@ -8,7 +8,7 @@ This runbook is a production approval gate. Repository tests do not prove a depl
 
 ## Repository delivery checkpoint — 2026-11-23
 
-Release remains **NO-GO**. The review-ready source queue is #320, #327, #330 and #324. Their implementation/review evidence, the current hermetic browser readiness failure and the separately pending Castles acceptance are recorded in the [verification matrix](verification-matrix.md#delivery-requalification--2026-11-23). A signed commit, clean isolated-clone hygiene, fixture success or merge cannot substitute for a current deployment receipt or operator approval.
+Release remains **NO-GO**. Owner-read #320 landed and #299 closed after repository acceptance; the remaining source queue is #327, #330 and #324. Their exact-head implementation/qualification evidence, retained earlier browser failures and separately pending Castles acceptance are recorded in the [verification matrix](verification-matrix.md#delivery-requalification--2026-11-23). A signed commit, clean isolated-clone hygiene, fixture success or merge cannot substitute for a current deployment receipt or operator approval.
 
 Keep the release audience undecided and enrollment/new sales closed until the maintainer selects and approves a candidate/window. The historical production callback failed at federated-user lookup with SQLSTATE 28000; its provider-specific cause and later callback outcomes are not established by health or sign-in initiation. The production operator must supply sanitized endpoint/database/role match status and rejection-stage evidence, then prove legitimate OAuth completion and reload-persistent session under #51. This delivery run performs no production repair, migration, credential change or deployment.
 

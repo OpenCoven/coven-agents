@@ -32,6 +32,7 @@ const expectedErrors = {
   run_not_found: [404, false],
   runner_unavailable: [503, true],
   sandbox_binding_refused: [409, false],
+  sandbox_trust_conflict: [409, false],
   stale_version: [409, true],
   subscription_required: [403, false],
   unauthorized: [401, false],

@@ -274,3 +274,9 @@ separate operator attestation with a credential-free, retained deployed
 Daytona attempt, internal inventory/diagnostic response capture, browser
 runner envelope/SSE capture, and a cross-tenant refusal check. No deployed
 proof is represented by these local assertions.
+
+### Read-only owner runs
+
+The server-owned `RunnerAgent.ownerWorkspaceRead` setting selects `workspace_read` for owner starts. The setting defaults to false and is maintained through trusted database administration. The public start body cannot set it. Admission reads the setting under the agent lock, stores the resulting run permission and binds it to the operation digest. Copilot receives only `view`, `rg`, and `glob` and launches with isolated configuration.
+
+This permission grants no shell, write, or network tool. Before restricted workspace process access or credential staging, the Daytona executor requires a nonempty server-configured domain allowlist and matching provider observations, with no alternate IP allowlist or outbound proxy. Missing or drifted policy refuses the run. The provider enforces this network boundary; inference traffic to configured model domains remains allowed. Local recording tests prove the fail-closed checks, not Daytona's live packet filtering. Live provider egress acceptance remains separately required. The root development CLI and snapshot-installed CLI are both exercised against loopback providers; source pins are not measurements of an installed remote snapshot.

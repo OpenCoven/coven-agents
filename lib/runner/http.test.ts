@@ -3330,3 +3330,30 @@ test("run start rejects a malformed sandbox binding as an invalid request", asyn
     "invalid_request"
   );
 });
+
+test("owner trust conflicts retain a non-retryable HTTP refusal without dispatch", async () => {
+  const fixture = handlers({
+    service: service({
+      dispatchClaim: async () => assert.fail("trust refusal dispatched"),
+      reconcileAndDispatch: async () => assert.fail("trust refusal reconciled"),
+      startRun: async () =>
+        ({
+          code: "sandbox_trust_conflict",
+          kind: "refused",
+          retryable: false,
+        }) as never,
+    }),
+  });
+  const response = await fixture.handlers.startAgentRun(
+    new Request(`https://app.test/api/agents/${AGENT_ID}/runs`, {
+      body: JSON.stringify({ operationId: OPERATION_ID, task: "Read only." }),
+      method: "POST",
+    }),
+    AGENT_ID
+  );
+  assert.equal(response.status, 409);
+  const body = await response.json();
+  assert.equal(body.error.code, "sandbox_trust_conflict");
+  assert.equal(body.error.retryable, false);
+  assert.deepEqual(fixture.after, []);
+});

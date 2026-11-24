@@ -8,11 +8,11 @@ Phase 0 requires current delivery issues, no `AT RISK` worktrees, a secondary-wo
 
 ## Delivery checkpoint — 2026-11-23
 
-Merged repository work is on main `0696af127207fb82cce734cd8c4ffa437d6f3502`. GitHub issues remain the task and acceptance authority. The next delivery unit is the reviewed owner-read, attempt-reference, CLI and inspection stack; its unmerged candidates are not deployed capabilities or accepted Castles pins. Keep Phase 0 until the exact promoted source passes its required gates and the shared-worktree and release blockers are resolved.
+Merged repository work is on main `6d7f257d2793f1091877678e0e2e7c5daecadb30`; #320 landed and #299 closed after acceptance replay. GitHub issues remain the task and acceptance authority. The remaining delivery queue is the attempt-reference, CLI and inspection stack; its unmerged candidates are not deployed capabilities or accepted Castles pins. Keep Phase 0 until the exact promoted source passes its required gates and the shared-worktree and release blockers are resolved.
 
 | Delivery | Current boundary | Next proof |
 | --- | --- | --- |
-| [#299 / #320](https://github.com/OpenCoven/coven-agents/pull/320) | Owner-read candidate reviewed; fresh static, unit, build and disposable PostgreSQL checks pass | Required hermetic browser certification, authorized landing, then acceptance replay on main |
+| [#299 / #320](https://github.com/OpenCoven/coven-agents/pull/320) | Landed and #299 closed; exact-head normal browser and landed acceptance replay pass | Target installed-version and consumer pin adoption remain separately owned |
 | [#326 / #327](https://github.com/OpenCoven/coven-agents/pull/327) | Opaque attempt references and exclusive bound admission reviewed; migration integration prepared without #325 | Confirm integration ownership, qualify the exact migration order and replay both acceptance rows on landed main |
 | [#328 / #330](https://github.com/OpenCoven/coven-agents/pull/330) | Codex and Claude CLI candidate reviewed, including corrected credential persistence | Qualify the integrated source; retain unsupported restricted-mode refusal and separate snapshot/live gates |
 | [#322 / #324](https://github.com/OpenCoven/coven-agents/pull/324) | Producer and Castles consumer pair reviewed with synthetic compatibility evidence | Qualify landed producer and obtain the required consumer steward/maintainer acceptance |
