@@ -6,6 +6,19 @@ This roadmap describes delivery outcomes, gates, and evidence. GitHub issues tra
 
 Phase 0 requires current delivery issues, no `AT RISK` worktrees, a secondary-worktree count within the repository soft cap, a frozen dependency install, and current generated application artifacts. Hygiene, lint, typecheck, unit tests, and production build must pass before a later wave advances.
 
+## Delivery checkpoint — 2026-11-23
+
+Merged repository work is on main `6d7f257d2793f1091877678e0e2e7c5daecadb30`; #320 landed and #299 closed after acceptance replay. GitHub issues remain the task and acceptance authority. The remaining delivery queue is the attempt-reference, CLI and inspection stack; its unmerged candidates are not deployed capabilities or accepted Castles pins. Keep Phase 0 until the exact promoted source passes its required gates and the shared-worktree and release blockers are resolved.
+
+| Delivery | Current boundary | Next proof |
+| --- | --- | --- |
+| [#299 / #320](https://github.com/OpenCoven/coven-agents/pull/320) | Landed and #299 closed; exact-head normal browser and landed acceptance replay pass | Target installed-version and consumer pin adoption remain separately owned |
+| [#326 / #327](https://github.com/OpenCoven/coven-agents/pull/327) | Opaque attempt references and exclusive bound admission reviewed; integration `5e15007` passes local, DB and normal browser gates | Confirm original-branch handoff, land the qualified integration and replay both acceptance rows on main |
+| [#328 / #330](https://github.com/OpenCoven/coven-agents/pull/330) | Codex and Claude CLI candidate reviewed; six local/DB gates and normal browser qualification pass at `7d6557d` | Complete draft transition, authorized landing and landed acceptance; retain separate snapshot/live gates |
+| [#322 / #324](https://github.com/OpenCoven/coven-agents/pull/324) | Producer and Castles consumer pair reviewed with synthetic compatibility evidence | Qualify landed producer and obtain the required consumer steward/maintainer acceptance |
+
+The remaining sequence and one owner/action per open issue are recorded in the [implementation sequence](docs/roadmap/implementation-sequence.md). The [verification matrix](docs/roadmap/verification-matrix.md) separates the passing composed validation from source-head browser failures and pending delivery gates. [Release readiness](docs/roadmap/release-readiness.md) remains a no-go until its operator evidence and approval gates are complete.
+
 ## Delivery sequence
 
 ### Phase 0: Baseline
@@ -39,8 +52,7 @@ Keep delivery issues current, resolve repository hygiene risks, and prove every 
 ### Wave 3: Certify
 
 - Prove contract conformance across runner implementations.
-- Exercise Daytona, application, browser, demo, and subscriber paths in realistic
-  environments.
+- Exercise Daytona, application, browser, demo, and subscriber paths in realistic environments.
 - Preflight deployment configuration and dependencies.
 - Trace requests through execution and expose reliability metrics.
 - Prove recovery from crashes and abandoned work.
@@ -84,9 +96,7 @@ A phase or wave cannot advance while any of these conditions holds:
 - a red required verification row;
 - missing rollback or recovery evidence for a release-affecting change.
 
-Later waves receive detailed implementation lanes only after promotion. This
-keeps later outcomes flexible until earlier work settles their interfaces and
-constraints.
+Later waves receive detailed implementation lanes only after promotion. This keeps later outcomes flexible until earlier work settles their interfaces and constraints.
 
 ## Evidence and operating docs
 
