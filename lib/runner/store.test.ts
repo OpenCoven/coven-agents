@@ -5508,3 +5508,52 @@ test("a half-written binding row never reads as an unbound run", async () => {
     )
   );
 });
+
+test("locked owner policy refuses an unrestricted sandbox before admission", async () => {
+  const current = run({ executionPermission: "workspace_read" });
+  const { statements, store } = scripted(
+    [
+      agent({
+        id: current.agentId,
+        ownerWorkspaceRead: true,
+        sandboxLifecycle: "ready",
+        sandboxTrust: "unrestricted",
+      }),
+    ],
+    []
+  );
+
+  const result = await store.startRun(principal, {
+    agentId: current.agentId,
+    authVersion: 9,
+    id: current.id,
+    operationId: current.operationId,
+    requestHash: current.requestHash,
+    task: current.task,
+    useOwnerExecutionPolicy: true,
+  });
+
+  assert.deepEqual(result, { kind: "sandbox_trust_conflict" });
+  assert.deepEqual(
+    statements.map((statement) => statement.name),
+    ["lock-agent-for-run-start", "get-operation-run-before-admission"]
+  );
+});
+
+test("owner operation replay conflicts after the locked policy changes", async () => {
+  const existing = run({ executionPermission: "unrestricted" });
+  const { store } = scripted(
+    [agent({ id: existing.agentId, ownerWorkspaceRead: true })],
+    [existing]
+  );
+  const result = await store.startRun(principal, {
+    agentId: existing.agentId,
+    authVersion: 9,
+    id: existing.id,
+    operationId: existing.operationId,
+    requestHash: existing.requestHash,
+    task: existing.task,
+    useOwnerExecutionPolicy: true,
+  });
+  assert.equal(result.kind, "conflict");
+});

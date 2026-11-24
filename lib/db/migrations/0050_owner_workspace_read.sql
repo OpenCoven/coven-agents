@@ -1,0 +1,1 @@
+ALTER TABLE "RunnerAgent" ADD COLUMN "ownerWorkspaceRead" boolean DEFAULT false NOT NULL;
