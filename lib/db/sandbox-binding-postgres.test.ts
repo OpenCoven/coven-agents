@@ -129,7 +129,11 @@ test("PostgreSQL binding constraints reject partial pairs and preserve real admi
       { ...start(), principal },
       { limits, store }
     );
-    assert.equal(admitted.kind, "claimed");
+    assert.equal(
+      admitted.kind,
+      "claimed",
+      admitted.kind === "refused" ? admitted.error.code : admitted.kind
+    );
     assert.ok(admitted.kind === "claimed");
     const calls: string[] = [];
     const operator = { kind: "runner-operator" } as const;
