@@ -1292,14 +1292,18 @@ function jsonResponse(body: unknown, status = 200): Response {
 function delayedJsonResponse(body: unknown, delayMs: number): Response {
   const bytes = new TextEncoder().encode(JSON.stringify(body));
   return new Response(
-    new ReadableStream<Uint8Array>({
-      start(controller) {
-        globalThis.setTimeout(() => {
+    new ReadableStream<Uint8Array>(
+      {
+        async pull(controller) {
+          await new Promise<void>((resolve) => {
+            globalThis.setTimeout(resolve, delayMs);
+          });
           controller.enqueue(bytes);
           controller.close();
-        }, delayMs);
+        },
       },
-    }),
+      { highWaterMark: 0 }
+    ),
     {
       headers: { "content-type": "application/json" },
       status: 200,
