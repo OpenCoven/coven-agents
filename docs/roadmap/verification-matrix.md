@@ -51,7 +51,9 @@ This matrix records implemented source and retained evidence as of 2026-09-09 fo
 | `Certified` | Release-equivalent evidence is retained and owner-approved. |
 | `Blocked` | A named prerequisite prevents the required procedure. |
 
-## Current matrix
+**Correction note — 2026-11-23:** The matrix below preserves the September evidence and its original next actions. PR #268 subsequently landed in `a16de59c4047a25eebb293b608752b0a0393e8d6`; references below to its draft or unmerged state are historical. Current inventory, deployed containment, reset and reuse acceptance remain unverified under #262. Use the delivery checkpoint above and [current state](current-state.md) for current repository status.
+
+## Historical matrix — 2026-09-09
 
 | Capability | State | Repository evidence | Required next evidence |
 | --- | --- | --- | --- |

@@ -215,7 +215,7 @@ To close the campaign, return `BETA_CAMPAIGN_ENABLED` to `off` and redeploy. Dis
 
 ## Stripe webhook delivery
 
-Current production state is a no-go for new sales:
+The retained historical configuration review found the following no-go conditions for new sales. These are dated observations, not a current production attestation; the billing operator must refresh every row under #263 before acting:
 
 - `SUBSCRIPTION_CHECKOUT_ENABLED=off`;
 - the active live recurring Price is `$30/month`, not the approved `$25/month`;
@@ -223,10 +223,10 @@ Current production state is a no-go for new sales:
 - the enabled webhook covers `invoice.paid`, `invoice.payment_failed`, and `customer.subscription.deleted`, but not both Checkout completion events; and
 - the current restricted key can read Prices but cannot create a Price or Portal configuration.
 
-Before enabling new subscription Checkout:
+The following cutover steps require the billing owner’s current plan/configuration approval and a separately authorized live window. The historical amount does not authorize a new pricing decision. Before enabling new subscription Checkout:
 
 1. Keep `SUBSCRIPTION_CHECKOUT_ENABLED=off` during deployment and migration.
-2. Have an authorized Stripe operator create the `$25/month` live recurring Price, then confirm `STRIPE_PRICE_ID` identifies that exact Price, interval, currency, amount, and Product.
+2. Have the billing owner confirm the currently approved plan and an authorized Stripe operator verify or create its exact live recurring Price. Confirm `STRIPE_PRICE_ID`, interval, currency, amount and Product against that approval; do not infer a current target from the historical `$25/month` finding.
 3. Use a test-mode restricted key to complete the documented Customer, subscription, Checkout Session, invoice-line, and recovery paths. Then create a separate live-mode restricted key with the same reviewed permissions and verify that it can read the configured live Product and Price. Do not attempt to use a live key against test-mode resources.
 4. Configure the webhook endpoint at the canonical application origin for: `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `invoice.paid`, and `invoice.payment_failed`.
 5. Verify the endpoint signing secret and exact raw-body signature handling.
