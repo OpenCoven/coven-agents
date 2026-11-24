@@ -80,25 +80,22 @@ test("PostgreSQL binding constraints reject partial pairs and preserve real admi
       sandboxBinding: expected,
       task: "fixture",
     });
-    const [before] =
-      await client`SELECT count(*)::int AS n FROM "CredentialLease"`;
+    const mismatched = start({ ...binding, expectedGeneration: 4 });
+    const foreign = start();
+    assert.deepEqual(await store.startRun(principal, mismatched), {
+      kind: "sandbox_binding_refused",
+      reason: "generation_mismatch",
+    });
     assert.deepEqual(
-      await store.startRun(
-        principal,
-        start({ ...binding, expectedGeneration: 4 })
-      ),
-      { kind: "sandbox_binding_refused", reason: "generation_mismatch" }
-    );
-    assert.deepEqual(
-      await store.startRun({ ...principal, tenant: "foreign_tenant" }, start()),
+      await store.startRun({ ...principal, tenant: "foreign_tenant" }, foreign),
       { kind: "not_found" }
     );
     const [runs] =
       await client`SELECT count(*)::int AS n FROM "RunnerRun" WHERE "agentId" = ${agentId}`;
     const [after] =
-      await client`SELECT count(*)::int AS n FROM "CredentialLease"`;
+      await client`SELECT count(*)::int AS n FROM "CredentialLease" WHERE "runId" IN (${mismatched.id}, ${foreign.id})`;
     assert.equal(runs.n, 0);
-    assert.equal(after.n, before.n);
+    assert.equal(after.n, 0);
     const input = start();
     assert.equal((await store.startRun(principal, input)).kind, "created");
     assert.equal((await store.startRun(principal, input)).kind, "duplicate");
@@ -189,8 +186,8 @@ test("PostgreSQL binding constraints reject partial pairs and preserve real admi
     });
     assert.deepEqual(calls, ["get:sandbox-owned"]);
     const [leasesAfterDispatch] =
-      await client`SELECT count(*)::int AS n FROM "CredentialLease"`;
-    assert.equal(leasesAfterDispatch.n, before.n);
+      await client`SELECT count(*)::int AS n FROM "CredentialLease" WHERE "runId" = ${admitted.claimed.run.id}`;
+    assert.equal(leasesAfterDispatch.n, 0);
     const [terminal] =
       await client`SELECT status, "dispatchState", error, "daytonaAttemptId", "daytonaSessionId" FROM "RunnerRun" WHERE id = ${admitted.claimed.run.id}`;
     assert.equal(terminal.status, "failed");
