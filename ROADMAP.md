@@ -17,7 +17,7 @@ Merged repository work is on main `0696af127207fb82cce734cd8c4ffa437d6f3502`. Gi
 | [#328 / #330](https://github.com/OpenCoven/coven-agents/pull/330) | Codex and Claude CLI candidate reviewed, including corrected credential persistence | Qualify the integrated source; retain unsupported restricted-mode refusal and separate snapshot/live gates |
 | [#322 / #324](https://github.com/OpenCoven/coven-agents/pull/324) | Producer and Castles consumer pair reviewed with synthetic compatibility evidence | Qualify landed producer and obtain the required consumer steward/maintainer acceptance |
 
-The remaining sequence and one owner/action per open issue are recorded in the [implementation sequence](docs/roadmap/implementation-sequence.md). The [verification matrix](docs/roadmap/verification-matrix.md) separates passing source slices from the currently failing browser gate. [Release readiness](docs/roadmap/release-readiness.md) remains a no-go until its operator evidence and approval gates are complete.
+The remaining sequence and one owner/action per open issue are recorded in the [implementation sequence](docs/roadmap/implementation-sequence.md). The [verification matrix](docs/roadmap/verification-matrix.md) separates the passing composed validation from source-head browser failures and pending delivery gates. [Release readiness](docs/roadmap/release-readiness.md) remains a no-go until its operator evidence and approval gates are complete.
 
 ## Delivery sequence
 
