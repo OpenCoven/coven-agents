@@ -45,7 +45,11 @@ const credentialDeleteSchema = z
  * here, because logic inside a route handler cannot be unit tested and this is
  * the decision that says who may write to the owner's database.
  */
-function respond(decision: { kind: string; reason?: string }) {
+function respond(decision: {
+  kind: string;
+  reason?: string;
+  message?: string;
+}) {
   if (decision.kind === "unauthorized") {
     return Response.json({ error: "unauthorized" }, { status: 401 });
   }
@@ -60,7 +64,10 @@ function respond(decision: { kind: string; reason?: string }) {
     );
   }
   return Response.json(
-    { error: decision.reason ?? "invalid_request" },
+    {
+      error: decision.reason ?? "invalid_request",
+      ...(decision.message ? { message: decision.message } : {}),
+    },
     { status: 400 }
   );
 }
@@ -179,10 +186,14 @@ export async function DELETE(request: Request) {
   // A delete needs the same subscription check as a write: both reach the
   // owner's database. `credential` is supplied only to satisfy the shared
   // decision, which has nothing to validate on a removal.
-  const decision = decideCredentialWrite(access.session, {
-    credential: "placeholder-not-stored",
-    harnessId: body.value.harnessId,
-  });
+  const decision = decideCredentialWrite(
+    access.session,
+    {
+      credential: "placeholder-not-stored",
+      harnessId: body.value.harnessId,
+    },
+    "remove"
+  );
   if (decision.kind !== "allowed") {
     return respond(decision);
   }

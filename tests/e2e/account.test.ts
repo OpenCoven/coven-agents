@@ -159,7 +159,12 @@ test.describe("Account settings", () => {
       const url = new URL(request.url());
       return url.pathname === "/account" && request.headers().rsc === "1";
     });
-    await page.getByRole("button", { exact: true, name: "Save" }).click();
+    await page
+      .getByRole("button", {
+        exact: true,
+        name: "Save GitHub Copilot CLI credential",
+      })
+      .click();
 
     await authorityRefresh;
     await expect(credential).toHaveCount(0);
@@ -461,7 +466,9 @@ test.describe("Account settings", () => {
     await page.goto("/account");
     const input = page.getByLabel("GitHub Copilot");
     await input.fill("first-account-secret");
-    await page.getByRole("button", { name: "Save" }).click();
+    await page
+      .getByRole("button", { name: "Save GitHub Copilot CLI credential" })
+      .click();
     await firstSave;
 
     const secondId = "00000000-0000-4000-8000-000000000002";
@@ -501,7 +508,9 @@ test.describe("Account settings", () => {
     await expect(page.getByText("Credential stored.")).toHaveCount(0);
 
     await input.fill("second-account-secret");
-    await page.getByRole("button", { name: "Save" }).click();
+    await page
+      .getByRole("button", { name: "Save GitHub Copilot CLI credential" })
+      .click();
     await expect(page.getByText("Credential stored.")).toBeVisible();
     await expect(input).toHaveValue("");
     expect(savedCredentials).toEqual([
@@ -533,7 +542,9 @@ test.describe("Account settings", () => {
     await page.goto("/account");
     const input = page.getByLabel("GitHub Copilot");
     await input.fill("first-account-secret");
-    await page.getByRole("button", { name: "Save" }).click();
+    await page
+      .getByRole("button", { name: "Save GitHub Copilot CLI credential" })
+      .click();
     await expect(page.getByText("First account token rejected.")).toBeVisible();
 
     const secondId = "00000000-0000-4000-8000-000000000002";

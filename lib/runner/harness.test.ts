@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import {
+  exactEvidenceRedactions,
+  sanitizeEvidenceText,
+} from "@opencoven/agent-contracts";
 import { type RunEvent, runEventSchema } from "@opencoven/harness";
 import {
   buildHarnessCommand,
@@ -9,11 +13,15 @@ import {
   resolveSandboxWorkspace,
   sanitizeHarnessEvent,
 } from "./harness";
+import {
+  decodeRunnerAttemptRedactionSecrets,
+  encodeRunnerAttemptRedactionSecrets,
+} from "./redaction-secrets";
 
 const AT = "2026-08-28T09:00:00.000Z";
 const SECRET = "copilot-credential-9f3b";
 
-test("bounds workspaces and only admits the supported Copilot harness", () => {
+test("bounds workspaces and refuses malformed Codex CLI credentials", () => {
   assert.equal(resolveSandboxWorkspace(), "/workspace");
   assert.equal(
     resolveSandboxWorkspace("repo/../project"),
@@ -31,7 +39,7 @@ test("bounds workspaces and only admits the supported Copilot harness", () => {
   assert.throws(
     () => requireHarness("codex", { credential: SECRET }),
     (error: unknown) =>
-      error instanceof HarnessError && error.code === "harness_unsupported"
+      error instanceof HarnessError && error.code === "harness_unauthenticated"
   );
 });
 
@@ -332,4 +340,96 @@ test("skips malformed structured records without stopping later valid results", 
     AT
   );
   assert.deepEqual(replay.events, []);
+});
+
+test("Codex ChatGPT auth JSON validates and registers every token for redaction", () => {
+  const tokens = {
+    access_token: "synthetic-access-value",
+    account_id: "synthetic-account",
+    id_token: "synthetic-id-value",
+    refresh_token: "synthetic-refresh-value",
+  };
+  const credential = JSON.stringify({
+    auth_mode: "chatgpt",
+    OPENAI_API_KEY: null,
+    tokens,
+  });
+  const bound = requireHarness("codex", { credential });
+  assert.equal(bound.auth.name, "COVEN_CODEX_AUTH_JSON");
+  for (const value of Object.values(tokens)) {
+    assert.ok(bound.secrets.includes(value));
+  }
+  assert.throws(
+    () =>
+      requireHarness("codex", {
+        credential: JSON.stringify({
+          auth_mode: "apikey",
+          OPENAI_API_KEY: "synthetic",
+          tokens,
+        }),
+      }),
+    HarnessError
+  );
+  assert.equal(
+    requireHarness("claude", { credential: SECRET }).auth.name,
+    "CLAUDE_CODE_OAUTH_TOKEN"
+  );
+});
+
+for (const pretty of [false, true]) {
+  test(`Codex ${pretty ? "pretty" : "compact"} auth survives real redaction persistence above 4KiB`, () => {
+    const tokens = {
+      access_token: `synthetic-access-${"a".repeat(1600)}`,
+      account_id: "synthetic-account",
+      id_token: `synthetic-id-${"b".repeat(1600)}`,
+      refresh_token: `synthetic-refresh-${"c".repeat(1600)}`,
+    };
+    const credential = JSON.stringify(
+      {
+        auth_mode: "chatgpt",
+        last_refresh: "2026-11-23T00:00:00Z",
+        tokens,
+        unrecognized_private: "must-not-be-staged",
+      },
+      null,
+      pretty ? 2 : undefined
+    );
+    assert.ok(Buffer.byteLength(credential) > 4096);
+    const bound = requireHarness("codex", { credential });
+    const decoded = decodeRunnerAttemptRedactionSecrets(
+      encodeRunnerAttemptRedactionSecrets(bound.secrets)
+    );
+    const redactions = exactEvidenceRedactions(...decoded);
+    for (const token of Object.values(tokens)) {
+      assert.equal(sanitizeEvidenceText(token, redactions), "[REDACTED]");
+    }
+    const staged = JSON.parse(bound.auth.value);
+    assert.deepEqual(staged.tokens, tokens);
+    assert.equal(staged.last_refresh, "2026-11-23T00:00:00Z");
+    assert.equal(staged.unrecognized_private, undefined);
+  });
+}
+
+test("Codex tokens outside the existing redaction bounds refuse before effects", () => {
+  for (const access_token of [
+    "x".repeat(4097),
+    "é".repeat(2050),
+    "unsafe\nvalue",
+  ]) {
+    assert.throws(
+      () =>
+        requireHarness("codex", {
+          credential: JSON.stringify({
+            auth_mode: "chatgpt",
+            tokens: {
+              access_token,
+              account_id: "synthetic-account",
+              id_token: "synthetic-id",
+              refresh_token: "synthetic-refresh",
+            },
+          }),
+        }),
+      HarnessError
+    );
+  }
 });

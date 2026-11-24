@@ -67,6 +67,9 @@ test("hermetic runner environment explicitly blanks external configuration", asy
     ...Object.fromEntries(
       harnessAuthNames.map((name) => [name, `must-not-reach-${name}`])
     ),
+    CLAUDE_CONFIG_DIR: "must-not-reach-config",
+    CODEX_API_KEY: "must-not-reach-provider",
+    CODEX_HOME: "must-not-reach-config",
     NODE_ENV: "production",
     OPENAI_API_KEY: "must-not-reach-provider",
     REDIS_URL: "redis://must-not-reach",
@@ -97,7 +100,10 @@ test("hermetic runner environment explicitly blanks external configuration", asy
   assert.equal(environment.POSTGRES_URL, "postgres://example.invalid/e2e");
   assert.ok(harnessAuthNames.includes("COPILOT_GITHUB_TOKEN"));
   assert.ok(harnessAuthNames.includes("GH_TOKEN"));
-  assert.ok(harnessAuthNames.includes("CODEX_API_KEY"));
+  assert.ok(harnessAuthNames.includes("COVEN_CODEX_AUTH_JSON"));
+  assert.equal(environment.CODEX_API_KEY, "");
+  assert.equal(environment.CODEX_HOME, "");
+  assert.equal(environment.CLAUDE_CONFIG_DIR, "");
   assert.ok(harnessAuthNames.includes("CLAUDE_CODE_OAUTH_TOKEN"));
   for (const name of harnessAuthNames) {
     assert.equal(

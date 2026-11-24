@@ -92,11 +92,15 @@ test("pins the harness versions to the snapshot generation", () => {
       snapshot: DAYTONA_COPILOT_SNAPSHOT_NAME,
     },
     {
-      harnesses: ["@github/copilot@1.0.80"],
+      harnesses: [
+        "@github/copilot@1.0.80",
+        "@openai/codex@0.152.1",
+        "@anthropic-ai/claude-code@2.1.258",
+      ],
       // Generation 2 bakes the resource policy into the snapshot. Generation 1
       // was built without resources, so it carries Daytona's defaults
       // (1 vCPU / 1 GiB / 3 GiB) and every sandbox from it drifts below policy.
-      snapshot: "coven-agents-copilot-2",
+      snapshot: "coven-agents-copilot-3",
     }
   );
 });
