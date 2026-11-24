@@ -362,6 +362,9 @@ export async function admitRunnerRun(
       ...(input.sandboxBinding ? { sandboxBinding: input.sandboxBinding } : {}),
       task: input.task,
       teamStepId: input.teamStepId ?? null,
+      ...(input.useOwnerExecutionPolicy
+        ? { useOwnerExecutionPolicy: true }
+        : {}),
     });
   } catch (error) {
     dependencies.reportFailure?.(runnerAdmissionFailure("run_insert", error));
@@ -523,6 +526,7 @@ export async function terminalizeUnstartedDispatchFailure(
     | "sandbox_binding_refused"
     | "sandbox_trust_conflict"
     | "workspace_configuration_unsafe"
+    | "network_configuration_unsafe"
     | "workspace_required",
   message: string,
   retryable: boolean,
@@ -789,6 +793,29 @@ export async function dispatchRunnerClaim(
     ))
       ? { kind: "retryable", reason: "sandbox_unavailable", runId: run.id }
       : { kind: "retained", reason: "cleanup_pending", runId: run.id };
+  }
+  if (run.executionPermission !== "unrestricted") {
+    let network: Awaited<ReturnType<RunnerExecutor["inspectNetworkSafety"]>>;
+    try {
+      network = await dependencies.executor.inspectNetworkSafety(
+        ensured.context
+      );
+    } catch {
+      network = { kind: "unavailable" };
+    }
+    if (network.kind !== "safe") {
+      return (await terminalizePreparedDispatchFailure(
+        dependencies,
+        callbacks,
+        preparedAttemptId,
+        run,
+        "network_configuration_unsafe",
+        "Restricted runner execution requires the configured provider egress allowlist.",
+        false
+      ))
+        ? { kind: "refused", reason: "workspace", runId: run.id }
+        : { kind: "retained", reason: "cleanup_pending", runId: run.id };
+    }
   }
   if (workspaceRestricted) {
     let inspection: Awaited<

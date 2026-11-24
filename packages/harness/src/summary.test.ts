@@ -72,3 +72,25 @@ test("file operations are collected in order", () => {
     { operation: "edited", path: "b.md" },
   ]);
 });
+
+test("denied tool requests stay in events but do not fabricate execution results", () => {
+  const events: RunEvent[] = [
+    {
+      at: AT,
+      callId: "denied",
+      kind: "tool-start",
+      summary: "echo forbidden",
+      tool: "bash",
+    },
+    {
+      at: AT,
+      callId: "denied",
+      executionDenied: true,
+      kind: "tool-end",
+      success: false,
+      summary: "",
+    },
+  ];
+  assert.deepEqual(summarizeRun(events).toolCalls, []);
+  assert.equal(events.length, 2);
+});

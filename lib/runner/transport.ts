@@ -36,6 +36,7 @@ export const RUNNER_ERROR_CODES = [
   "run_not_found",
   "runner_unavailable",
   "sandbox_binding_refused",
+  "sandbox_trust_conflict",
   "stale_version",
   "subscription_required",
   "unauthorized",
@@ -154,6 +155,12 @@ const RUNNER_ERROR_DEFINITIONS = {
   sandbox_binding_refused: {
     message:
       "The run's sandbox binding did not match the agent's recorded sandbox; nothing was created or changed.",
+    retryable: false,
+    status: 409,
+  },
+  sandbox_trust_conflict: {
+    message:
+      "The sandbox has unrestricted execution history and cannot run this restricted task.",
     retryable: false,
     status: 409,
   },

@@ -776,6 +776,7 @@ export const runnerAgent = pgTable(
       length: AGENT_RUNNER_LIMITS.maxModelLength,
     }).notNull(),
     name: varchar("name", { length: 64 }).notNull(),
+    ownerWorkspaceRead: boolean("ownerWorkspaceRead").notNull().default(false),
     pinnedSandboxGeneration: integer("pinnedSandboxGeneration"),
     pinnedSandboxId: varchar("pinnedSandboxId", { length: 128 }),
     runtime: varchar("runtime", {
