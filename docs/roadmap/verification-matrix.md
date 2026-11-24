@@ -1,5 +1,20 @@
 # Verification matrix
 
+## Delivery requalification — 2026-11-23
+
+The following source slices were reproduced during backlog delivery. No row changes issue acceptance, a Castles accepted revision, deployment state or release approval. #320 landed at `6d7f257d2793f1091877678e0e2e7c5daecadb30` and #299 closed after the acceptance replay below; #327, #330 and #324 remain unmerged. Refresh their heads and main before promotion. Historical passing receipts below retain their original commit and environment scope.
+
+| Candidate | Reproduced evidence | Remaining gate |
+| --- | --- | --- |
+| #320 `cda3c2b434db3f7bac3f5f8930e89e05d53c81ae` | Separate reviewer: 353 runner and 49 harness cases, zero skips, including actual pinned Copilot loopback reads/denials. Task clone: five local gates, 3,108 unit passes/13 skips and 36 PostgreSQL passes/zero skips. | Exact-head normal browser passed 35 cases/16 conditional skips after preserving/resetting owned generated cache and rebuilding. Landed signed main `6d7f257d2793f1091877678e0e2e7c5daecadb30` has the identical qualified tree; its focused acceptance replay passed 276 cases and PostgreSQL replay 36 cases, zero skips. #299 is closed with [acceptance evidence](https://github.com/OpenCoven/coven-agents/issues/299#issuecomment-7118619008). Earlier document and disabled/detaching Send failures remain retained; cause is not fully established. Live/deployed and installed-version evidence remain separate. |
+| #327 `0d0e519c9c61533ed5c7a0c41ea7c3bd2e04cb90` | Separate review: five PostgreSQL binding cases, 22 focused cases, 75 contract cases and populated/repeated upgrade. Current signed validation `5e15007a59d5c60780f9baa0d0611f2f113296e6` preserves owner migration 0050 and correctly linked public-attempt 0051 with the exact backfill. Six local/database gates passed: 3,108 unit passes/16 conditional skips, 39 PostgreSQL passes/zero skips; normal browser 35 passes/16 conditional skips. Shared focus and test-fixture corrections retain all assertions and runtime bounds. | Original branch integration handoff, authorized merge and both acceptance rows on landed main. Original branch is unchanged; #325 is excluded. |
+| #330 `7d6557dd2aa923bf38e28025eea657947053e3cd` | Runtime correction `100545d` passed separate review: 90 credential/process cases, 46 admission/codec cases and seven boundary probes. Original failures and intermediate `d9caa06`/`ff4265f` receipts retain their head scope. Reviewed owner-policy merge `99bff44` preserves both parent test blocks. Current head adds reviewed focus retention and stronger browser assertions; six local/database gates passed with 3,139 unit passes/13 skips and 36 PostgreSQL passes/zero skips. Normal browser passed 35 cases/16 conditional skips. | Ready transition, authorized landing and acceptance replay on main. Native UID-0 execution, provisioned snapshot contents, trusted target versions and authenticated model execution remain separate operator evidence. |
+| Current validation-only composition `96d97f5701ab54ced6a8cfd16b4e59cc9f76f30c` | Five local gates plus DB verification: 3,140 unit passes/18 conditional skips, 41 PostgreSQL passes/zero skips. Normal browser: 35 passes/16 conditional skips with stronger focus assertions. No font mock, thread-pool override, assertion removal or deadline change. Latest shared fixture correction is test-only; production timeout bounds are unchanged. | Source-head landings, original branch handoffs and consumer acceptance. This composition is not a substitute main merge or deployment proof. |
+| Earlier validation-only composition `7553744641348f37145fb70fd674b2f26a24228e` | Five local gates, 3,140 unit passes/18 conditional skips, 41 PostgreSQL passes/zero skips and normal hermetic browser 35 passes/16 conditional skips. No font mock, thread-pool override, assertion or deadline change. First shared lease-count race fixed by run-scoped zero-lease assertions; a later intermittent admission refusal and passing diagnostic rerun are retained without an established cause. | Per-PR source-head qualification, original #327 branch handoff, authorized landings and consumer acceptance. This composition is not a substitute main merge or deployment proof. |
+| #324 and Castles #21 | Separate review: producer 37 inspection/HTTP plus 75 contract cases; consumer 452 passes/one network-permission skip, 16 detail cases and typecheck; exact-pair matrix 40/40. Current producer validation `552ae411d33e71bb0f7f541f15f6ea98c4543e2f` retains identical inspection adapter/contract blobs and adds landed owner policy plus shared focus retention. Six local/database gates passed: 3,109 unit passes/13 skips, 36 PostgreSQL passes/zero skips; normal browser 35 passes/16 conditional skips. | Producer ready/ownership disposition, authorized landing and consumer steward/maintainer acceptance of verified landed revisions. #323 platform decision remains separate; accepted consumer pins are unchanged. |
+
+Only explicitly authorized unrestricted Daytona execution is implemented by the Codex/Claude candidate. Unsupported restricted modes and brokered GitHub-tool requests refuse before provider preparation or credential acquisition. Stored invalid Codex auth is validated at save and again before credential staging/process launch; dispatch may already have prepared its context before acquiring an older stored credential. Pinned local binaries and synthetic events do not prove target installation or provider execution.
+
 ## Local baseline checkpoint
 
 PR #302 is merged at `181e389fd5e61b44b7626d8fd541209c88b9cfd5`. Its tree matches the tested PR head `4f06dfe342ab366f570297276b2f772cbf22f424`. Frozen installation, build, 2,927 unit tests, 17 disposable PostgreSQL tests, and 34 fixture-backed browser tests passed on the PR tree. Eight unit cases and 16 browser cases were skipped by their existing conditions. Check and typecheck passed again on the merged checkout. The first concurrent unit run hit a test deadline, and the serial full rerun passed with the original deadline. Isolated-checkout hygiene passed. Shared-checkout hygiene reported other active local work. [Baseline verification receipt](https://github.com/OpenCoven/coven-agents/pull/302#issuecomment-7000058884)
@@ -10,21 +25,22 @@ The scoped owner and inspection merge is `d1df95c2e202576ff396f786edffd90ece4f30
 
 Guarded binding and execution evidence merged at `1496f0bbb09ac43de596e90baca1ef835caf648b`. The merge tree matches the qualified tree that passed 3,227 unit, 24 disposable PostgreSQL, and 35 hermetic browser cases. The exact merged checkout passed static checks, typecheck, and the focused binding and prewarm tests. Live Castles and Daytona acceptance remains pending. [Guarded binding evidence](https://github.com/OpenCoven/coven-agents/issues/298#issuecomment-7000529257)
 
+### Sandbox inspection candidates
+
+Producer [PR #324](https://github.com/OpenCoven/coven-agents/pull/324) at `6dedc26e9d49d945fc2442252c531b9ffdba3e18` and consumer [Castles PR #21](https://github.com/OpenCoven/coven-castles/pull/21) at `910d60ed770516e21446760fced3779a9868375f` match the 40-case compatibility receipt. The consumer is stacked on [Castles PR #18](https://github.com/OpenCoven/coven-castles/pull/18) at `e064756cd6f9cf404cf582d9407db3e5e6aa9b4f`. The maintainer approved the additive wire convention. A separate agent review reproduced both sides and the full 40-case matrix; consumer steward/maintainer acceptance of the pair remains pending. [Contract decision](https://github.com/OpenCoven/coven-agents/pull/324#issuecomment-7081318179) · [Compatibility receipt](https://github.com/OpenCoven/coven-agents/issues/322#issuecomment-7081475247)
+
+| Requirement | Candidate evidence | Acceptance gate |
+| --- | --- | --- |
+| #322 TTL, warm pool, linked sandbox and volumes | The recording provider exercised each omission. In detailed mode, each unknown survives JSON rendering and causes a field-specific refusal. Explicit false or zero survives as known absence. True or a positive count triggers the corresponding policy refusal. Default v1 remains compatible. A fresh synthetic replay of the 16 `#322 detail` tests passed, including exact inspection call counts, malformed inputs and redaction. | Separate agent review is complete; required consumer steward/maintainer acceptance of the tested pair remains pending. [Producer cases](https://github.com/OpenCoven/coven-agents/issues/322#issuecomment-7038161849) · [Consumer tests](https://github.com/OpenCoven/coven-castles/blob/910d60ed770516e21446760fced3779a9868375f/tests/preflight.test.ts) |
+| #323 OS and architecture | Daytona SDK 0.231.1 supplies neither field on its exact-ID Sandbox response. The candidate emits two nulls. Castles can infer platform policy when the qualified snapshot pin matches. A synthetic replay through this consumer supplied OS alone, architecture alone and both together. Each valid input rendered two observed nulls. Even a Windows input against the qualified Linux snapshot returned fixture-ready. A numeric OS was refused. Every case returned false for live readiness. | The maintainer must decide whether unknown satisfies each field. If observations are required, the provider adapter owner must identify an authorized exact-ID source and demonstrate each populated field plus independent omissions through the consumer. The Castles #2 steward must also preserve reported values and decide how a conflict with snapshot policy affects readiness. [Platform checkpoint](https://github.com/OpenCoven/coven-agents/issues/323#issuecomment-7038162870) · [Producer mapping](https://github.com/OpenCoven/coven-agents/blob/6dedc26e9d49d945fc2442252c531b9ffdba3e18/lib/runner/daytona/resource-inspection.ts) |
+
 ## Billing ledger checkpoint
 
 The account-keyed pack ledger landed at `1a2f4479a4eacd0b2376630eb168aa9770b55e6e`. Its merge tree passed 3,240 unit, 35 disposable PostgreSQL, and 35 hermetic browser tests. The database suite verified a fresh install, an upgrade from runner migration 0047, cap changes, key rotation, and refusal of unresolved paid history. The browser suite passed after a fresh Next.js cache retry. Production migration and live acceptance remain separate. [Cap-change evidence](https://github.com/OpenCoven/coven-agents/issues/225#issuecomment-7005167520) · [Key-rotation evidence](https://github.com/OpenCoven/coven-agents/issues/226#issuecomment-7005167860)
 
 ## Historical release evidence
 
-This matrix records implemented source and retained evidence as of 2026-09-09
-for application baseline `93b4784b8622cf371e63347f034df3cdd8aac70d`
-and draft [PR #268](https://github.com/OpenCoven/coven-agents/pull/268), which
-adds the bounded containment diagnostic. Repository and local contract
-procedures are verified; infrastructure cutover evidence is retained; public
-guest replay, Production-config operator paths, a non-promoted exact latest-main
-production-target candidate, and the exact production Daytona snapshot profile
-are verified. Persistent Daytona reuse, subscriber certification, observation,
-and full product release certification remain pending.
+This matrix records implemented source and retained evidence as of 2026-09-09 for application baseline `93b4784b8622cf371e63347f034df3cdd8aac70d` and draft [PR #268](https://github.com/OpenCoven/coven-agents/pull/268), which adds the bounded containment diagnostic. Repository and local contract procedures are verified; infrastructure cutover evidence is retained; public guest replay, Production-config operator paths, a non-promoted exact latest-main production-target candidate, and the exact production Daytona snapshot profile are verified. Persistent Daytona reuse, subscriber certification, observation, and full product release certification remain pending.
 
 ## State vocabulary
 
@@ -37,7 +53,9 @@ and full product release certification remain pending.
 | `Certified` | Release-equivalent evidence is retained and owner-approved. |
 | `Blocked` | A named prerequisite prevents the required procedure. |
 
-## Current matrix
+**Correction note — 2026-11-23:** The matrix below preserves the September evidence and its original next actions. PR #268 subsequently landed in `a16de59c4047a25eebb293b608752b0a0393e8d6`; references below to its draft or unmerged state are historical. Current inventory, deployed containment, reset and reuse acceptance remain unverified under #262. Use the delivery checkpoint above and [current state](current-state.md) for current repository status.
+
+## Historical matrix — 2026-09-09
 
 | Capability | State | Repository evidence | Required next evidence |
 | --- | --- | --- | --- |
@@ -63,7 +81,4 @@ and full product release certification remain pending.
 | Vercel Git deployment disablement | `Verified` | `vercel.json`, deployment documentation policy, and focused unit coverage | Account-level project disconnection only if full Vercel retirement is separately approved |
 | Production smoke and rollback | `Pending` | [release readiness](release-readiness.md), [cutover attestation](../operations/daytona-cutover-attestation.md), the Production-config receipt, the resource-repair receipt, and the [latest-main candidate receipt](../operations/p0-latest-main-candidate-receipt-2026-09-02.json) prove exact-build health, closed-beta refusal, exact snapshot configuration, bounded provider/Stripe operator access, credential separation, alias state, definitive resize rejection recovery, aggregate inventory, and a non-promoted latest-main build with signed-out and operator refusal smoke | Authenticated subscriber promotion and rollback, deployed containment receipt, persistent sandbox lifecycle, resolved provider-blocked inventory disposition, observation window, and named approvals |
 
-The [Daytona cutover audit](daytona-cutover-audit-2026-08-29.md) records the
-documentation and repository assessment. Any relevant code, configuration,
-schema, or dependency change invalidates the affected row until its procedure
-is rerun.
+The [Daytona cutover audit](daytona-cutover-audit-2026-08-29.md) records the documentation and repository assessment. Any relevant code, configuration, schema, or dependency change invalidates the affected row until its procedure is rerun.

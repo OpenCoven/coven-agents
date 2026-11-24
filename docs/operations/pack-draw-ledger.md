@@ -1,5 +1,10 @@
 # Pack draw ledger cutover
 
+## Correction note
+
+As of 2026-11-23, the repository implementation described by this historical proposal has landed through [#317](https://github.com/OpenCoven/coven-agents/pull/317) and [#318](https://github.com/OpenCoven/coven-agents/pull/318); #225 and #226 are closed at the repository boundary. The candidate language below is retained as history and grants no deployment authority. Current cutover approval and rollback requirements are governed by [release readiness](../roadmap/release-readiness.md#database-migration), with dated source verification in the [verification matrix](../roadmap/verification-matrix.md#billing-ledger-checkpoint). Production customer reconciliation and migration remain separately gated.
+
+
 Refs #225 and #226; delivery continues in PR #276. The owner approved explicit account-keyed draws and coordination of the shared schema/migration paths. This document describes a candidate, not production acceptance.
 
 `RunPackDraw` records each authenticated reservation's pack allocation by account ID and run ID. A reserved run holds the recorded amount; a consumed run charges it. Release, expiry and confirmed prelaunch compensation stop counting that allocation. Terminal settlement lowers only that run's draw by the unused portion, in the same transaction as the measured charge. Other runs are never repriced after a cap edit, refund, or abuse-secret rotation. Monthly account usage also follows the ledger owner when optional reservation audit metadata is absent.
