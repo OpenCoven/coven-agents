@@ -67,7 +67,7 @@ async function SidebarShell({ children, params }: ChatLayoutProps) {
             className="mt-5 inline-flex h-10 items-center rounded-[8px] bg-[var(--oc-accent)] px-4 font-medium text-[13px] text-[var(--oc-accent-ink)] transition-opacity hover:opacity-90"
             href={signedIn ? "/account" : "/login"}
           >
-            {signedIn ? "Open account settings" : "Sign in with GitHub"}
+            {signedIn ? "Open account settings" : "Sign in"}
           </Link>
         </div>
       </main>

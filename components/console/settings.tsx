@@ -751,7 +751,7 @@ export function Settings({
                 textDecoration: "none",
               }}
             >
-              Sign in with GitHub
+              Sign in
             </Link>
           ) : (
             <span
@@ -764,7 +764,7 @@ export function Settings({
                 padding: "9px 14px",
               }}
             >
-              Sign in with GitHub
+              Sign in
             </span>
           )}
         </div>

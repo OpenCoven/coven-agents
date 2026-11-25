@@ -3,6 +3,7 @@ import {
   validateAbuseConfig,
 } from "../lib/abuse/config";
 import { approvedApplicationOrigin } from "../lib/auth/application-origin";
+import { readWorkOSConfiguration } from "../lib/auth/workos-config";
 import { validateCampaignConfig } from "../lib/billing/campaign";
 import { validateSubscriptionCheckoutEnvironment } from "../lib/billing/config-core";
 import { credentialKekRingFromEnvironment } from "../lib/credentials/key-ring";
@@ -301,6 +302,7 @@ export async function validateRuntimeConfig(
   env: NodeJS.ProcessEnv,
   explicitRelease: boolean
 ): Promise<void> {
+  readWorkOSConfiguration(env);
   hermeticRunnerMode(env);
   validateSubscriptionCheckoutEnvironment(env);
   validateGitHubEnvironment(env);

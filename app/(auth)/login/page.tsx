@@ -1,16 +1,7 @@
-"use client";
-
 import { Suspense } from "react";
 import { BetaNotice } from "@/components/chat/beta-notice";
 import { GithubSignInWithCallback } from "@/components/chat/github-sign-in";
 
-/**
- * GitHub is the only way in.
- *
- * The password form is gone with the Credentials provider: there was no mail
- * delivery, so a forgotten password was unrecoverable, and two sign-in paths
- * meant two sets of rules about who may enter.
- */
 export default function Page() {
   return (
     <>
@@ -22,9 +13,9 @@ export default function Page() {
         Create or access your account
       </h1>
       <p className="text-muted-foreground text-sm">
-        Continue with GitHub. New accounts start with guest access, and signing
-        in never starts an agent or a run. Sandbox warming begins only from an
-        authenticated subscriber console.
+        {process.env.WORKOS_AUTH_ENABLED === "1"
+          ? "Continue with WorkOS to sign in or request access. Joining the waitlist does not start an agent or grant execution access."
+          : "Continue with GitHub. New accounts start with guest access, and signing in never starts an agent or a run. Sandbox warming begins only from an authenticated subscriber console."}
       </p>
       {/* The boundary, stated where a stranger first meets the product. Set
           as a rule with a mark rather than loose fine print so it reads as a
@@ -40,7 +31,11 @@ export default function Page() {
 
       <div className="pt-2">
         <Suspense fallback={null}>
-          <GithubSignInWithCallback />
+          <GithubSignInWithCallback
+            provider={
+              process.env.WORKOS_AUTH_ENABLED === "1" ? "workos" : "github"
+            }
+          />
         </Suspense>
       </div>
     </>

@@ -300,14 +300,14 @@ export function AccountSettings({
                 className="mt-5 inline-flex h-10 items-center rounded-[8px] bg-[var(--oc-accent)] px-4 font-medium text-[13px] text-[var(--oc-accent-ink)] transition-opacity hover:opacity-90"
                 href={loginPath}
               >
-                Sign in with GitHub
+                Sign in
               </Link>
             ) : (
               <span
                 aria-disabled="true"
                 className="mt-5 inline-flex h-10 items-center rounded-[8px] bg-[var(--oc-accent)] px-4 font-medium text-[13px] text-[var(--oc-accent-ink)] opacity-60"
               >
-                Sign in with GitHub
+                Sign in
               </span>
             )}
           </div>

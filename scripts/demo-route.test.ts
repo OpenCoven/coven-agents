@@ -196,7 +196,7 @@ test("the guest preview offers account creation without starting live resources"
     loginPage,
     /Sandbox warming begins only from an[\s\S]*authenticated subscriber console/
   );
-  assert.match(loginPage, /<GithubSignInWithCallback\s*\/>/);
+  assert.match(loginPage, /<GithubSignInWithCallback\s+provider=/);
   assert.doesNotMatch(loginPage, /callbackUrl="\/agents"/);
   assert.doesNotMatch(githubSignIn, />or</);
 });
