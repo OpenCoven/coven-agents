@@ -79,6 +79,7 @@ test.describe("Legacy chat surface", () => {
 
     const input = page.getByTestId("multimodal-input");
     await expect(input).toBeVisible();
+    await expect(input).toBeFocused();
     await input.fill("Line 1\nLine 2");
     await expect(input).toHaveValue("Line 1\nLine 2");
     await expect(page.getByTestId("send-button")).toBeVisible();
@@ -156,6 +157,7 @@ test.describe("Legacy chat surface", () => {
     await expect(trigger).toContainText("1 failed");
 
     await trigger.focus();
+    await expect(trigger).toBeFocused();
     await page.keyboard.press("Enter");
 
     await expect(trigger).toHaveAttribute("aria-expanded", "true");
@@ -166,5 +168,6 @@ test.describe("Legacy chat surface", () => {
     await expect(card.getByText("1 tool call")).toBeVisible();
     await page.waitForTimeout(1200);
     await expect(trigger).toHaveAttribute("aria-expanded", "true");
+    await expect(trigger).toBeFocused();
   });
 });

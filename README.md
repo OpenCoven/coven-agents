@@ -126,8 +126,7 @@ Create or refresh the pinned harness snapshot with:
 pnpm daytona:snapshot
 ```
 
-GitHub Copilot CLI is the runnable harness today. Other detected harnesses are
-reported but refused until their event translation is implemented.
+The runner supports GitHub Copilot CLI, Codex CLI and Claude CLI. Codex and Claude require the new pinned snapshot generation and an explicitly authorized unrestricted sandbox run; unsupported restricted modes refuse. See the [CLI operations guide](docs/operations/codex-claude-cli.md) for credential formats, event handling, cleanup and the separate deployment/live-qualification gates.
 
 ## Administration
 

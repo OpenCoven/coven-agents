@@ -1455,7 +1455,7 @@ test("an unprovable preparation release retains its attempt for recovery", async
 
 test("snapshotted unsupported harness dispatch claims terminalize before sandbox, credential, accounting, or provider work", async () => {
   const calls: string[] = [];
-  const claimedRun = run({ agentRuntime: "codex" });
+  const claimedRun = run({ agentRuntime: "not-a-harness" as never });
   const authority = {
     expectedVersion: claimedRun.version,
     leaseToken: claimedRun.dispatchLeaseToken as string,
@@ -1470,7 +1470,7 @@ test("snapshotted unsupported harness dispatch claims terminalize before sandbox
     error: {
       code: "harness_unsupported",
       message:
-        "Daytona agents must select a supported harness runtime: copilot.",
+        "Daytona agents must select a supported harness runtime: copilot, codex, claude.",
       retryable: false,
     },
     status: "failed",
@@ -1520,7 +1520,7 @@ test("snapshotted unsupported harness dispatch claims terminalize before sandbox
         assert.deepEqual(input.error, {
           code: "harness_unsupported",
           message:
-            "Daytona agents must select a supported harness runtime: copilot.",
+            "Daytona agents must select a supported harness runtime: copilot, codex, claude.",
           retryable: false,
         });
         return {
@@ -2783,6 +2783,77 @@ test("an ordinary ensure failure on a bound run is still requeued", async () => 
   assert.equal(dispatched.calls.includes("finalize:failed"), false);
   assert.equal(dispatched.calls.includes("credential"), false);
 });
+
+for (const runtime of ["codex", "claude"] as const) {
+  for (const executionPermission of [
+    "workspace_read",
+    "workspace_write",
+    "github_only",
+  ] as const) {
+    test(`${runtime} ${executionPermission} dispatch refuses before credential or provider work`, async () => {
+      const calls: string[] = [];
+      const claimedRun = run({
+        agentRuntime: runtime,
+        agentWorkspace: "/workspace/repo",
+        executionPermission,
+      });
+      const authority = {
+        expectedVersion: claimedRun.version,
+        leaseToken: claimedRun.dispatchLeaseToken as string,
+        runId: claimedRun.id,
+      } as RunnerDispatchAuthority;
+      const result = await dispatchRunnerClaim({ authority, run: claimedRun }, {
+        acquireCredential: async () => {
+          calls.push("credential");
+          throw new Error("must not acquire");
+        },
+        credentialInput: () => {
+          calls.push("credential-input");
+          throw new Error("must not construct");
+        },
+        executor: executor(),
+        limits: admissionLimitsFromEnvironment({}),
+        operator,
+        store: {
+          cleanupTerminalLease: async () => {
+            calls.push("cleanup");
+            return {
+              kind: "updated",
+              value: run({ ...claimedRun, status: "failed" }),
+            };
+          },
+          finalizeRun: async (
+            _operator: RunnerOperator,
+            input: { error: { code: string }; expectedVersion: number }
+          ) => {
+            calls.push("finalize");
+            assert.equal(input.error.code, "harness_unsupported");
+            return {
+              kind: "finalized",
+              prunedRunIds: [],
+              run: run({
+                ...claimedRun,
+                status: "failed",
+                version: input.expectedVersion + 1,
+              }),
+            };
+          },
+          getDispatchAgent: async () => ({
+            agent: agent({ runtime }),
+            kind: "found",
+            run: claimedRun,
+          }),
+        },
+      } as never);
+      assert.deepEqual(result, {
+        kind: "refused",
+        reason: "harness",
+        runId: claimedRun.id,
+      });
+      assert.deepEqual(calls, ["finalize", "cleanup"]);
+    });
+  }
+}
 
 test("restricted dispatch rejects absent provider egress policy before credentials", async () => {
   const calls: string[] = [];
