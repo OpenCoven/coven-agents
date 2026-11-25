@@ -307,6 +307,23 @@ export async function inspectDaytonaSandbox(
   let observation: SandboxInspectionObserved;
   try {
     observation = observed(sandbox, agent, configuration);
+    if (expected.includeProviderMetadata) {
+      observation.providerMetadata = {
+        autoDestroyAtConfigured:
+          sandbox.autoDestroyAt === undefined
+            ? null
+            : observation.autoDestroyAtConfigured,
+        linkedSandbox:
+          sandbox.linkedSandboxId === undefined
+            ? null
+            : observation.linkedSandbox,
+        // Daytona SDK 0.231.1 exposes neither value on its exact-ID Sandbox.
+        platform: { architecture: null, os: null },
+        volumes: Array.isArray(sandbox.volumes) ? observation.volumes : null,
+        warmPool:
+          sandbox.warmPoolId === undefined ? null : observation.warmPool,
+      };
+    }
   } catch (error) {
     if (error instanceof MalformedProviderMetadata) {
       return unavailable("provider");
