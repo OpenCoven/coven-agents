@@ -86,6 +86,7 @@ test.describe("Legacy chat surface", () => {
 
     await page.getByTestId("model-selector").click();
     await expect(page.getByPlaceholder("Search models...")).toBeVisible();
+    await expect(page.getByRole("option", { name: "Astra" })).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(page.getByPlaceholder("Search models...")).not.toBeVisible();
   });
