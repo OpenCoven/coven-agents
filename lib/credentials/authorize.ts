@@ -4,11 +4,12 @@ import {
   type Session,
   type SubscriberSession,
 } from "@/lib/session";
+import { CODEX_AUTH_MESSAGE, prepareCodexAuth } from "./codex-auth";
 
 export type CredentialWriteDecision =
   | { harnessId: string; kind: "allowed"; session: SubscriberSession }
   | { kind: "forbidden" }
-  | { kind: "invalid"; reason: string }
+  | { kind: "invalid"; reason: string; message?: string }
   | { kind: "unauthorized" };
 
 /**
@@ -26,7 +27,8 @@ export type CredentialWriteDecision =
  */
 export function decideCredentialWrite(
   session: Session | null,
-  body: { credential?: unknown; harnessId?: unknown }
+  body: { credential?: unknown; harnessId?: unknown },
+  operation: "store" | "remove" = "store"
 ): CredentialWriteDecision {
   if (!session) {
     return { kind: "unauthorized" };
@@ -48,5 +50,16 @@ export function decideCredentialWrite(
     return { kind: "invalid", reason: "empty_credential" };
   }
 
+  if (harnessId === "codex" && operation === "store") {
+    try {
+      prepareCodexAuth(credential);
+    } catch {
+      return {
+        kind: "invalid",
+        message: CODEX_AUTH_MESSAGE,
+        reason: "invalid_codex_auth",
+      };
+    }
+  }
   return { harnessId, kind: "allowed", session };
 }

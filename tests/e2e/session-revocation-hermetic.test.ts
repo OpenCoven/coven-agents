@@ -254,6 +254,14 @@ test.describe("hermetic session recovery", () => {
         const initialResponse = await initialCredentials;
         expect(initialResponse.status()).toBe(200);
         await initialResponse.finished();
+        if (surface === "account") {
+          await expect(
+            page.getByLabel("Codex CLI", { exact: true })
+          ).toBeVisible();
+          await expect(
+            page.getByLabel("Claude Code", { exact: true })
+          ).toBeVisible();
+        }
         await credentialField(page).fill("hermetic-never-saved-token");
         const refusal = page.waitForResponse(
           (response) =>
@@ -267,7 +275,10 @@ test.describe("hermetic session recovery", () => {
           page
             .getByRole("button", {
               exact: true,
-              name: "Save",
+              name:
+                surface === "account"
+                  ? "Save GitHub Copilot CLI credential"
+                  : "Save",
             })
             .click(),
         ]);
@@ -369,7 +380,12 @@ test.describe("hermetic session recovery", () => {
         response.url().endsWith("/api/credentials") &&
         response.request().method() === "POST"
     );
-    await page.getByRole("button", { exact: true, name: "Save" }).click();
+    await page
+      .getByRole("button", {
+        exact: true,
+        name: "Save GitHub Copilot CLI credential",
+      })
+      .click();
     expect((await refusal).status()).toBe(403);
     await expect(page).toHaveURL(/\/account$/);
     expect(

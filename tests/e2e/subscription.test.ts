@@ -1672,7 +1672,12 @@ test.describe("Subscriber checkout", () => {
     const credential = page.getByLabel("GitHub Copilot CLI");
     await expect(credential).toBeVisible();
     await credential.fill("saved-after-initial-read");
-    await page.getByRole("button", { exact: true, name: "Save" }).click();
+    await page
+      .getByRole("button", {
+        exact: true,
+        name: "Save GitHub Copilot CLI credential",
+      })
+      .click();
     await expect(page.getByText("Stored", { exact: true })).toBeVisible();
 
     releaseInitialGet();

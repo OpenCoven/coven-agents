@@ -86,6 +86,8 @@ const EXTERNAL_ENVIRONMENT_PREFIXES = [
   "AZURE_",
   "BLOB_",
   "COHERE_",
+  "CODEX_",
+  "CLAUDE_",
   "CREDENTIAL_KEK",
   "DATABASE_",
   "DAYTONA_",

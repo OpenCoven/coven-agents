@@ -59,7 +59,8 @@ const TABS: { id: Exclude<Tab, "billing">; label: string }[] = [
 
 const GUIDANCE: Record<string, string> = {
   claude: "A Claude Code OAuth token.",
-  codex: "An OpenAI API key.",
+  codex:
+    "Your Codex CLI ChatGPT auth.json contents. API-key sign-ins are not accepted.",
   copilot:
     "A fine-grained PAT with the Copilot Requests permission, or an OAuth token from the Copilot CLI. Classic ghp_ tokens are not supported.",
 };
@@ -173,7 +174,9 @@ function HarnessCard({
               placeholder={
                 configured
                   ? "Paste a new token to replace the stored one"
-                  : "Paste the token"
+                  : harness.id === "codex"
+                    ? "Paste auth.json"
+                    : "Paste the token"
               }
               style={inputStyle}
               type="password"

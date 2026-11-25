@@ -11,11 +11,11 @@ import {
   SUPPORTED_HARNESS_IDS,
 } from "./registry";
 
-test("copilot is the supported harness subset", () => {
-  assert.deepEqual([...SUPPORTED_HARNESS_IDS], ["copilot"]);
+test("Copilot, Codex and Claude form the supported harness subset", () => {
+  assert.deepEqual([...SUPPORTED_HARNESS_IDS], ["copilot", "codex", "claude"]);
   assert.ok(isRunnableHarness("copilot"));
-  assert.ok(!isRunnableHarness("codex"));
-  assert.ok(!isRunnableHarness("claude"));
+  assert.ok(isRunnableHarness("codex"));
+  assert.ok(isRunnableHarness("claude"));
 });
 
 test("no harness authenticates with a model provider API key", () => {
@@ -29,7 +29,9 @@ test("no harness authenticates with a model provider API key", () => {
           (name) =>
             name.startsWith("COPILOT_") ||
             name.endsWith("GITHUB_TOKEN") ||
-            name === "GH_TOKEN"
+            name === "GH_TOKEN" ||
+            (spec.id === "codex" && name === "COVEN_CODEX_AUTH_JSON") ||
+            (spec.id === "claude" && name === "CLAUDE_CODE_OAUTH_TOKEN")
         ),
         `${spec.id} must authenticate through its own CLI credential`
       );

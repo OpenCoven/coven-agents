@@ -27,6 +27,10 @@ import {
   toShellCommand,
 } from "@opencoven/harness";
 import { ZodError } from "zod";
+import {
+  CODEX_AUTH_MESSAGE,
+  prepareCodexAuth,
+} from "../credentials/codex-auth";
 
 export type {
   HarnessId,
@@ -96,7 +100,11 @@ export function resolveSandboxWorkspace(requested?: string): string {
 export function requireHarness(
   runtime: string,
   supplied: HarnessCredential
-): { auth: { name: string; value: string }; spec: HarnessSpec } {
+): {
+  auth: { name: string; value: string };
+  secrets: readonly string[];
+  spec: HarnessSpec;
+} {
   const spec = harnessSpec(runtime);
   if (!spec) {
     throw new HarnessError(`Unknown harness: ${runtime}`, "unknown_harness");
@@ -112,7 +120,20 @@ export function requireHarness(
   if (!name || typeof value !== "string" || !value.trim()) {
     throw new HarnessError(harnessAuthHint(spec), "harness_unauthenticated");
   }
-  return { auth: { name, value }, spec };
+  if (spec.id === "codex") {
+    try {
+      const prepared = prepareCodexAuth(value);
+      return {
+        auth: { name, value: prepared.value },
+        secrets: prepared.secrets,
+        spec,
+      };
+    } catch {
+      // biome-ignore lint/style/useErrorCause: Credential diagnostics must never retain parser inputs.
+      throw new HarnessError(CODEX_AUTH_MESSAGE, "harness_unauthenticated");
+    }
+  }
+  return { auth: { name, value }, secrets: [value], spec };
 }
 
 export function harnessesFromProbe(
@@ -292,8 +313,11 @@ export function parseHarnessLog(
     : assembler.push(consumed);
   const events: RunEvent[] = [];
   let malformedDiagnostics = 0;
+  let lineOffset = 0;
 
   for (const line of lines) {
+    const lineStart = consumed.indexOf(line, lineOffset);
+    lineOffset = lineStart + line.length;
     let malformed = false;
     try {
       JSON.parse(line);
@@ -306,6 +330,16 @@ export function parseHarnessLog(
           (event) =>
             sanitizeHarnessEvent(harness, event, credential, fallbackAt)
         );
+        // These CLI result frames describe a turn, not the OS process exit.
+        // Leave the frame unread until the provider settles so the delivery
+        // cursor neither loses the result nor replays earlier streamed events.
+        if (
+          harness !== "copilot" &&
+          !terminal &&
+          normalized.some((event) => event.kind === "finished")
+        ) {
+          return { cursor: safeCursor + lineStart, events, pendingTail };
+        }
         events.push(...normalized);
       } catch (error) {
         if (
