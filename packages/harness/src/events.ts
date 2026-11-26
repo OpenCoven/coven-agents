@@ -75,6 +75,21 @@ function optionalRecord(
   return asRecord(value) ?? malformed();
 }
 
+function toolArguments(
+  data: Record<string, unknown>
+): Record<string, unknown> | null {
+  if (typeof data.arguments !== "string") {
+    return optionalRecord(data, "arguments") ?? null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data.arguments);
+  } catch {
+    return malformed();
+  }
+  return asRecord(parsed) ?? malformed();
+}
+
 function eventData(envelope: Record<string, unknown>): Record<string, unknown> {
   return optionalRecord(envelope, "data") ?? {};
 }
@@ -188,7 +203,7 @@ export function normalizeCopilotEvent(
               text,
             },
           ]
-        : data.content === undefined
+        : data.content === undefined || data.content === ""
           ? []
           : malformed();
     }
@@ -204,10 +219,7 @@ export function normalizeCopilotEvent(
           at,
           callId,
           kind: "tool-start",
-          summary: summarizeArguments(
-            tool,
-            optionalRecord(data, "arguments") ?? null
-          ),
+          summary: summarizeArguments(tool, toolArguments(data)),
           tool,
         },
       ];
@@ -221,6 +233,12 @@ export function normalizeCopilotEvent(
       const result = optionalRecord(data, "result");
       const summary = result ? (optionalString(result, "content") ?? "") : "";
       const { success } = data;
+      const error = optionalRecord(data, "error");
+      const executionDenied =
+        success === false &&
+        error?.code === "failure" &&
+        typeof error.message === "string" &&
+        /^Tool '[^']+' does not exist\.$/u.test(error.message);
       if (success !== undefined && typeof success !== "boolean") {
         return malformed();
       }
@@ -229,6 +247,7 @@ export function normalizeCopilotEvent(
           at,
           callId,
           kind: "tool-end",
+          ...(executionDenied ? { executionDenied: true as const } : {}),
           success: success !== false,
           summary: clamp(summary),
         },
@@ -289,18 +308,243 @@ export function normalizeCopilotEvent(
   }
 }
 
+/** Parse structured CLI lines; chrome is ignored, malformed JSON values refuse. */
+function cliEnvelope(line: string): Record<string, unknown> | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  return asRecord(parsed) ?? malformed();
+}
+
+function requiredString(record: Record<string, unknown>, key: string): string {
+  return asString(record[key]) ?? malformed();
+}
+
+function terminal(
+  at: string,
+  failed: boolean,
+  sessionId: string | null = null
+): RunEvent {
+  return {
+    at,
+    exitCode: null,
+    filesModified: [],
+    kind: "finished",
+    sessionId,
+    status: failed ? "failed" : "completed",
+  };
+}
+
+/** Codex exec --json, pinned to the exec event vocabulary (not app-server RPC). */
+function normalizeCodexEvent(line: string, at: string): RunEvent[] {
+  const envelope = cliEnvelope(line);
+  if (!envelope) {
+    return [];
+  }
+  const type = optionalString(envelope, "type");
+  if (type === "turn.completed") {
+    optionalRecord(envelope, "usage");
+    return [terminal(at, false)];
+  }
+  if (type === "turn.failed" || type === "error") {
+    const error =
+      type === "error"
+        ? envelope
+        : (optionalRecord(envelope, "error") ?? malformed());
+    return [
+      { at, kind: "error", message: requiredString(error, "message") },
+      terminal(at, true),
+    ];
+  }
+  if (
+    type !== "item.started" &&
+    type !== "item.completed" &&
+    type !== "item.updated"
+  ) {
+    return [];
+  }
+  const item = optionalRecord(envelope, "item") ?? malformed();
+  const itemType = optionalString(item, "type");
+  const completed = type === "item.completed";
+  if (itemType === "agent_message" || itemType === "reasoning") {
+    const text = requiredString(item, "text");
+    return completed
+      ? [
+          itemType === "agent_message"
+            ? { at, kind: "message", model: null, text }
+            : { at, kind: "reasoning", text },
+        ]
+      : [];
+  }
+  if (itemType === "command_execution" || itemType === "mcp_tool_call") {
+    const callId = requiredString(item, "id");
+    const tool =
+      itemType === "command_execution"
+        ? itemType
+        : requiredString(item, "tool");
+    const summary =
+      itemType === "command_execution"
+        ? clamp(`${tool} ${requiredString(item, "command")}`)
+        : clamp(`${requiredString(item, "server")} ${tool}`);
+    if (type === "item.started") {
+      return [{ at, callId, kind: "tool-start", summary, tool }];
+    }
+    if (!completed) {
+      return [];
+    }
+    const status = requiredString(item, "status");
+    if (status !== "completed" && status !== "failed") {
+      return malformed();
+    }
+    const exit = optionalNumber(item, "exit_code", true);
+    const text = optionalString(item, "aggregated_output") ?? summary;
+    return [
+      {
+        at,
+        callId,
+        kind: "tool-end",
+        success: status === "completed" && (exit === undefined || exit === 0),
+        summary: clamp(text),
+      },
+    ];
+  }
+  if (itemType === "file_change" && completed) {
+    if (item.status !== "completed" && item.status !== "failed") {
+      return malformed();
+    }
+    if (!Array.isArray(item.changes)) {
+      return malformed();
+    }
+    const events = item.changes.map((change) => {
+      const entry = asRecord(change) ?? malformed();
+      const path = requiredString(entry, "path");
+      const operation =
+        entry.kind === "add"
+          ? "created"
+          : entry.kind === "delete"
+            ? "deleted"
+            : entry.kind === "update"
+              ? "edited"
+              : malformed();
+      return { at, kind: "file" as const, operation, path };
+    });
+    // A requested or failed patch is not evidence that a file changed.
+    return item.status === "completed" ? events : [];
+  }
+  if (itemType === "error" && completed) {
+    return [{ at, kind: "error", message: requiredString(item, "message") }];
+  }
+  return [];
+}
+
+/** Claude --print --output-format stream-json. Unknown frames are ignored. */
+function normalizeClaudeEvent(line: string, at: string): RunEvent[] {
+  const envelope = cliEnvelope(line);
+  if (!envelope) {
+    return [];
+  }
+  const type = optionalString(envelope, "type");
+  if (type === "result") {
+    if (typeof envelope.is_error !== "boolean") {
+      return malformed();
+    }
+    const subtype = requiredString(envelope, "subtype");
+    const failed = envelope.is_error || subtype !== "success";
+    const sessionId = optionalString(envelope, "session_id") ?? null;
+    const message = optionalString(envelope, "result");
+    const errors = stringArray(envelope, "errors");
+    return [
+      ...(failed
+        ? [
+            {
+              at,
+              kind: "error" as const,
+              message:
+                message || errors?.join("; ") || "Claude CLI run failed.",
+            },
+          ]
+        : []),
+      terminal(at, failed, sessionId),
+    ];
+  }
+  if (type !== "assistant" && type !== "user") {
+    return [];
+  }
+  const message = optionalRecord(envelope, "message") ?? malformed();
+  if (!Array.isArray(message.content)) {
+    return malformed();
+  }
+  const model = optionalString(message, "model") ?? null;
+  const events: RunEvent[] = [];
+  for (const raw of message.content) {
+    const block = asRecord(raw) ?? malformed();
+    const kind = optionalString(block, "type");
+    if (type === "assistant" && kind === "text") {
+      events.push({
+        at,
+        kind: "message",
+        model,
+        text: requiredString(block, "text"),
+      });
+    } else if (type === "assistant" && kind === "tool_use") {
+      const tool = requiredString(block, "name");
+      events.push({
+        at,
+        callId: requiredString(block, "id"),
+        kind: "tool-start",
+        summary: summarizeArguments(
+          tool,
+          optionalRecord(block, "input") ?? null
+        ),
+        tool,
+      });
+    } else if (type === "user" && kind === "tool_result") {
+      if (block.is_error !== undefined && typeof block.is_error !== "boolean") {
+        return malformed();
+      }
+      let summary = "";
+      if (typeof block.content === "string") {
+        summary = block.content;
+      } else if (Array.isArray(block.content)) {
+        summary = block.content
+          .map((rawPart) => {
+            const part = asRecord(rawPart) ?? malformed();
+            return part.type === "text" ? requiredString(part, "text") : "";
+          })
+          .join(" ");
+      } else if (block.content !== undefined) {
+        return malformed();
+      }
+      events.push({
+        at,
+        callId: requiredString(block, "tool_use_id"),
+        kind: "tool-end",
+        success: block.is_error !== true,
+        summary: clamp(summary),
+      });
+    }
+  }
+  return events;
+}
+
 export function normalizeEvent(
   harness: HarnessId,
   line: string,
   fallbackAt: string
 ): RunEvent[] {
-  if (harness === "copilot") {
-    return normalizeCopilotEvent(line, fallbackAt);
+  switch (harness) {
+    case "copilot":
+      return normalizeCopilotEvent(line, fallbackAt);
+    case "codex":
+      return normalizeCodexEvent(line, fallbackAt);
+    case "claude":
+      return normalizeClaudeEvent(line, fallbackAt);
+    default:
+      return [];
   }
-  // Codex and Claude are detected and reported, but their event translation is
-  // deliberately not implemented yet. Emitting nothing is honest; guessing at a
-  // shape would render invented detail.
-  return [];
 }
 
 /**

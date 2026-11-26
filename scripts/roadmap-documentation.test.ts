@@ -11,11 +11,14 @@ function read(path: string): string {
 test("the current-state snapshot covers merged product and planning surfaces", () => {
   const currentState = read("docs/roadmap/current-state.md");
 
-  assert.match(currentState, /Snapshot date: 2026-09-09/u);
-  assert.match(
-    currentState,
-    /Application baseline: `93b4784b8622cf371e63347f034df3cdd8aac70d`/u
-  );
+  const snapshotDate = /^- Snapshot date: (\d{4}-\d{2}-\d{2})$/mu.exec(
+    currentState
+  )?.[1];
+  assert.ok(snapshotDate);
+  assert.equal(new Date(snapshotDate).toISOString().slice(0, 10), snapshotDate);
+  assert.ok(snapshotDate <= new Date().toISOString().slice(0, 10));
+  assert.match(currentState, /^- Repository baseline: `[a-f0-9]{40}`$/mu);
+  assert.match(currentState, /93b4784b8622cf371e63347f034df3cdd8aac70d/u);
 
   for (const evidence of [
     "Console workspace",

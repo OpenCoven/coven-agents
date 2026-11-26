@@ -4,6 +4,7 @@ import test from "node:test";
 import { DaytonaNotFoundError } from "@daytona/sdk";
 import type { CommandEvidence, FileEvidence } from "@opencoven/agent-contracts";
 import { sanitizeEvidenceText } from "@opencoven/agent-contracts";
+import { type RunEvent, summarizeRun } from "@opencoven/harness";
 import {
   attemptLeaseMsFromEnvironment,
   cancelRunnerRun,
@@ -3605,6 +3606,7 @@ test("reconciliation appends only fresh logs and terminalizes a settled command"
   const commandId = "daytona-command-neutral-projection";
   const sessionId = "daytona-session-neutral-projection";
   const attached = run({
+    agentRuntime: "claude",
     daytonaCommandId: commandId,
     daytonaSessionId: sessionId,
     dispatchState: "running",
@@ -3647,6 +3649,11 @@ test("reconciliation appends only fresh logs and terminalizes a settled command"
         return {} as never;
       },
       snapshot: async (input) => {
+        assert.equal(
+          input.harness,
+          "claude",
+          "recovery must use the frozen runtime, not a hardcoded translator"
+        );
         calls.push("snapshot");
         for (const value of privateValues) {
           assert.equal(
@@ -4052,4 +4059,114 @@ test("cron recovery refuses the provisioning mismatch branch when the snapshot c
       `a ${snapshot.label} snapshot must report ${snapshot.permanent ? "a failure" : "a deferral"}`
     );
   }
+});
+
+test("read-only owner run reconciliation records reads as events without command evidence", async () => {
+  const current = run({
+    daytonaCommandId: "command",
+    dispatchState: "running",
+    executionPermission: "workspace_read",
+    status: "running",
+  });
+  const authority = {
+    attemptId,
+    expectedVersion: 2,
+    leaseToken: "fixture",
+    runId: current.id,
+  } as RunnerDispatchAuthority;
+  const events: RunEvent[] = [
+    {
+      at: new Date(0).toISOString(),
+      callId: "read",
+      kind: "tool-start",
+      summary: "inside.txt",
+      tool: "view",
+    },
+    {
+      at: new Date(0).toISOString(),
+      callId: "read",
+      kind: "tool-end",
+      success: true,
+      summary: "original",
+    },
+  ];
+  events.push(
+    {
+      at: new Date(0).toISOString(),
+      callId: "denied",
+      kind: "tool-start",
+      summary: "forbidden",
+      tool: "bash",
+    },
+    {
+      at: new Date(0).toISOString(),
+      callId: "denied",
+      executionDenied: true,
+      kind: "tool-end",
+      success: false,
+      summary: "",
+    }
+  );
+  let finalized = false;
+  const result = await reconcileAndDispatch({
+    clock: () => new Date("2026-08-28T15:00:00.000Z"),
+    operator,
+    provider: {
+      requiresAttemptRedaction: false,
+      resolveExecutionContext: async () => ({}) as never,
+      snapshot: async () =>
+        ({
+          cursor: 2,
+          events,
+          exitCode: 0,
+          logsSettled: true,
+          status: "completed",
+          summary: summarizeRun(events),
+        }) as never,
+      stop: async () => ({ kind: "stopped" }),
+    },
+    store: {
+      adoptExpiredDaytonaProcess: async () => ({
+        authority,
+        kind: "adopted",
+        run: current,
+      }),
+      appendDispatchEventBatch: async (
+        _operator: unknown,
+        _authority: unknown,
+        batch: { events: unknown[]; snapshot: { commandEvidence: unknown[] } }
+      ) => {
+        assert.equal(
+          batch.events.length,
+          4,
+          "read and denial events stay visible"
+        );
+        assert.deepEqual(batch.snapshot.commandEvidence, []);
+        return { authority, events: [], kind: "appended", run: current };
+      },
+      cleanupTerminalLease: async () => ({ kind: "updated", value: current }),
+      deleteAttemptRedaction: async () => ({ kind: "deleted" }),
+      finalizeRun: async (
+        _operator: unknown,
+        input: { commandEvidence: unknown[]; fileEvidence: unknown[] }
+      ) => {
+        assert.deepEqual(input.commandEvidence, []);
+        assert.deepEqual(input.fileEvidence, []);
+        finalized = true;
+        return {
+          kind: "finalized",
+          prunedRunIds: [],
+          run: { ...current, status: "completed" },
+        };
+      },
+      readAttemptRedaction: async () => ({ kind: "not_found" }),
+      releaseTerminalDaytonaAttempt: async () => ({
+        authority,
+        kind: "released",
+      }),
+      scanExpiredDispatchLeases: async () => [current],
+    } as never,
+  });
+  assert.equal(result.terminalized, 1);
+  assert.equal(finalized, true);
 });

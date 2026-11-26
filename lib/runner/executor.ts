@@ -121,6 +121,9 @@ export type RunnerExecutor = Readonly<{
       context: RunnerExecutionContext;
     }>
   >;
+  inspectNetworkSafety: (
+    context: RunnerExecutionContext
+  ) => Promise<RestrictedWorkspaceInspection>;
   inspectWorkspaceSafety: (
     context: RunnerExecutionContext,
     workspace: string

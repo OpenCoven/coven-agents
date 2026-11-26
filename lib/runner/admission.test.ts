@@ -50,6 +50,7 @@ function executor(overrides: Partial<RunnerExecutor> = {}): RunnerExecutor {
       context: executionContext,
     }),
     executionProvenance,
+    inspectNetworkSafety: async () => ({ kind: "safe" }),
     inspectWorkspaceSafety: async () => ({ kind: "safe" }),
     isCleanupPending: () => false,
     start: async (_input: RunnerExecutorStartInput) => {
@@ -1454,7 +1455,7 @@ test("an unprovable preparation release retains its attempt for recovery", async
 
 test("snapshotted unsupported harness dispatch claims terminalize before sandbox, credential, accounting, or provider work", async () => {
   const calls: string[] = [];
-  const claimedRun = run({ agentRuntime: "codex" });
+  const claimedRun = run({ agentRuntime: "not-a-harness" as never });
   const authority = {
     expectedVersion: claimedRun.version,
     leaseToken: claimedRun.dispatchLeaseToken as string,
@@ -1469,7 +1470,7 @@ test("snapshotted unsupported harness dispatch claims terminalize before sandbox
     error: {
       code: "harness_unsupported",
       message:
-        "Daytona agents must select a supported harness runtime: copilot.",
+        "Daytona agents must select a supported harness runtime: copilot, codex, claude.",
       retryable: false,
     },
     status: "failed",
@@ -1519,7 +1520,7 @@ test("snapshotted unsupported harness dispatch claims terminalize before sandbox
         assert.deepEqual(input.error, {
           code: "harness_unsupported",
           message:
-            "Daytona agents must select a supported harness runtime: copilot.",
+            "Daytona agents must select a supported harness runtime: copilot, codex, claude.",
           retryable: false,
         });
         return {
@@ -2781,4 +2782,207 @@ test("an ordinary ensure failure on a bound run is still requeued", async () => 
   assert.equal((await dispatched.result).kind, "retryable");
   assert.equal(dispatched.calls.includes("finalize:failed"), false);
   assert.equal(dispatched.calls.includes("credential"), false);
+});
+
+for (const runtime of ["codex", "claude"] as const) {
+  for (const executionPermission of [
+    "workspace_read",
+    "workspace_write",
+    "github_only",
+  ] as const) {
+    test(`${runtime} ${executionPermission} dispatch refuses before credential or provider work`, async () => {
+      const calls: string[] = [];
+      const claimedRun = run({
+        agentRuntime: runtime,
+        agentWorkspace: "/workspace/repo",
+        executionPermission,
+      });
+      const authority = {
+        expectedVersion: claimedRun.version,
+        leaseToken: claimedRun.dispatchLeaseToken as string,
+        runId: claimedRun.id,
+      } as RunnerDispatchAuthority;
+      const result = await dispatchRunnerClaim({ authority, run: claimedRun }, {
+        acquireCredential: async () => {
+          calls.push("credential");
+          throw new Error("must not acquire");
+        },
+        credentialInput: () => {
+          calls.push("credential-input");
+          throw new Error("must not construct");
+        },
+        executor: executor(),
+        limits: admissionLimitsFromEnvironment({}),
+        operator,
+        store: {
+          cleanupTerminalLease: async () => {
+            calls.push("cleanup");
+            return {
+              kind: "updated",
+              value: run({ ...claimedRun, status: "failed" }),
+            };
+          },
+          finalizeRun: async (
+            _operator: RunnerOperator,
+            input: { error: { code: string }; expectedVersion: number }
+          ) => {
+            calls.push("finalize");
+            assert.equal(input.error.code, "harness_unsupported");
+            return {
+              kind: "finalized",
+              prunedRunIds: [],
+              run: run({
+                ...claimedRun,
+                status: "failed",
+                version: input.expectedVersion + 1,
+              }),
+            };
+          },
+          getDispatchAgent: async () => ({
+            agent: agent({ runtime }),
+            kind: "found",
+            run: claimedRun,
+          }),
+        },
+      } as never);
+      assert.deepEqual(result, {
+        kind: "refused",
+        reason: "harness",
+        runId: claimedRun.id,
+      });
+      assert.deepEqual(calls, ["finalize", "cleanup"]);
+    });
+  }
+}
+
+test("restricted dispatch rejects absent provider egress policy before credentials", async () => {
+  const calls: string[] = [];
+  const claimedRun = run({
+    agentWorkspace: "/workspace/repo",
+    executionPermission: "github_only",
+    githubBrokerPolicy: {} as never,
+  });
+  const authority = {
+    expectedVersion: claimedRun.version,
+    leaseToken: claimedRun.dispatchLeaseToken as string,
+    runId: claimedRun.id,
+  } as RunnerDispatchAuthority;
+
+  const result = await dispatchRunnerClaim(
+    { authority, run: claimedRun },
+    {
+      acquireCredential: async () => {
+        calls.push("credential");
+        throw new Error("must not acquire a credential");
+      },
+      credentialInput: () => {
+        calls.push("credential-input");
+        throw new Error("must not build credential input");
+      },
+      executor: executor({
+        ensureExecutionContext: async () => {
+          calls.push("sandbox");
+          return { agent: agent(), context: executionContext };
+        },
+        inspectNetworkSafety: async () => {
+          calls.push("inspect-workspace");
+          return { kind: "unsafe" };
+        },
+      }),
+      githubTool: {
+        issueCapability: async () =>
+          assert.fail("network refusal reached GitHub authority"),
+        revokeCapability: async () => true,
+        url: "https://gateway.example.test/api/internal/github-tool",
+      },
+      limits: admissionLimitsFromEnvironment({}),
+      operator,
+      store: {
+        authorizeDaytonaPreparation: async () => {
+          calls.push("prepare");
+          return {
+            attemptId,
+            authority: {
+              ...authority,
+              attemptId,
+              expectedVersion: authority.expectedVersion + 1,
+            } as RunnerDispatchAuthority,
+            kind: "authorized" as const,
+          };
+        },
+        cleanupTerminalLease: async () => {
+          calls.push("cleanup");
+          return {
+            kind: "updated" as const,
+            value: run({
+              ...claimedRun,
+              completedAt: new Date("2026-08-28T15:00:01.000Z"),
+              dispatchLeaseExpiresAt: null,
+              dispatchLeaseToken: null,
+              dispatchState: "terminal",
+              status: "failed",
+            }),
+          };
+        },
+        finalizeRun: async (
+          _operator: RunnerOperator,
+          input: {
+            error?: {
+              code: string;
+              message: string;
+              retryable: boolean;
+            } | null;
+            expectedVersion: number;
+          }
+        ) => {
+          calls.push("finalize");
+          assert.equal(input.expectedVersion, authority.expectedVersion + 2);
+          assert.deepEqual(input.error, {
+            code: "network_configuration_unsafe",
+            message:
+              "Restricted runner execution requires the configured provider egress allowlist.",
+            retryable: false,
+          });
+          return {
+            kind: "finalized" as const,
+            prunedRunIds: [],
+            run: { ...claimedRun, version: claimedRun.version + 1 },
+          };
+        },
+        getDispatchAgent: async () => {
+          calls.push("get-agent");
+          return {
+            agent: agent(),
+            kind: "found" as const,
+            run: claimedRun,
+          };
+        },
+        releaseDaytonaPreparation: async () => {
+          calls.push("release-preparation");
+          return {
+            authority: {
+              ...authority,
+              expectedVersion: authority.expectedVersion + 2,
+            } as RunnerDispatchAuthority,
+            kind: "released" as const,
+          };
+        },
+      } as never,
+    }
+  );
+
+  assert.deepEqual(result, {
+    kind: "refused",
+    reason: "workspace",
+    runId: claimedRun.id,
+  });
+  assert.deepEqual(calls, [
+    "get-agent",
+    "prepare",
+    "sandbox",
+    "inspect-workspace",
+    "release-preparation",
+    "finalize",
+    "cleanup",
+  ]);
 });

@@ -4,6 +4,7 @@ import {
   AGENT_RUNNER_API_VERSION,
   type RunSnapshot,
 } from "@opencoven/agent-contracts";
+import { buildInvocation } from "@opencoven/harness";
 import { cancelRunnerRun, reconcileAndDispatch } from "./attempt-reconcile";
 import { createRunnerService } from "./service";
 import type {
@@ -247,8 +248,11 @@ test("agent creation refuses non-runnable harnesses before persistence", async (
   });
 
   assert.deepEqual(
-    await service.createAgent(PRINCIPAL, definition({ runtime: "codex" })),
-    { kind: "unsupported_harness" }
+    await service.createAgent(
+      PRINCIPAL,
+      definition({ runtime: "not-a-harness" as never })
+    ),
+    { kind: "invalid" }
   );
   assert.equal(writes, 0);
 });
@@ -381,9 +385,9 @@ test("agent updates reject unsupported runtimes before reading or mutating stora
     await service.updateAgent(
       PRINCIPAL,
       AGENT_ID,
-      definition({ runtime: "codex" })
+      definition({ runtime: "not-a-harness" as never })
     ),
-    { kind: "unsupported_harness" }
+    { kind: "invalid" }
   );
   assert.equal(reads, 0);
   assert.equal(writes, 0);
@@ -650,6 +654,14 @@ test("start maps admission conflict, capacity, and unavailable results without p
       },
     },
     {
+      code: "sandbox_trust_conflict",
+      expected: {
+        code: "sandbox_trust_conflict",
+        kind: "refused",
+        retryable: false,
+      },
+    },
+    {
       code: "sandbox_unavailable",
       expected: {
         code: "lifecycle_conflict",
@@ -763,7 +775,7 @@ test("start rejects unsupported harnesses before admission, persistence, dispatc
       return Promise.resolve({ kind: "idle" });
     },
     store: baseStore({
-      getAgent: async () => agent({ runtime: "codex" }),
+      getAgent: async () => agent({ runtime: "not-a-harness" as never }),
       startRun: () => {
         runWrites += 1;
         return Promise.resolve({ kind: "created" as const, run: run() });
@@ -1138,7 +1150,7 @@ test("prewarm targets the most recently used agent without credential access", a
 
 test("prewarm and warm reject unsupported harnesses before sandbox mutation or provider work", async () => {
   let warmCalls = 0;
-  const unsupported = agent({ runtime: "codex" });
+  const unsupported = agent({ runtime: "not-a-harness" as never });
   const service = createRunnerService({
     resourceLifecycle: {
       decommission: () => Promise.reject(new Error("must not decommission")),
@@ -1414,4 +1426,94 @@ test("start rejects a malformed sandbox binding before any lookup", async () => 
     { kind: "invalid" },
   ]);
   assert.equal(lookups, 0);
+});
+
+for (const runtime of ["codex", "claude"] as const) {
+  test(`${runtime} agent creation preserves the selected CLI runtime`, async () => {
+    let stored: unknown;
+    const service = createRunnerService({
+      store: baseStore({
+        createAgent: (_principal: RunnerPrincipal, input: unknown) => {
+          stored = input;
+          return Promise.resolve({
+            agent: agent({ runtime }),
+            kind: "created" as const,
+          });
+        },
+      }),
+    });
+    const result = await service.createAgent(
+      PRINCIPAL,
+      definition({ runtime })
+    );
+    assert.equal(result.kind, "created");
+    assert.equal((stored as { runtime: string }).runtime, runtime);
+  });
+}
+
+test("owner runs on read-only agents build a restricted Copilot invocation", async () => {
+  const configuredAgent = { ...agent(), ownerWorkspaceRead: true };
+  const invocations: ReturnType<typeof buildInvocation>[] = [];
+  const service = createRunnerService({
+    admit: (input) => {
+      invocations.push(
+        buildInvocation({
+          attemptDir: "/tmp/owner-run-attempt",
+          configDir: "/tmp/owner-run-config",
+          cwd: "/workspace",
+          harness: configuredAgent.runtime,
+          instructions: configuredAgent.instructions,
+          model: configuredAgent.model,
+          permissionMode: input.executionPermission,
+          task: input.task,
+        })
+      );
+      return Promise.resolve({ kind: "created", run: run() });
+    },
+    createId: () => RUN_ID,
+    store: baseStore({ getAgent: async () => configuredAgent }),
+  });
+
+  const widening = await service.startRun(PRINCIPAL, 7, AGENT_ID, {
+    executionPermission: "unrestricted",
+    operationId: OPERATION_ID,
+    task: "Inspect the workspace.",
+  } as Parameters<typeof service.startRun>[3]);
+  assert.equal(widening.kind, "invalid");
+  assert.equal(invocations.length, 0);
+
+  const result = await service.startRun(PRINCIPAL, 7, AGENT_ID, {
+    operationId: OPERATION_ID,
+    task: "Inspect the workspace.",
+  });
+
+  assert.equal(result.kind, "accepted");
+  const [invocation] = invocations;
+  assert.ok(invocation);
+  assert.equal(invocation.args.includes("--yolo"), false);
+  const toolFlag = invocation.args.indexOf("--available-tools");
+  assert.ok(toolFlag >= 0);
+  const allowedTools = invocation.args[toolFlag + 1]?.split(",");
+  assert.deepEqual(allowedTools, ["view", "rg", "glob"]);
+
+  // Recording fixture: model tool dispatch from the actual invocation allowlist.
+  const files = new Map([["/workspace/report.txt", "original"]]);
+  const commands: string[] = [];
+  const taskActions = [
+    { path: "/workspace/report.txt", tool: "apply_patch" },
+    { path: "/outside/report.txt", tool: "apply_patch" },
+    { path: "echo fixture", tool: "shell" },
+  ];
+  assert.equal(files.get("/workspace/report.txt"), "original");
+  for (const action of taskActions) {
+    if (allowedTools?.includes(action.tool)) {
+      if (action.tool === "shell") {
+        commands.push(action.path);
+      } else {
+        files.set(action.path, "changed");
+      }
+    }
+  }
+  assert.deepEqual([...files], [["/workspace/report.txt", "original"]]);
+  assert.deepEqual(commands, []);
 });

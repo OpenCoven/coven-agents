@@ -103,7 +103,7 @@ export function daytonaRunCredentialPath(
   return `/tmp/${daytonaRunSessionName(runId, attemptId)}.credential`;
 }
 
-/** Fresh per-attempt Copilot configuration outside caller-controlled workspaces. */
+/** Fresh per-attempt CLI configuration (the path suffix is retained for compatibility) outside caller-controlled workspaces. */
 export function daytonaRunConfigDirectory(
   runId: string,
   attemptId: string

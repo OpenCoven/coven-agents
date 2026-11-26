@@ -209,7 +209,7 @@ test("rejects malformed nested structured result values", () => {
   }
 });
 
-test("harnesses without a translation emit nothing rather than invented detail", () => {
+test("vendor-specific frames are never cross-parsed by another harness", () => {
   const line = JSON.stringify({
     data: { content: "hi" },
     type: "assistant.message",
@@ -242,4 +242,60 @@ test("flush releases a trailing line that never got its newline", () => {
   ]);
   assert.deepEqual(assembler.flush(), ['{"type":"b"}']);
   assert.deepEqual(assembler.flush(), []);
+});
+
+test("Copilot tool-only assistant messages with empty content emit no text", () => {
+  assert.deepEqual(
+    normalizeCopilotEvent(
+      JSON.stringify({
+        data: { content: "", toolRequests: [] },
+        type: "assistant.message",
+      }),
+      new Date(0).toISOString()
+    ),
+    []
+  );
+});
+
+test("a missing-tool refusal is marked as not executed, unlike an ordinary tool failure", () => {
+  const frame = (message: string) =>
+    normalizeCopilotEvent(
+      JSON.stringify({
+        data: {
+          error: { code: "failure", message },
+          success: false,
+          toolCallId: "denied",
+        },
+        type: "tool.execution_complete",
+      }),
+      new Date(0).toISOString()
+    );
+  assert.equal(
+    (frame("Tool 'bash' does not exist.")[0] as { executionDenied?: boolean })
+      .executionDenied,
+    true
+  );
+  assert.equal(
+    (frame("command exited with code 1")[0] as { executionDenied?: boolean })
+      .executionDenied,
+    undefined
+  );
+});
+
+test("snapshot CLI JSON-encoded tool arguments normalize but malformed arguments refuse", () => {
+  const event = (args: unknown) =>
+    normalizeCopilotEvent(
+      JSON.stringify({
+        data: { arguments: args, toolCallId: "read", toolName: "view" },
+        type: "tool.execution_start",
+      }),
+      new Date(0).toISOString()
+    );
+  assert.equal(
+    (event(JSON.stringify({ path: "inside.txt" }))[0] as { summary: string })
+      .summary,
+    "view inside.txt"
+  );
+  assert.throws(() => event("not-json"));
+  assert.throws(() => event("[]"));
 });

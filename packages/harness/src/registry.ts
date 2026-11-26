@@ -2,9 +2,10 @@ import type { HarnessId, HarnessStatus } from "./schema";
 
 export interface HarnessSpec {
   /**
-   * Environment variables the harness reads for headless auth, in the CLI's own
-   * documented precedence order. These are harness credentials, never model
-   * provider API keys.
+   * Per-call credential transport names, in precedence order. Most are read
+   * directly by the CLI. COVEN_CODEX_AUTH_JSON is staged as auth.json in an
+   * isolated CODEX_HOME instead. These are CLI sign-in credentials, never
+   * model provider API keys.
    */
   readonly authEnvVars: readonly string[];
   /** Executable name, resolved from PATH. */
@@ -58,15 +59,15 @@ export const HARNESS_SPECS: readonly HarnessSpec[] = [
     versionArgs: ["--version"],
   },
   {
-    authEnvVars: ["CODEX_API_KEY"],
+    authEnvVars: ["COVEN_CODEX_AUTH_JSON"],
     command: "codex",
     id: "codex",
     installPackage: "@openai/codex",
     installVersion: "0.152.1",
     label: "Codex CLI",
     models: ["auto"],
-    streams: false,
-    supported: false,
+    streams: true,
+    supported: true,
     versionArgs: ["--version"],
   },
   {
@@ -77,8 +78,8 @@ export const HARNESS_SPECS: readonly HarnessSpec[] = [
     installVersion: "2.1.258",
     label: "Claude Code",
     models: ["auto"],
-    streams: false,
-    supported: false,
+    streams: true,
+    supported: true,
     versionArgs: ["--version"],
   },
 ];
@@ -145,6 +146,9 @@ export function resolveHarnessAuth(
 }
 
 export function harnessAuthHint(spec: HarnessSpec): string {
+  if (spec.id === "codex") {
+    return "Codex CLI is not signed in. Supply its ChatGPT auth.json as the encrypted harness credential; the runner stages it in an isolated CODEX_HOME. Coven Agents never uses a model provider API key.";
+  }
   const names = spec.authEnvVars.join(" or ");
   return `${spec.label} is not signed in. Provide ${names} to the runner as a secret, or run \`${spec.command} login\` where the session lives. Coven Agents never uses a model provider API key.`;
 }

@@ -1,0 +1,19 @@
+{
+  "apiVersion": "1.0",
+  "run": {
+    "agentId": "8181ea77-8fcf-425c-b61a-8ec5b88dab88",
+    "apiVersion": "1.0",
+    "attemptRef": "84ca5da3-ff5a-433e-be46-99cba1a51341",
+    "commandEvidence": [],
+    "completedAt": null,
+    "createdAt": "2026-11-21T04:22:27.950Z",
+    "error": null,
+    "fileEvidence": [],
+    "id": "ff132b7f-73b4-4864-a994-746117ce1d51",
+    "operationId": "4f1763f0-f8dc-4f66-a6f4-89217e16cae9",
+    "output": "",
+    "startedAt": null,
+    "status": "queued",
+    "task": "Inspect"
+  }
+}

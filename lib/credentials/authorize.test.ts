@@ -88,3 +88,44 @@ test("authorization is decided before the body is judged", () => {
 
   assert.equal(decision.kind, "forbidden");
 });
+
+test("Codex credential writes refuse invalid or unredactable sign-in before storage", () => {
+  for (const credential of [
+    "not-json",
+    JSON.stringify({ auth_mode: "apikey", OPENAI_API_KEY: "synthetic" }),
+    JSON.stringify({
+      auth_mode: "chatgpt",
+      tokens: {
+        access_token: "x".repeat(4097),
+        account_id: "synthetic-account",
+        id_token: "synthetic-id",
+        refresh_token: "synthetic-refresh",
+      },
+    }),
+  ]) {
+    const decision = decideCredentialWrite(subscriber(), {
+      credential,
+      harnessId: "codex",
+    });
+    assert.equal(decision.kind, "invalid");
+    if (decision.kind === "invalid") {
+      assert.equal(decision.reason, "invalid_codex_auth");
+    }
+  }
+});
+
+test("removing Codex auth does not require the old sign-in but still requires subscriber authority", () => {
+  const removal = { credential: "placeholder-not-stored", harnessId: "codex" };
+  assert.equal(
+    decideCredentialWrite(subscriber(), removal, "remove").kind,
+    "allowed"
+  );
+  assert.equal(
+    decideCredentialWrite(null, removal, "remove").kind,
+    "unauthorized"
+  );
+  assert.equal(
+    decideCredentialWrite(toSession(null), removal, "remove").kind,
+    "forbidden"
+  );
+});

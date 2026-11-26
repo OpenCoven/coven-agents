@@ -51,3 +51,9 @@ From the authenticated owner's browser, POST to `/api/agents/{agentId}/sandbox/b
 After a successful bind, even a start that omits the optional sandbox expectation is pinned to the recorded ID and generation. Refusal carries a reason such as `generation_mismatch`, `ownership_mismatch` or `configuration_drift`. Dispatch cannot provision a substitute. Automatic prewarm and routine resource-floor repair leave pinned sandboxes untouched. Once a bound run has started, its snapshot exposes `executedSandbox.generation` and an agent-scoped SHA-256 `bindingDigest`. The digest covers the JSON array containing the literal `bound-sandbox-v1`, tenant, agent ID and exact sandbox ID. Queued and pre-launch refusals omit execution evidence.
 
 Migration 0047 adds the persistent agent pin after the owner-credential migration. If the runner stack lands first, regenerate billing’s pending migration against 0047. Before rolling back the application, suspend new admissions for pinned agents and drain their queued runs while pin enforcement is available. Preserve the recorded IDs, generations and run evidence.
+
+## Attempt identity and admission
+
+Read `run.id` and optional `run.attemptRef` from the authorized run snapshot. The server omits the reference until it prepares an attempt. Store the pair as opaque identifiers. Replaying the same operation and payload, reconnecting, or reading after cleanup returns the current or final reference. A new preparation allocates a fresh reference. The [prepared run fixture](fixtures/owner-run-attempt.json) shows a queued run after preparation and before launch.
+
+When an agent already has a queued or running run or outstanding attempt cleanup, a distinct bound start returns HTTP 409 with `error.code` equal to `sandbox_binding_refused`, `error.details` equal to `fence_outstanding` and `error.retryable` equal to `false`. The refused operation creates no run. After terminal cleanup, a new bound operation can start.

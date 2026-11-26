@@ -1,5 +1,5 @@
 {
-  "id": "5a18274c-c82b-42ed-a97a-bad261d0bd89",
+  "id": "1748d06c-8f45-4598-8ee2-34d465965a19",
   "prevId": "b7c35ae8-1b7e-453b-b55a-74ec7841e180",
   "version": "7",
   "dialect": "postgresql",
@@ -541,37 +541,6 @@
       },
       "isRLSEnabled": false
     },
-    "public.PilotAdmissionWindow": {
-      "name": "PilotAdmissionWindow",
-      "schema": "",
-      "columns": {
-        "endsAt": {
-          "name": "endsAt",
-          "type": "timestamp with time zone",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "admitted": {
-          "name": "admitted",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "PilotAdmissionWindow_count": {
-          "name": "PilotAdmissionWindow_count",
-          "value": "\"PilotAdmissionWindow\".\"admitted\" BETWEEN 0 AND 4"
-        }
-      },
-      "isRLSEnabled": false
-    },
     "public.RunPackDraw": {
       "name": "RunPackDraw",
       "schema": "",
@@ -1106,6 +1075,13 @@
           "primaryKey": false,
           "notNull": true,
           "default": "'unprovisioned'"
+        },
+        "ownerWorkspaceRead": {
+          "name": "ownerWorkspaceRead",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
         },
         "sandboxTrust": {
           "name": "sandboxTrust",
