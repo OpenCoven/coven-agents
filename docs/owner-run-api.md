@@ -38,6 +38,101 @@ print(call(f"/api/runs/{run_id}")["run"]["status"])
 
 GET `/api/runs/{runId}/events` with the events scope to stream SSE. Reconnect with the last observed numeric event ID in `Last-Event-ID`. POST to `/api/runs/{runId}/stop` with the stop scope to request cancellation. A stop-only credential receives an empty 202 while cancellation is in progress or an empty 204 after it completes. A credential with both stop and read scope receives the run snapshot. GET `/api/runs/{runId}` with the read scope for terminal state. Inspection uses POST `/api/agents/{agentId}/sandbox/inspection` with its own scope and the expected sandbox ID and generation. Use the same operation ID when retrying the same start. Returning a pre-existing snapshot on replay requires the originating credential and read scope.
 
+## Proposed inspection metadata
+
+Producer PR #324 proposes an opt-in response for `POST /api/agents/{agentId}/sandbox/inspection`. Use a credential with the `sandbox:inspect` scope and send the recorded sandbox ID and generation. Requests that omit `includeProviderMetadata` use the default v1 response. [PR #324](https://github.com/OpenCoven/coven-agents/pull/324)
+
+```json
+{"expectedSandboxId":"sandbox-a","expectedGeneration":3,"includeProviderMetadata":true}
+```
+
+This synthetic HTTP 200 response shows how the nested `observed.providerMetadata` fields distinguish an omitted value from an explicit absence. Null means unknown. For TTL, linked sandbox and warm pool, an undefined provider scalar produces null and an explicitly null provider scalar produces false under the application convention. A reported empty volume list produces zero. Detailed consumers use the nested values. The synthetic example yields an incompatible Castles preflight.
+
+Daytona SDK 0.231.1 exposes neither OS nor architecture on the exact-ID read, so both are null. Castles evaluates its qualified snapshot policy separately. The example's `policy.harnesses` entries describe configured source support. Installed-version verification is tracked in [#300](https://github.com/OpenCoven/coven-agents/issues/300).
+
+```json
+{
+  "observed": {
+    "autoArchiveInterval": 10080,
+    "autoDeleteInterval": -1,
+    "autoDestroyAtConfigured": false,
+    "autoPauseInterval": null,
+    "autoStopInterval": 15,
+    "cpu": 2,
+    "diskGib": 10,
+    "domainAllowListConfigured": false,
+    "domainAllowListMatchesPolicy": true,
+    "gpu": null,
+    "identity": {
+      "configuration": "current",
+      "credentialBoundary": true,
+      "generationLabel": true,
+      "ownershipLabels": true
+    },
+    "linkedSandbox": false,
+    "memoryGib": 4,
+    "networkAllowListConfigured": false,
+    "networkBlockAll": false,
+    "outboundProxyConfigured": false,
+    "providerMetadata": {
+      "autoDestroyAtConfigured": null,
+      "linkedSandbox": false,
+      "platform": {
+        "architecture": null,
+        "os": null
+      },
+      "volumes": 0,
+      "warmPool": null
+    },
+    "public": false,
+    "snapshot": "coven-agents-copilot-2",
+    "state": "started",
+    "target": "us",
+    "volumes": 0,
+    "warmPool": false
+  },
+  "outcome": "observed",
+  "policy": {
+    "adapterVersion": "daytona-adapter-v1",
+    "capabilityContractVersion": "hosted-v1",
+    "credentialBoundaryVersion": "attempt-reset-v1",
+    "harnesses": [
+      {
+        "id": "copilot",
+        "package": "@github/copilot",
+        "version": "1.0.80"
+      },
+      {
+        "id": "codex",
+        "package": "@openai/codex",
+        "version": "0.152.1"
+      },
+      {
+        "id": "claude",
+        "package": "@anthropic-ai/claude-code",
+        "version": "2.1.258"
+      }
+    ],
+    "resources": {
+      "cpu": 2,
+      "diskGib": 10,
+      "memoryGib": 4
+    },
+    "sdkVersion": "0.231.1",
+    "snapshotName": "coven-agents-copilot-2",
+    "target": "us"
+  },
+  "record": {
+    "agentId": "00000000-0000-4000-8000-000000000001",
+    "fence": "none",
+    "generation": 3,
+    "lifecycle": "ready",
+    "sandboxId": "sandbox-a"
+  },
+  "version": 1
+}
+```
+
 ## Migrations and rollback
 
 The runner-first migration order is 0044 for run binding, 0045 for its consistency check and 0046 for scoped credentials. If this chain lands first, the billing branch needs a new migration generated against 0046. Check migration history before applying either branch to an existing environment. Use disposable PostgreSQL 16 to run `pnpm db:verify` and `pnpm test:e2e:hermetic` locally.

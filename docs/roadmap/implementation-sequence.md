@@ -32,6 +32,10 @@ The starting delivery inventory was 11 open issues and 12 open PRs. #320 is now 
 
 Other open PRs keep their separate lanes. #325 does not select a pilot audience through this delivery stack. #279's opt-in auth activation, #291's model availability/UI qualification and #329/#331–#333 dependency/security changes require their own exact-head review; an SDK major update invalidates earlier SDK-specific claims until requalified. #334's two inspection sections were handed off for this reconciliation; its later API-example contribution remains separately owned pending coordination. Do not close or merge unrelated PRs simply because this stack lands.
 
+## Sandbox inspection delivery
+
+Deliver the negotiated producer contract before enabling it in Castles. Castles #21 at `910d60ed770516e21446760fced3779a9868375f` is stacked on #18 at `e064756cd6f9cf404cf582d9407db3e5e6aa9b4f`. Coordinate its rebase with the Castles #2 steward after #20 lands. Repeat qualification on changed revisions and keep the accepted consumer pin until the maintainer accepts the landed pair for #322. Issue #323 additionally needs a decision for OS and for architecture. [Verification matrix](verification-matrix.md#sandbox-inspection-candidates) · [Castles #21](https://github.com/OpenCoven/coven-castles/pull/21) · [Issue #323](https://github.com/OpenCoven/coven-agents/issues/323)
+
 ## Authority reminder
 
 Coven Agents owns product accounts, subscriptions, encrypted tenant harness credentials, Daytona execution, PostgreSQL run state, and bounded evidence. Other OpenCoven authorities remain external and are consumed through versioned references and adapters.
