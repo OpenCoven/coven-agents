@@ -53,7 +53,7 @@
     "@codemirror/view": "^6.43.15",
     "@create-markdown/core": "2.0.3",
     "@create-markdown/preview": "2.0.3",
-    "@daytona/sdk": "0.231.1",
+    "@daytona/sdk": "2.0.0",
     "@next/env": "16.4.6",
     "@opencoven/agent-contracts": "workspace:*",
     "@opencoven/harness": "workspace:*",
