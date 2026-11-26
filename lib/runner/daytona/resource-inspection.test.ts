@@ -198,7 +198,7 @@ async function inspect(
   options: Readonly<{
     answer?: (sandboxId: string) => Promise<DaytonaSandboxInspectionItem>;
     configure?: () => DaytonaSandboxConfiguration;
-    expected?: typeof expected;
+    expected?: typeof expected & { includeProviderMetadata?: true };
     read?: SandboxInspectionFenceRead | null | Error;
   }> = {}
 ) {
@@ -798,4 +798,35 @@ test("malformed outbound proxy metadata is unavailable instead of reading as abs
       version: 1,
     });
   }
+});
+
+test("opt-in metadata distinguishes an omitted observation from explicit empty attachments", async () => {
+  const request = { ...expected, includeProviderMetadata: true as const };
+  const absent = await inspect({ expected: request });
+  assert.equal(absent.result.outcome, "observed");
+  assert.deepEqual(absent.result.observed.providerMetadata, {
+    autoDestroyAtConfigured: null,
+    linkedSandbox: null,
+    platform: { architecture: null, os: null },
+    volumes: null,
+    warmPool: null,
+  });
+  const empty = await inspect({
+    answer: async () =>
+      Object.assign(providerSandbox(agent()), {
+        autoDestroyAt: null,
+        linkedSandboxId: null,
+        volumes: [],
+        warmPoolId: null,
+      }),
+    expected: request,
+  });
+  assert.equal(empty.result.outcome, "observed");
+  assert.deepEqual(empty.result.observed.providerMetadata, {
+    autoDestroyAtConfigured: false,
+    linkedSandbox: false,
+    platform: { architecture: null, os: null },
+    volumes: 0,
+    warmPool: false,
+  });
 });
